@@ -1,61 +1,61 @@
 'use client';
 
-import React, { useMemo, useCallback, useState, useEffect } from 'react';
+import React, { useMemo, useCallback, useEffect } from 'react';
 import {
   ReactFlow,
   Background,
   BackgroundVariant,
-  useReactFlow,
   Node,
   Edge,
+  useReactFlow,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
+
 import { KernelNode } from './KernelNode';
 import { ShardNode } from './ShardNode';
 import { AgentNode } from './AgentNode';
 import { A2aBeamEdge } from './A2aBeamEdge';
 import { ClusterShard, ClusterInfoData } from '../../lib/api';
 import { useSwarmStore } from '../../lib/store/useSwarmStore';
-import { Maximize, ZoomIn, ZoomOut, RotateCcw, Lock, Unlock } from 'lucide-react';
-
-interface TopologyCanvasProps {
-  shards: ClusterShard[];
-  clusterInfo: ClusterInfoData | null;
-  onSelectShard: (shard: ClusterShard) => void;
-}
+import { ZoomIn, ZoomOut, Maximize, RotateCcw, Lock, Unlock } from 'lucide-react';
 
 const nodeTypes = {
   kernel: KernelNode,
-  cluster: ShardNode,
   shard: ShardNode,
   agent: AgentNode,
 };
 
 const edgeTypes = {
   a2a: A2aBeamEdge,
-  default: A2aBeamEdge,
 };
+
+interface TopologyCanvasProps {
+  shards: ClusterShard[];
+  clusterInfo: ClusterInfoData | null;
+  onSelectShard: (shard: ClusterShard) => void;
+  selectedShardNamespace: string | null;
+}
 
 export function TopologyCanvas({
   shards,
   clusterInfo,
   onSelectShard,
+  selectedShardNamespace,
 }: TopologyCanvasProps) {
   const { fitView, zoomIn, zoomOut, setCenter } = useReactFlow();
 
   const topologyEdges = useSwarmStore((state) => state.topologyEdges);
-  const quarantinedAgents = useSwarmStore((state) => state.quarantinedAgents);
   const agentAliases = useSwarmStore((state) => state.agentAliases);
+  const quarantinedAgents = useSwarmStore((state) => state.quarantinedAgents);
   const thoughts = useSwarmStore((state) => state.thoughts);
   const thoughtOrder = useSwarmStore((state) => state.thoughtOrder);
 
-  const [isLocked, setIsLocked] = useState(false);
+  const [isLocked, setIsLocked] = React.useState(false);
 
-  // Group agents by namespace based on recent activity
+  // Group active agents by their home shard namespace
   const agentsByNamespace = useMemo(() => {
     const map = new Map<string, Set<string>>();
-    
-    // Default group
+
     for (const hex of Object.keys(agentAliases)) {
       if (!map.has('/default')) map.set('/default', new Set());
       map.get('/default')!.add(hex);
@@ -73,7 +73,7 @@ export function TopologyCanvas({
     return map;
   }, [agentAliases, thoughts, thoughtOrder]);
 
-  // Compute Layout Nodes & Base Edges deterministically
+  // Compute Multi-Ring Collision-Free Layout
   const { layoutNodes, layoutEdges } = useMemo(() => {
     const nodes: Node[] = [];
     const edges: Edge[] = [];
@@ -90,15 +90,34 @@ export function TopologyCanvas({
       },
     });
 
-    const totalShards = Math.max(shards.length, 1);
-    const shardRadius = 320;
+    // 2. Multi-Ring Shard Distribution Parameters
+    const ringCapacities = [8, 14, 20, 26, 32];
+    const ringRadii = [300, 560, 820, 1080, 1340];
 
-    // 2. Orbiting Shard Nodes
+    let currentRing = 0;
+    let indexInRing = 0;
+
     shards.forEach((shard, sIdx) => {
-      const angle = (sIdx / totalShards) * 2 * Math.PI - Math.PI / 2;
-      const shardX = shardRadius * Math.cos(angle) - 128;
-      const shardY = shardRadius * Math.sin(angle) - 60;
+      // Advance to next concentric ring when capacity is reached
+      if (indexInRing >= ringCapacities[currentRing] && currentRing < ringCapacities.length - 1) {
+        currentRing++;
+        indexInRing = 0;
+      }
+
+      const totalInRing = Math.min(
+        ringCapacities[currentRing],
+        shards.length - sIdx + indexInRing
+      );
+      const ringRadius = ringRadii[currentRing];
+
+      // Alternating angular offset per ring to avoid collinear stacking
+      const ringAngleOffset = (currentRing % 2 === 1 ? Math.PI / totalInRing : 0) - Math.PI / 2;
+      const angle = (indexInRing / totalInRing) * 2 * Math.PI + ringAngleOffset;
+
+      const shardX = ringRadius * Math.cos(angle) - 128;
+      const shardY = ringRadius * Math.sin(angle) - 60;
       const shardNodeId = `shard-${shard.namespace}`;
+      const isSelected = selectedShardNamespace === shard.namespace;
 
       nodes.push({
         id: shardNodeId,
@@ -108,6 +127,7 @@ export function TopologyCanvas({
           namespace: shard.namespace,
           active_timelines: shard.active_timelines,
           total_crdt_operations: shard.total_crdt_operations ?? shard.total_crdt_operation ?? 0,
+          isSelected,
           shard,
         },
       });
@@ -118,7 +138,7 @@ export function TopologyCanvas({
         source: 'kernel-core',
         target: shardNodeId,
         type: 'default',
-        style: { stroke: '#334155', strokeWidth: 1.5 },
+        style: { stroke: isSelected ? '#00f3ff' : '#27272a', strokeWidth: isSelected ? 2 : 1 },
       });
 
       // 3. Orbiting Agents attached to this Shard
@@ -127,8 +147,8 @@ export function TopologyCanvas({
 
       attachedAgents.forEach((agentHex, aIdx) => {
         const agentOffsetAngle =
-          angle + (totalAgents > 1 ? ((aIdx - (totalAgents - 1) / 2) * 0.38) : 0);
-        const agentRadius = shardRadius + 240;
+          angle + (totalAgents > 1 ? (aIdx - (totalAgents - 1) / 2) * 0.35 : 0);
+        const agentRadius = ringRadius + 150;
         const agentX = agentRadius * Math.cos(agentOffsetAngle) - 88;
         const agentY = agentRadius * Math.sin(agentOffsetAngle) - 36;
         const agentNodeId = `agent-${agentHex}`;
@@ -136,7 +156,6 @@ export function TopologyCanvas({
         const isQuarantined = quarantinedAgents.includes(agentHex);
         const alias = agentAliases[agentHex] || `agent_${agentHex.slice(0, 6)}`;
 
-        // Only add agent if not already in graph
         if (!nodes.some((n) => n.id === agentNodeId)) {
           nodes.push({
             id: agentNodeId,
@@ -155,10 +174,12 @@ export function TopologyCanvas({
             source: shardNodeId,
             target: agentNodeId,
             type: 'default',
-            style: { stroke: '#1e293b', strokeWidth: 1 },
+            style: { stroke: '#18181b', strokeWidth: 1 },
           });
         }
       });
+
+      indexInRing++;
     });
 
     // Merge live dynamic A2A edges from store
@@ -169,7 +190,15 @@ export function TopologyCanvas({
     }
 
     return { layoutNodes: nodes, layoutEdges: edges };
-  }, [shards, clusterInfo, agentsByNamespace, quarantinedAgents, agentAliases, topologyEdges]);
+  }, [
+    shards,
+    clusterInfo,
+    agentsByNamespace,
+    quarantinedAgents,
+    agentAliases,
+    topologyEdges,
+    selectedShardNamespace,
+  ]);
 
   // Handle node selection
   const handleNodeClick = useCallback(
@@ -189,7 +218,7 @@ export function TopologyCanvas({
   // Initial fit view
   useEffect(() => {
     const timer = setTimeout(() => {
-      fitView({ padding: 0.25, duration: 600 });
+      fitView({ padding: 0.2, duration: 600 });
     }, 150);
     return () => clearTimeout(timer);
   }, [fitView, shards.length]);
@@ -199,7 +228,7 @@ export function TopologyCanvas({
   };
 
   return (
-    <div className="w-full h-full relative bg-[#080C14] rounded-sm overflow-hidden select-none">
+    <div className="w-full h-full relative bg-zinc-950 rounded-sm overflow-hidden select-none border border-zinc-800/80">
       <ReactFlow
         nodes={layoutNodes}
         edges={layoutEdges}
@@ -211,25 +240,25 @@ export function TopologyCanvas({
         zoomOnPinch={!isLocked}
         nodesDraggable={!isLocked}
         fitView
-        minZoom={0.2}
+        minZoom={0.1}
         maxZoom={2.5}
         proOptions={{ hideAttribution: true }}
       >
         <Background
           variant={BackgroundVariant.Dots}
-          gap={20}
+          gap={24}
           size={1}
-          color="#1E293B"
+          color="#27272a"
           className="opacity-60"
         />
       </ReactFlow>
 
       {/* Floating Canvas Controls Toolbar (Top Right) */}
-      <div className="absolute top-3 right-3 z-20 flex items-center gap-1 bg-[#090E1A]/90 border border-slate-800 p-1 rounded-xs shadow-xl backdrop-blur-xs font-mono text-xs">
+      <div className="absolute top-3 right-3 z-20 flex items-center gap-1 bg-zinc-900/90 border border-zinc-800 p-1 rounded-xs shadow-xl backdrop-blur-xs font-mono text-xs">
         <button
           onClick={() => zoomIn({ duration: 200 })}
           title="Zoom In"
-          className="p-1.5 text-slate-400 hover:text-white rounded-xs hover:bg-slate-800 transition-colors"
+          className="p-1.5 text-zinc-400 hover:text-white rounded-xs hover:bg-zinc-800 transition-colors"
         >
           <ZoomIn className="w-3.5 h-3.5" />
         </button>
@@ -237,15 +266,15 @@ export function TopologyCanvas({
         <button
           onClick={() => zoomOut({ duration: 200 })}
           title="Zoom Out"
-          className="p-1.5 text-slate-400 hover:text-white rounded-xs hover:bg-slate-800 transition-colors"
+          className="p-1.5 text-zinc-400 hover:text-white rounded-xs hover:bg-zinc-800 transition-colors"
         >
           <ZoomOut className="w-3.5 h-3.5" />
         </button>
 
         <button
-          onClick={() => fitView({ padding: 0.25, duration: 400 })}
+          onClick={() => fitView({ padding: 0.2, duration: 400 })}
           title="Fit to Screen"
-          className="p-1.5 text-slate-400 hover:text-cyan-400 rounded-xs hover:bg-slate-800 transition-colors"
+          className="p-1.5 text-zinc-400 hover:text-cyan-400 rounded-xs hover:bg-zinc-800 transition-colors"
         >
           <Maximize className="w-3.5 h-3.5" />
         </button>
@@ -253,18 +282,20 @@ export function TopologyCanvas({
         <button
           onClick={handleResetView}
           title="Reset Center (0, 0)"
-          className="p-1.5 text-slate-400 hover:text-emerald-400 rounded-xs hover:bg-slate-800 transition-colors"
+          className="p-1.5 text-zinc-400 hover:text-emerald-400 rounded-xs hover:bg-zinc-800 transition-colors"
         >
           <RotateCcw className="w-3.5 h-3.5" />
         </button>
 
-        <div className="w-[1px] h-4 bg-slate-800 my-auto mx-0.5" />
+        <div className="w-[1px] h-4 bg-zinc-800 my-auto mx-0.5" />
 
         <button
           onClick={() => setIsLocked(!isLocked)}
           title={isLocked ? 'Unlock Canvas Navigation' : 'Lock Canvas Navigation'}
           className={`p-1.5 rounded-xs transition-colors ${
-            isLocked ? 'text-amber-400 bg-amber-950/60' : 'text-slate-400 hover:text-white hover:bg-slate-800'
+            isLocked
+              ? 'text-amber-400 bg-amber-950/60'
+              : 'text-zinc-400 hover:text-white hover:bg-zinc-800'
           }`}
         >
           {isLocked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
@@ -272,7 +303,7 @@ export function TopologyCanvas({
       </div>
 
       {/* Legend Badge (Bottom Left) */}
-      <div className="absolute bottom-3 left-3 z-20 flex items-center gap-3 bg-[#090E1A]/90 border border-slate-800 px-2.5 py-1 rounded-xs shadow-lg backdrop-blur-xs font-mono text-[9px] text-slate-400">
+      <div className="absolute bottom-3 left-3 z-20 flex items-center gap-3 bg-zinc-900/90 border border-zinc-800 px-2.5 py-1 rounded-xs shadow-lg backdrop-blur-xs font-mono text-[9px] text-zinc-400">
         <div className="flex items-center gap-1">
           <span className="w-2 h-2 rounded-full bg-cyan-400 shadow-[0_0_6px_#00f3ff]" />
           <span>Core Kernel</span>

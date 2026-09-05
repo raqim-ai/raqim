@@ -3,24 +3,30 @@ use clap::{Parser, Subcommand};
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::fs;
 use std::path::Path;
+use std::{fs, println};
+
+#[derive(Clone, Debug, Serialize, Deserialize, rkyv::Archive, rkyv::Serialize)]
+pub struct QuarantineRecord {
+    pub agent_hex: String,
+    pub violation_type: String,
+    pub attemped_path: String,
+    pub payload_preview: String,
+    pub timestamp: u64,
+}
 
 #[derive(Parser)]
 #[command(
     name = "raqim",
-    about = "Raqim OS Administrative Command Line Core",
-    version = "1.0"
+    about = "Raqim OS Administrative Command Line Interface",
+    version = "1.0.0"
 )]
 struct Cli {
     /// URL of the Raqim OS Daemon Control plane
     #[arg(short, long, default_value = "http://127.0.0.1:8081", global = true)]
     daemon_url: String,
-
-    /// Enterprise License Key for Axum Auth
-    #[arg(short, long, env = "RAQIM_LICENSE_KEY", global = true)]
-    license_key: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -46,11 +52,7 @@ enum Commands {
         agent_id: String,
 
         #[arg(short, long)]
-        tx_id: u64,
-
-        /// Optional path to a JSON ForkConfig file
-        #[arg(short, long)]
-        fork_config: Option<String>,
+        tx_id: Option<String>,
     },
 
     /// Swarm Infrastructure Observability and Telemetry Mapping
@@ -68,7 +70,7 @@ enum KeyAction {
         #[arg(short, long)]
         name: String,
 
-        /// The security group mapping declared in aegis.toml (e.g finance_worker)
+        /// The security group mapping declared in aegis.toml
         #[arg(short, long)]
         group: String,
 
@@ -76,12 +78,8 @@ enum KeyAction {
         count: u32,
 
         /// Target directory for the atomic artifact
-        #[arg(short, long, default_value = "./vault/identities")]
+        #[arg(short, long, default_value = "./ca-keys")]
         out_dir: String,
-
-        /// Execution environment: 'internal' (WASM) or 'external' (Python/MCP/SDK)
-        #[arg(short, long, default_value = "external")]
-        env: String,
     },
 }
 
@@ -89,14 +87,22 @@ enum KeyAction {
 enum AegisAction {
     List,
 
-    Lift { agent_id: String },
+    Lift {
+        agent_id: String,
+        #[arg(
+            short,
+            long,
+            default_value = "Quarantine lifted via administrative CLI"
+        )]
+        reason: String,
+    },
 }
 
 #[derive(Subcommand)]
 enum ClusterAction {
-    /// Extracts raw system performance metrics, transaction counters, and storage status.
+    /// Polls live node viitals, buffer loads, and WAL status
     Info,
-    /// Inspect Active Loro document shards, allocated namespaces and active timelines
+    /// Inspect allocated Loro CRDT memory shards and active timelines
     Topology,
 }
 
@@ -104,13 +110,6 @@ enum ClusterAction {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let http_client = Client::builder().build()?;
-
-    // Helper Closure to inject the Enterprise JWT.
-    let get_auth = || -> String {
-        cli.license_key
-            .clone()
-            .expect("FATAL: --license_key or RAQIM_LICENSE_KEY env variable required")
-    };
 
     match &cli.command {
         // 1. Crytographic Key Generation
@@ -121,13 +120,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     group,
                     count,
                     out_dir,
-                    env,
                 },
         } => {
+            println!("==========================================================");
             println!("Bismillah. Initiating Sovereign Fleet Forge... ");
-            println!("Target Group [{}] ", group);
-            println!("Requested Size [{}]", count);
-            println!("Environmental Scope [{}]", env);
+            println!("Target Security Group [{}] ", group);
+            println!("Requested Fleet Size [{}]", count);
+            println!("Output Directory [{}]", out_dir);
+            println!("===========================================================");
 
             let workspace = Path::new(out_dir);
             fs::create_dir_all(workspace)?;
@@ -137,7 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             for i in 1..=*count {
                 let agent_alias: String = if *count > 1 {
-                    format!("{}_{:02}", name.clone(), i)
+                    format!("{}_{:02}", name, i)
                 } else {
                     name.clone()
                 };
@@ -150,7 +150,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Identity Hash Derivation
                 let mut hasher = Hasher::new_derive_key("raqim.agent.v1.identity");
                 hasher.update(&public_key_bytes);
-
                 let mut derived_16_bytes = [0u8; 16];
                 hasher.finalize_xof().fill(&mut derived_16_bytes);
                 let agent_hex = hex::encode(derived_16_bytes);
@@ -158,14 +157,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Request Capability passport from the Daemon Control Plane
                 let payload = json!({"agent_hex": agent_hex.clone(), "group": group.clone() });
 
-                let res = http_client
-                    .post(&mint_url)
-                    .header("Authorization", format!("Bearer {}", get_auth()))
-                    .json(&payload)
-                    .send()
-                    .await;
+                let req = http_client.post(&mint_url).json(&payload);
 
-                match res {
+                match req.send().await {
                     Ok(response) if response.status().is_success() => {
                         let cert_hex: String = response.json().await?;
                         let cert_bytes = hex::decode(cert_hex)?;
@@ -173,15 +167,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Atomic bundling in the Workspace
                         let key_path = workspace.join(format!("{}.pem", agent_alias));
                         let cert_path = workspace.join(format!("{}.cert", agent_alias));
-                        let wasm_path = workspace.join(format!("{}.wasm", agent_alias));
 
                         fs::write(&key_path, signing_key.to_bytes())?;
                         fs::write(&cert_path, cert_bytes)?;
-
-                        // Create a dummy WASM file to satisfy hot-reloader schema requirement
-                        if env == "internal" && !wasm_path.exists() {
-                            fs::write(&wasm_path, b"// Raqim WASM Plugin Scaffold")?;
-                        }
 
                         // Set strict Unix permissions for the private key
                         #[cfg(unix)]
@@ -196,7 +184,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     Ok(response) => {
                         eprintln!(
-                            "   [FAIL] Agent: [{}]: CA Minting Refused - Status Code: {}",
+                            "   [FAIL] Agent: [{}]: CA Minting Rejected - (Status Code: {})",
                             agent_alias,
                             response.status()
                         )
@@ -204,8 +192,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     Err(e) => {
                         eprintln!(
-                            "   [FAIL] Agent: {} - Network Disruption - Trace: {} ",
-                            agent_alias, e
+                            "   [FAIL] Agent: {} - Daemom unreacheable at {} ({}) ",
+                            agent_alias, mint_url, e
                         );
                     }
                 }
@@ -222,20 +210,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             action: AegisAction::List,
         } => {
             let url = format!("{}/v1/admin/quarantine", cli.daemon_url);
-            let res = http_client
-                .get(&url)
-                .header("Authorization", format!("Bearer {}", get_auth()))
-                .send()
-                .await?;
+            let res = http_client.get(&url).send().await?;
 
             if res.status().is_success() {
-                let agents: Vec<String> = res.json().await?;
-                println!("🔒 Active Quarantine Perimeters (Blocklisted Hashes):");
-                if agents.is_empty() {
+                let records: Vec<QuarantineRecord> = res.json().await?;
+                println!(
+                    "🔒 Active Aegis Quarantine Perimeters ({} Isolated):",
+                    records.len()
+                );
+                if records.is_empty() {
                     println!("  None. All cryptographic gates clear.");
                 } else {
-                    for agent in agents {
-                        println!("   -> {}", agent);
+                    for r in records {
+                        println!(
+                            "   -> Agent:{} | Target: {} | Reason: {}",
+                            r.agent_hex, r.attemped_path, r.violation_type,
+                        );
                     }
                 }
             } else {
@@ -247,64 +237,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Commands::Aegis {
-            action: AegisAction::Lift { agent_id },
+            action: AegisAction::Lift { agent_id, reason },
         } => {
             let url = format!("{}/v1/admin/quarantine/lift", cli.daemon_url);
             let res = http_client
                 .post(&url)
-                .header("Authorization", format!("Bearer {}", get_auth()))
-                .json(&json!({"agent_id": agent_id}))
-                .send()
-                .await?;
-
-            if res.status().is_success() {
-                println!("🔓 Quarantine lifted for agent: {}", agent_id)
-            } else {
-                eprintln!(
-                    "❌ Operational Error: Reset signal refused by kernel: {}",
-                    res.status()
-                )
-            }
-        }
-
-        // 3. The Time Machine (Reality Forking)
-        Commands::TimeTravel {
-            agent_id,
-            tx_id,
-            fork_config,
-        } => {
-            let mut payload =
-                json!({ "agent_id": agent_id, "target_tx_id": tx_id, "fork_config": null });
-
-            // Override is the admin provides a JSON file with overrides
-            if let Some(config_path) = fork_config {
-                let config_str = fs::read_to_string(config_path)?;
-                let fork_json: serde_json::Value = serde_json::from_str(&config_str)?;
-                payload["fork_config"] = fork_json;
-            }
-
-            let url = format!("{}/v1/admin/time_travel", cli.daemon_url);
-            println!(
-                "⌛ Initializing Time Travel for {} to TxID {}...",
-                agent_id, tx_id
-            );
-
-            let res = http_client
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", get_auth()))
-                .json(&payload)
+                .json(&json!({"agent_hex": agent_id, "system_prompt_override": reason}))
                 .send()
                 .await?;
 
             if res.status().is_success() {
                 println!(
-                    "⚡ Isolation Matrix Deployed. Replay Successfully forked onto independent thread."
+                    "🔓 Quarantine lifted and context re-seeded for agent: {}",
+                    agent_id
                 );
             } else {
                 eprintln!(
-                    "❌ Temporal Exception: Kernel refused simulation launch: {}",
+                    "❌ Operational Error: Reset signal refused by kernel: {}",
                     res.status()
                 );
+            }
+        }
+
+        // 3. Historical timeline Inspection
+        Commands::TimeTravel { agent_id, tx_id: _ } => {
+            let url = format!(
+                "{}/v1/admin/time_travel/timeline/{}",
+                cli.daemon_url, agent_id
+            );
+
+            let res = http_client.get(&url).send().await?;
+
+            if res.status().is_success() {
+                let timeline: Vec<serde_json::Value> = res.json().await?;
+                println!(" ⌛ Historical Causal Timeline for Agent [{}]", agent_id);
+                if timeline.is_empty() {
+                    println!("  No commited states found for this identity");
+                } else {
+                    for (idx, node) in timeline.iter().enumerate() {
+                        println!(
+                            "  Step #{:02} | Tx: 0x{:032x} | Status: {:<12} | Payload: {}",
+                            idx + 1,
+                            node["tx_id"].as_u64().unwrap_or(0),
+                            node["agent_status"].as_str().unwrap_or(""),
+                            node[" payload_preview"].as_str().unwrap_or("")
+                        );
+                    }
+                }
+            } else {
+                eprintln!("❌ Timeline query failed: HTTP {}", res.status());
             }
         }
 
@@ -312,24 +293,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             action: ClusterAction::Info,
         } => {
             let url = format!("{}/v1/admin/cluster/info", cli.daemon_url);
-            let res = http_client
-                .get(&url)
-                .header("Authorization", format!("Bearer {}", get_auth()))
-                .send()
-                .await?;
+            let res = http_client.get(&url).send().await?;
 
             if res.status().is_success() {
                 let info: serde_json::Value = res.json().await?;
                 println!("🌐 Raqim Core Kernel Metrics:");
                 println!("  Node Identity Hash: {}", info["node_id"]);
-                println!("  Total Swarm Commits : TxID {}", info["highest_tx_buffer"]);
-                println!("  Inflight Bufer Load: {} items", info["buffer_load"]);
-                println!("  Disk WAL Footprint  : {} bytes ", info["wal_bytes"]);
+                println!("  Highest Transaction: {}", info["highest_tx_id"]);
+                println!(
+                    "  Active WAL Size: {:.2}MB ({} bytes)",
+                    info["wal_size_mb"].as_f64().unwrap_or(0.0),
+                    info["wal_bytes"]
+                );
+                println!(
+                    "  Cumulative CRRDT Ops  : {}  ",
+                    info["cumulative_crdt_ops"]
+                );
             } else {
-                eprintln!(
-                    "❌  Telemetry Failure: Failed to poll information stream: {}",
-                    res.status()
-                )
+                eprintln!("❌  Telemetry query failed: HTTP {}", res.status())
             }
         }
 
@@ -338,25 +319,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             let url = format!("{}/v1/admin/cluster/topology", cli.daemon_url);
 
-            let res = http_client
-                .get(&url)
-                .header("Authorization", format!("Bearer {}", get_auth()))
-                .send()
-                .await?;
+            let res = http_client.get(&url).send().await?;
 
             if res.status().is_success() {
                 let shards: Vec<serde_json::Value> = res.json().await?;
-                println!("🧠 Allocated Swarm Brain Shards  (Loro Documents): ");
-                for shard in shards {
-                    println!("  Shard Space Namespace: [{}]", shard["namespace"]);
-                    println!("  Active Peer Timelines: {}", shard["active_timelines"]);
-                    println!("  Total Memory Size: {} bytes", shard["memory_footprint"]);
+                println!("🧠 Allocated Swarm Brain Shards  (Loro CRDT): ");
+                for s in shards {
+                    println!(
+                        "  Shard Space: [{:<20}] | Timelines: {} | Ops: {:<8} | Est. RAM: {:.2} MB",
+                        s["namespace"].as_str().unwrap_or(""),
+                        s["active_timelines"],
+                        s["total_crdt_operations"],
+                        s["estimated_ram_mb"].as_f64().unwrap_or(0.0)
+                    )
                 }
             } else {
-                eprintln!(
-                    "❌  Telemetry Failure: Failed to traverse sharded state table: {}",
-                    res.status()
-                );
+                eprintln!("❌  Topology query failed: HTTP {}", res.status());
             }
         }
     }

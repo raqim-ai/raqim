@@ -51,7 +51,7 @@ export function CommandDeckClient({
 
   return (
     <MainLayout title="Command Flight Deck // Sovereign Root">
-      <div className="flex flex-col h-full w-full bg-[#080C14] overflow-hidden">
+      <div className="flex flex-col h-full w-full bg-[#050811] overflow-hidden">
         {/* 1. Global Status Ribbon & Top Navigation */}
         <GlobalStatusBar />
 
@@ -63,15 +63,15 @@ export function CommandDeckClient({
             initialVaultTelemetry={initialVaultTelemetry}
           />
 
-          {/* Lower Split Pane: Firehose Table (70%) + Hardware Telemetry (30%) */}
+          {/* Lower Split Pane: Firehose Table (Left) + Hardware Telemetry (Right) */}
           <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-3 min-h-0 overflow-hidden">
             {/* Live Semantic Firehose Deck */}
-            <div className="lg:col-span-8 xl:col-span-9 flex flex-col min-h-0 h-full overflow-hidden">
+            <div className="lg:col-span-7 xl:col-span-8 flex flex-col min-h-0 h-full overflow-hidden">
               <LiveSemanticFirehose />
             </div>
 
-            {/* Hardware Vitals & Cluster Gauges */}
-            <div className="lg:col-span-4 xl:col-span-3 flex flex-col min-h-0 h-full overflow-hidden">
+            {/* Hardware Vitals & Ingress Telemetry Panel (Right-Side 2x2 Grid) */}
+            <div className="lg:col-span-5 xl:col-span-4 flex flex-col min-h-0 h-full overflow-hidden">
               <HardwareVitalsPanel />
             </div>
           </div>

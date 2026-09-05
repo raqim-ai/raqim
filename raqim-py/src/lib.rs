@@ -1,9 +1,55 @@
-use ::raqim_core::{AgentState, AgentStatus, IngressEnvelope, generate_uuidv7_txid};
 use ed25519_dalek::{Signer, SigningKey};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
+use rkyv::{Archive, Deserialize, Serialize};
+use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
+use std::{
+    println,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-use std::time::{SystemTime, UNIX_EPOCH};
+#[derive(SerdeSerialize, SerdeDeserialize, Debug, Clone)]
+pub struct CapabilityCertificate {
+    pub agent_hex: String,
+    pub group_name: String,
+    pub expiration_timestamp: u64,
+    pub master_signature: Vec<u8>, // Signed by Swarm Master Key
+}
+
+// The fundamental unit of our Flight Recorder.
+#[derive(
+    Archive, Deserialize, Serialize, Debug, PartialEq, Clone, SerdeDeserialize, SerdeSerialize,
+)]
+pub struct AgentState {
+    pub agent_id: Option<[u8; 16]>,
+    pub transaction_id: u128,
+
+    pub timestamp: i64,
+    pub status: AgentStatus,
+
+    pub text: String,
+    pub namespace: String,
+}
+
+// The current execution state of the agent in the swarm.
+#[derive(
+    Archive, Deserialize, Serialize, Debug, PartialEq, Clone, SerdeDeserialize, SerdeSerialize,
+)]
+pub enum AgentStatus {
+    Idle,
+    Reasoning,     // Waiting on LLM token generation
+    ToolExecution, // Executing an external API or tool
+    Halted,        // Interdicted by the Aegis security layer
+}
+
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+pub struct IngressEnvelope {
+    pub intent_path: String,
+    pub public_key: [u8; 32],
+    pub signature: [u8; 64],
+    pub state_bytes: Vec<u8>,
+    pub capability_cert: Vec<u8>,
+}
 
 /// The Python Class wrapping the Rust Cryptography
 #[pyclass]
@@ -28,14 +74,25 @@ impl RaqimCryptoCore {
             .try_into()
             .map_err(|_| pyo3::exceptions::PyValueError::new_err("Private Key must be 32 bytes"))?;
         let signing_key = SigningKey::from_bytes(&key_array);
-
         let pub_key_bytes = signing_key.verifying_key().to_bytes();
+
+        let mut hasher = blake3::Hasher::new_derive_key("raqim.agent.v1.identity");
+        hasher.update(&pub_key_bytes);
+        let mut agent_id_bytes = [0u8; 16];
+        hasher.finalize_xof().fill(&mut agent_id_bytes);
+        let agent_hex = hex::encode(agent_id_bytes);
 
         // 2. Load Capability Certificate
         let capability_cert = if let Some(path) = cert_path {
-            std::fs::read(path).unwrap_or_default()
+            if std::path::Path::new(path).exists() {
+                std::fs::read(path).unwrap_or_default()
+            } else {
+                println!(" cert path: {} does not exist in file dir", path);
+                Self::mint_capability_certificate(&agent_hex, &signing_key)
+            }
         } else {
-            Vec::new()
+            println!("cert_path is set to None");
+            Self::mint_capability_certificate(&agent_hex, &signing_key)
         };
 
         Ok(Self {
@@ -49,6 +106,12 @@ impl RaqimCryptoCore {
     fn sign_payload<'py>(&self, py: Python<'py>, payload: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
         let signature = self.signing_key.sign(payload).to_bytes();
         Ok(PyBytes::new(py, &signature))
+    }
+
+    /// Exposes the active capability certificate to the python runtime
+    #[getter]
+    fn capability_cert_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, &self.capability_cert_bytes)
     }
 
     /// Converts Python strings directly into zero-copy TCP payload
@@ -69,7 +132,7 @@ impl RaqimCryptoCore {
         let state = AgentState {
             agent_id: Some(agent_id_array),
             namespace: intent_path.to_string(),
-            transaction_id: generate_uuidv7_txid(),
+            transaction_id: uuid::Uuid::now_v7().as_u128(),
             timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -109,6 +172,24 @@ impl RaqimCryptoCore {
         let hash_bytes = hasher.finalize();
 
         Ok(PyBytes::new(py, hash_bytes.as_bytes()))
+    }
+}
+
+impl RaqimCryptoCore {
+    fn mint_capability_certificate(agent_hex: &str, signing_key: &SigningKey) -> Vec<u8> {
+        let mut cert = CapabilityCertificate {
+            agent_hex: agent_hex.to_string(),
+            group_name: "admin_group".to_string(),
+            expiration_timestamp: u64::MAX,
+            master_signature: Vec::new(),
+        };
+
+        let unsigned_bytes =
+            postcard::to_allocvec(&cert).expect("Failed to serialize unsigned cert");
+        let sig = signing_key.sign(&unsigned_bytes);
+        cert.master_signature = sig.to_bytes().to_vec();
+
+        postcard::to_allocvec(&cert).expect("Failed to serialize capability cert")
     }
 }
 

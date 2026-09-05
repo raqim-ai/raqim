@@ -14,6 +14,7 @@ use lancedb::query::ExecutableQuery;
 use lancedb::query::QueryBase;
 use std::collections::HashMap;
 use std::format;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -207,7 +208,7 @@ impl LanceEngine {
                 .downcast_ref::<Int64Array>()
                 .unwrap();
             let tx_id_col = batch
-                .column_by_name("transaction_id")
+                .column_by_name("tx_id")
                 .unwrap()
                 .as_any()
                 .downcast_ref::<StringArray>()
@@ -255,7 +256,7 @@ impl LanceEngine {
             Field::new(
                 "vector",
                 DataType::FixedSizeList(
-                    Arc::new(Field::new("item", DataType::Float32, false)),
+                    Arc::new(Field::new("item", DataType::Float32, true)),
                     self.dims,
                 ),
                 false,
@@ -266,10 +267,10 @@ impl LanceEngine {
     /// Schema for WASM memory snapshot
     fn snapshot_schema(&self) -> Arc<Schema> {
         Arc::new(Schema::new(vec![
-            Field::new("tx_id", DataType::Int64, false),
+            Field::new("tx_id", DataType::Utf8, false),
             Field::new("timestamp", DataType::Int64, false),
             Field::new("agent_id", DataType::Utf8, false),
-            Field::new("memory_blob", DataType::Binary, false), // The actual WASM RAM
+            Field::new("memory_blob", DataType::Binary, false),
         ]))
     }
 
@@ -304,7 +305,7 @@ impl LanceEngine {
                     .take(100)
                     .collect::<String>();
                 let m = format!(
-                    "{{\"tx_id\": {}, \"namespace\": \"{}\", \"text_preview\": \"{}...\"}}",
+                    "{{\"tx_id\": \"{}\", \"namespace\": \"{}\", \"text_preview\": \"{}...\"}}",
                     tx_id, namespace, safe_text
                 );
 
@@ -355,7 +356,7 @@ impl LanceEngine {
                 ("SecurityBreach", agent_id.to_string(), m)
             }
 
-            SystemEvent::LicenseUpdated { new_jwt } => (
+            SystemEvent::LicenseUpdated { .. } => (
                 "LicenseUpdated",
                 "SYSTEM".to_string(),
                 format!(" {{ \"message\": \"{}\" }} ", "License Key was updated"),
@@ -605,11 +606,18 @@ impl LanceEngine {
         // 2. Open the table
         let table = self.db.open_table(&self.history_table).execute().await?;
 
+        let filter_clause = if namespace.ends_with("*") {
+            let prefix = namespace.trim_end_matches("*");
+            format!("namespace >= '{}' AND namespace < '{}~'", prefix, prefix)
+        } else {
+            format!("namespace = '{}'", namespace)
+        };
+
         // 3. Execute High-Speed vector search (IVF-PQ Algorithm)
         let mut stream = table
             .query()
             .nearest_to(query_vector)?
-            .only_if(format!("namespace LIKE '{}'", namespace))
+            .only_if(filter_clause)
             .limit(limit)
             .execute()
             .await?;
@@ -664,12 +672,12 @@ impl LanceEngine {
     /// Saves the 2MB-5MB active memory snapshot to Cold storage.
     pub async fn save_snapshot(
         &self,
-        tx_id: i64,
+        tx_id: u128,
         timestamp: i64,
         agent_hex: &str,
         memory_blob: Vec<u8>,
     ) {
-        let tx_array = Arc::new(Int64Array::from(vec![tx_id]));
+        let tx_array = Arc::new(StringArray::from(vec![format!("{:032x}", tx_id)]));
         let time_array = Arc::new(Int64Array::from(vec![timestamp]));
         let agent_array = Arc::new(StringArray::from(vec![agent_hex.to_string()]));
         let blob_array = Arc::new(BinaryArray::from(vec![memory_blob.as_slice()]));
@@ -712,8 +720,9 @@ impl LanceEngine {
         let mut stream = table
             .query()
             .only_if(format!(
-                "agent_id = '{}' AND tx_id <= {} ",
-                agent_hex, target_tx_id
+                "agent_id = '{}' AND tx_id <= '{}' ",
+                agent_hex,
+                format!("{:032x}", target_tx_id)
             ))
             .limit(1)
             .execute()
@@ -760,7 +769,7 @@ impl LanceEngine {
         Ok(table.count_rows(None).await?)
     }
 
-    /// Executes a DataFusion SQL Aggregation over the Apache Arrow Memory Layout
+    /// Executes a SQL Aggregation over the Apache Arrow Memory Layout
     pub async fn get_densest_namespace(&self) -> Result<String, anyhow::Error> {
         let table_res = self.db.open_table(&self.history_table).execute().await;
 
@@ -812,6 +821,10 @@ impl LanceEngine {
     pub async fn get_index_size_mb(&self) -> f64 {
         let table_dir = format!("{}/{}.lance", &self.storage_path, &self.history_table);
 
+        if !Path::new(&table_dir).exists() {
+            return 0.0;
+        }
+
         match fs_extra::dir::get_size(&table_dir) {
             Ok(bytes) => bytes as f64 / (1024.0 * 1024.0),
             Err(e) => {
@@ -847,7 +860,7 @@ impl LanceEngine {
                 .downcast_ref::<StringArray>()
                 .unwrap();
             let tx_col = batch
-                .column_by_name("transaction_id")
+                .column_by_name("tx_id")
                 .unwrap()
                 .as_any()
                 .downcast_ref::<StringArray>()

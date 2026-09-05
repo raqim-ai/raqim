@@ -8,37 +8,31 @@ use raqim_core::axon::AxonGateKeeper;
 use axum::http::Method;
 use raqim_core::compactor::WalCompactor;
 use raqim_core::config::RaqimConfig;
-use raqim_core::cortex::CortexDataPlane;
 use raqim_core::embedding::{EmbeddingProvider, LocalBgeProvider, OpenAIProvider};
 use raqim_core::health::{HealthMonitor, SystemHealth};
 use raqim_core::hot_memory::{HotVectorBuffer, HotVectorEntry};
 use raqim_core::lancedb_store::LanceEngine;
 use raqim_core::memory_router::MemoryRouter;
 use raqim_core::network::GlobalNetworkBridge;
-use raqim_core::nucleus::WalEngine;
+use raqim_core::nucleus::{WalCommand, WalEngine};
 use raqim_core::registry::SwarmRegistry;
-use raqim_core::sandbox::{CheckPointTracker, SandboxContent, WasmEngine};
 use raqim_core::state::SwarmStateRegistry;
 use raqim_core::witness::WormWitnessEngine;
 use raqim_core::{
     AgentState, IngressEnvelope, OpLog, RuntimeSecurityFlags, SystemEvent, execute_raqim_cascade,
-    generate_uuidv7_txid,
 };
 use tower_http::cors::{Any, CorsLayer};
 
-use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::{eprintln, fs, println};
 
 use tokio::net::TcpListener;
 use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
-use wasmtime_wasi::WasiCtxBuilder;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -72,50 +66,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // THE INTERNAL EVENT BUS
-    let (event_tx, mut event_rx) = broadcast::channel::<SystemEvent>(50_000);
+    let (event_tx, _event_rx) = broadcast::channel::<SystemEvent>(50_000);
     let (ui_tx, _ui_rx) = broadcast::channel::<UiEvent>(10_000);
 
     let registry = Arc::new(SwarmRegistry::new());
     let (health_tx, _health_rx) = broadcast::channel::<SystemHealth>(100);
     let (phantom_ui_tx, _phanom_ui_rx) = broadcast::channel::<UiEvent>(100);
 
-    let telemetry_topic = format!("{}_telemetry", config.topic);
-
-    // 2. Spawns a dedicated Zero-copy telemetry thread ( Forwarding Internal events to iceoryx 2 )
-    std::thread::spawn(move || {
-        println!(
-            "Bismillah. Booting IPC Telemetry Emitter on topic: {} ",
-            telemetry_topic
-        );
-
-        //  Initialize Publisher INSIDE thread ( !Send Compliance )
-        let cortex = CortexDataPlane::new(&telemetry_topic);
-        let publisher = cortex
-            .create_publisher()
-            .expect("Failed to create telemetry pub");
-
-        // Listen to internal tokio events and publish them to zero-copy memory
-        while let Ok(event) = event_rx.blocking_recv() {
-            let serialized_event = rkyv::to_bytes::<rkyv::rancor::Error>(&event).unwrap();
-
-            if let Ok(sample) = publisher.loan_slice_uninit(serialized_event.len()) {
-                let sample = sample.write_from_slice(&serialized_event);
-                let _ = sample.send();
-            }
-        }
-    });
-
-    // BOOT-TIME LICENSE_VERIFIICATION
-    const RAQIM_PUBLIC_KEY: &[u8] = include_bytes!("../../keys/raqim_public.pem");
-
-    let decoding_key = Arc::new(
-        jsonwebtoken::DecodingKey::from_rsa_pem(RAQIM_PUBLIC_KEY)
-            .expect("FATAL: Invalid RSA PEM format"),
-    );
-
     let security_flags = RuntimeSecurityFlags::new();
-
-    let allow_wan = Arc::new(AtomicBool::new(false));
 
     // Securely loads the swarm key from disk. Generate it if it doesn't exist/
     let key_dir = Path::new("./ca-keys");
@@ -140,7 +98,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Memory Load Phase
+    // Memory Load & Security Audit Phase
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = fs::metadata(&key_path).expect("FATAL: Failed to read master_key metadata");
+        let permissions = metadata.permissions();
+        let mode = permissions.mode();
+
+        // Check if group or otthers have read/write/execute permission
+        if mode & 0o77 != 0 {
+            eprintln!(
+                "[SECURITY HAZARD] Master key file '{:?}' has insecure permissions: {:o} (Expected 0600).",
+                key_path,
+                mode & 0o77
+            );
+            eprintln!("[SECURITY] Remedying file permission to 0600 (User read/write only)...");
+            fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))
+                .expect("FATAL: Failed to enforce 0600 permissions on master key");
+        }
+    }
+
     let key_bytes = fs::read(&key_path).expect("FATAL: Failed to read master_key from disk");
     let key_array: [u8; 32] = key_bytes
         .as_slice()
@@ -149,9 +127,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let master_signing_key = SigningKey::from_bytes(&key_array);
 
     let master_public_key = master_signing_key.verifying_key().to_bytes();
-    let master_public_key_hex = hex::encode(master_public_key.clone());
-    println!("[SECURITY] Swarm Master Identity loaded into a secure kernel memory ");
-
     // ===============================
     let os_node_id = Uuid::new_v4().to_string();
     println!("[SYSTEM] Sovereign OS Node ID: {} ", os_node_id);
@@ -172,18 +147,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                Err(broadcast::error::RecvError::Lagged(skipped_count)) => {
-                    // Memory Safeguard: Clear internal lags forcefully to protect RAM
-                    eprintln!(
-                        "[MEMORY WARNING] Subscriber loop lagged behind channel sequence! \n Forcefully skipped {} events to prevent heap memory growth",
-                        skipped_count
-                    );
-                }
+                // Memory Safeguard: Clear internal lags forcefully to protect RAM
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
 
-                Err(broadcast::error::RecvError::Closed) => {
-                    println!("[SYSTEM] Event bus channel closed cleanly. ");
-                    break;
-                }
+                Err(broadcast::error::RecvError::Closed) => break,
             }
         }
     });
@@ -280,13 +247,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &config.topic,
             aegis.clone(),
             os_node_id,
-            allow_wan.clone(),
-            security_flags.allow_global_a2a.clone(),
-            security_flags.allow_global_aegis.clone(),
         )
         .await,
     );
-    let wasm_engine = Arc::new(WasmEngine::new());
     let hot_buffer = Arc::new(HotVectorBuffer::new(10_0000));
 
     let embedder: Arc<dyn EmbeddingProvider> = match config.embedder_type.as_str() {
@@ -307,6 +270,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1. Boot global Quarantine network subscriber
     global_net.listen_for_global_quarantine(aegis.clone()).await;
+
+    let mem_router = Arc::new(MemoryRouter::new(
+        config.clone(),
+        axon.clone(),
+        brain_shard.clone(),
+        lance_engine.clone(),
+        wal.clone(),
+        event_tx.clone(),
+    ));
 
     // 2. Wire SystemEvent subscriber loop for outbound local quarantine events
     let mut system_rx = event_tx.subscribe();
@@ -379,54 +351,65 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if let Ok(wal_bytes) = fs::read(&file_path) {
             let mut offset = 0;
+            let mut aligned_buf = rkyv::util::AlignedVec::<16>::new();
 
-            while offset < wal_bytes.len() {
-                if offset + 4 > wal_bytes.len() {
+            while offset + 8 <= wal_bytes.len() {
+                let entry_len =
+                    u32::from_le_bytes(wal_bytes[offset..offset + 4].try_into().unwrap()) as usize;
+                let expected_crc =
+                    u32::from_le_bytes(wal_bytes[offset + 4..offset + 8].try_into().unwrap());
+                let frame_total = 8 + entry_len;
+
+                if offset + frame_total > wal_bytes.len() {
+                    eprintln!(
+                        "[PHOENIX WARN] Truncateed tail frame in {}. Halting scan",
+                        file_path
+                    );
                     break;
                 }
 
-                let mut len_bytes = [0u8; 4];
-                len_bytes.copy_from_slice(&wal_bytes[offset..offset + 4]);
-                let entry_len = u32::from_le_bytes(len_bytes) as usize;
-                offset += 4;
+                let entry_slice = &wal_bytes[offset + 8..offset + frame_total];
 
-                // Check for 4-byte CRC header boundary
-                if offset + 4 > wal_bytes.len() {
-                    break;
-                }
-                offset += 4;
-
-                if offset + entry_len > wal_bytes.len() {
+                if crc32fast::hash(entry_slice) != expected_crc {
+                    eprintln!(
+                        "[PHOENIX CORRUPTION] CRC32 mismatch in {}. Trncating tail.",
+                        file_path
+                    );
                     break;
                 }
 
-                let entry_slice = &wal_bytes[offset..offset + entry_len];
+                // Force 16-byte alignment for u128 uuidv7 zero-copy validation
+                aligned_buf.clear();
+                aligned_buf.extend_from_slice(entry_slice);
 
                 if let Ok(archived_log) = rkyv::access::<
-                    <OpLog as rkyv::Archive>::Archived,
+                    <Vec<OpLog> as rkyv::Archive>::Archived,
                     rkyv::rancor::Error,
-                >(entry_slice)
+                >(&aligned_buf)
                 {
-                    if let Ok(recovered_log) =
-                        rkyv::deserialize::<OpLog, rkyv::rancor::Error>(archived_log)
+                    if let Ok(batch) =
+                        rkyv::deserialize::<Vec<OpLog>, rkyv::rancor::Error>(archived_log)
                     {
-                        axon.hydrate_from_recovery(&recovered_log);
+                        for recovered_log in batch {
+                            axon.hydrate_from_recovery(&recovered_log);
 
-                        // Fetch crdt shard for this namespace and apply historical delta
-                        let brain = brain_shard.get_or_create_brain(&recovered_log.state.namespace);
-                        if let Err(e) = brain.assimilate_foreign_thought(&recovered_log.delta) {
-                            eprintln!(
-                                "[PHOENIX WARN] Failed to assimilate CRDT delta during recovery: {},",
-                                e
-                            );
+                            // Fetch crdt shard for this namespace and apply historical delta
+                            let brain =
+                                brain_shard.get_or_create_brain(&recovered_log.state.namespace);
+                            if let Err(e) = brain.assimilate_foreign_thought(&recovered_log.delta) {
+                                eprintln!(
+                                    "[PHOENIX WARN] Failed to assimilate CRDT delta during recovery: {},",
+                                    e
+                                );
+                            }
+
+                            recovered_logs.push(recovered_log);
+                            uncompacted_count += 1
                         }
-
-                        recovered_logs.push(recovered_log);
-                        uncompacted_count += 1
                     }
                 }
 
-                offset += entry_len;
+                offset += frame_total;
             }
         }
     }
@@ -437,8 +420,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     if !recovered_logs.is_empty() {
+        // Trailing 250 thoughts
+        let cache_limit = 250.min(recovered_logs.len());
+        let recent_logs_slice = &recovered_logs[recovered_logs.len() - cache_limit..];
+
+        println!(
+            " [PHOENIX] Batch-embedding trailing {} thoughts to warm uo HotVectorBuffer...",
+            recent_logs_slice.len()
+        );
+
         // Batch embed all recovered WAL texts to restore hot vector memory
-        let texts: Vec<String> = recovered_logs
+        let texts: Vec<String> = recent_logs_slice
             .iter()
             .map(|l| {
                 format!(
@@ -450,16 +442,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Recompute the vector space asynchronouly to bypass short-term amnesia gaps
         // Simulated blocks, maps out directly to fastembed / OpenAI endpoints
-        // let mock_embed_vectors = vec![vec![0.0f32; 768]; recovered_logs.len()];
+        // let mock_embed_vectors = vec![vec![0.0f32; 768]; recent_logs_slice.len()];
 
         if let Ok(vectors) = embedder.embed_batch(&texts).await {
-            let mut hot_entries = Vec::with_capacity(recovered_logs.len());
-            for (i, log) in recovered_logs.into_iter().enumerate() {
+            let mut hot_entries = Vec::with_capacity(recent_logs_slice.len());
+            for (i, log) in recent_logs_slice.into_iter().enumerate() {
                 hot_entries.push(HotVectorEntry {
                     tx_id: log.state.transaction_id,
                     agent_hex: hex::encode(log.agent_id),
-                    namespace: log.state.namespace,
-                    text: log.state.text,
+                    namespace: log.state.namespace.clone(),
+                    text: log.state.text.clone(),
                     timestamp: log.state.timestamp,
                     vector: vectors[i].clone(),
                 });
@@ -517,238 +509,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // The Autonomous compactor (WAL reaper)
-    let compactor = WalCompactor::new(
+    let compactor = Arc::new(WalCompactor::new(
         &config.wal_path,
+        &config.manifest_path,
         lance_engine.clone(),
         event_tx.clone(),
         wal.cmd_sender.clone(),
-    );
-    compactor.start_daemon();
-
-    // Channel to talk to the publisher safely accross threads
-    let (cortex_tx, mut cortex_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let topic_clone = config.topic.clone();
-
-    // The WASM plugign Orchestrator
-    let plugin_dir = "./plugins";
-    fs::create_dir_all(plugin_dir).expect("Failed to create plugins dir");
-
-    let mem_router = Arc::new(MemoryRouter::new(
-        config.clone(),
-        aegis.clone(),
-        axon.clone(),
-        brain_shard.clone(),
-        lance_engine.clone(),
-        wasm_engine.clone(),
-        wal.clone(),
-        cortex_tx.clone(),
-        global_net.clone(),
-        event_tx.clone(),
-        master_signing_key.clone(),
-        security_flags.allow_time_travel.clone(),
     ));
 
-    // Initialize global tracker ONCE outside the loop
-    let global_tracker: Arc<Mutex<HashMap<String, CheckPointTracker>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-
-    let w_axon = axon.clone();
-    let w_wal = wal.clone();
-    let w_lance = lance_engine.clone();
-    let w_cortex_tx = cortex_tx.clone();
-    let w_global_net = global_net.clone();
-    let w_wasm_engine = wasm_engine.clone();
-    let w_event_tx = event_tx.clone();
-    let w_aegis = aegis.clone();
-    let w_brain_shard = brain_shard.clone();
-
-    // Spawns a dedicated background thread to monitor the plugins folder
-    tokio::spawn(async move {
-        println!(
-            "WASM Orchestrator monitoring {} for a new edge plugins...",
-            plugin_dir
-        );
-
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
-
-        loop {
-            interval.tick().await;
-
-            if let Ok(entries) = fs::read_dir(plugin_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-
-                    if path.extension().and_then(|s| s.to_str()) == Some("wasm") {
-                        println!("Discovered a new WASM Plugin: {:?}", path);
-                        let file_stem = path.file_stem().unwrap().to_str().unwrap();
-
-                        // Resolve the adjacent secure crptographic files
-                        let key_path = path.with_extension("key");
-                        let cert_path = path.with_extension("cert");
-
-                        if !key_path.exists() || !cert_path.exists() {
-                            eprintln!(
-                                " [ORCHESTRATOR WARNING] Dropped plugin deployment for '{}'. Missing adjacent secure credentials (.key / .cert). ",
-                                file_stem
-                            );
-                            continue;
-                        }
-
-                        println!(
-                            "[ORCHESTRATOR] Initializing secure cryptographic verification for: {}.wasm ",
-                            file_stem
-                        );
-
-                        // Read the raw system component from the disk
-                        let wasm_bytes = fs::read(&path).unwrap();
-                        let private_key_bytes = fs::read(&key_path).unwrap();
-                        let cert_bytes = fs::read(&cert_path).unwrap();
-
-                        // Re-instantiate the authentic cryptographic identity
-                        let agent_private_key = match private_key_bytes.as_slice().try_into() {
-                            Ok(bytes) => SigningKey::from_bytes(bytes),
-                            Err(_) => {
-                                eprintln!(
-                                    "[ORCHESTRATOR FATAL] Private key for '{}' is corrupt. Skipping. ",
-                                    file_stem
-                                );
-                                continue;
-                            }
-                        };
-
-                        // Compute the Agent ID Hex directly from the valid public key bytes
-                        let pub_key_bytes = agent_private_key.verifying_key().to_bytes();
-
-                        // Initialize blake3 key derivation function with Strict Domain Separation
-                        let mut hasher = blake3::Hasher::new_derive_key("raqim.agent.v1.identity");
-                        hasher.update(&pub_key_bytes);
-
-                        let mut agent_id_byte = [0u8; 16];
-                        hasher.finalize_xof().fill(&mut agent_id_byte);
-
-                        let agent_hex = hex::encode(agent_id_byte);
-
-                        println!(
-                            "[ORCHESTRATOR] Deploying Certified Identity Node: [Hex: {}] [Alias: {}] ",
-                            &agent_hex, file_stem
-                        );
-
-                        let _ = w_event_tx.send(SystemEvent::PluginLoaded {
-                            plugin_name: entry.file_name().to_string_lossy().to_string(),
-                        });
-
-                        // WASI Context Must be built per-execution
-                        let wasi_ctx = WasiCtxBuilder::new().build_p1();
-
-                        // We must clone the layers for the specific execution
-                        let a_clone = w_axon.clone();
-                        let w_clone = w_wal.clone();
-                        let c_clone = w_cortex_tx.clone();
-                        let g_clone = w_global_net.clone();
-                        let tx_clone = w_event_tx.clone();
-                        let lance_clone = w_lance.clone();
-                        let ae_clone = w_aegis.clone();
-                        let shard_clone = w_brain_shard.clone();
-
-                        // When an agent connects or boots, we retreive or initialize its specific tracker
-                        let content = SandboxContent {
-                            axon: a_clone,
-                            wal: w_clone,
-                            shard: shard_clone,
-                            cortex_tx: c_clone,
-                            global_net: g_clone,
-                            event_tx: tx_clone,
-                            wasi: wasi_ctx,
-                            agent_hex: agent_hex.clone(),
-
-                            agent_private_key,
-                            capability_cert_bytes: cert_bytes,
-
-                            lance: lance_clone,
-                            aegis: ae_clone,
-                            live_responses: Vec::new(),
-                            live_seeds: Vec::new(),
-                            live_timestamps: Vec::new(),
-                            replay_responses: Vec::new(),
-                            replay_seeds: Vec::new(),
-                            replay_timestamps: Vec::new(),
-                            a2a_response_cache: Vec::new(),
-                            http_response_cache: Vec::new(),
-                            a2a_incoming_cache: Vec::new(),
-
-                            a2a_receiver: None,
-                            a2a_reply_channel: None,
-                        };
-
-                        // Mutex lifetime enforcement
-                        let mut tracker_lock = global_tracker.lock().unwrap();
-
-                        // Extract an owned, independent clone of the tracker out of the map boundary
-                        let mut agent_tracker =
-                            *tracker_lock
-                                .entry(agent_hex.clone())
-                                .or_insert(CheckPointTracker {
-                                    last_snapshot_tx: 0,
-                                    last_snapshot_time: 0,
-                                });
-
-                        // Drop the lock instantly to prevent hot path thread starvation
-                        drop(tracker_lock);
-
-                        // Get the exact current Transaction ID
-                        let current_tx = generate_uuidv7_txid();
-                        let w_engine_clone = w_wasm_engine.clone();
-                        let wasm_bytes_clone = wasm_bytes.clone();
-
-                        // Execute the untrusted logic in the safe WASM execution cell
-                        tokio::spawn(async move {
-                            if let Err(e) = w_engine_clone.execute_agent(
-                                &wasm_bytes_clone,
-                                content,
-                                &mut agent_tracker,
-                                current_tx,
-                                None,
-                            ) {
-                                eprintln!("[SANDBOX TRAPPED] Plugin engine failure: {}", e);
-                            }
-                        });
-
-                        // Secure Forensic Footprint Archive Transition
-                        let archive_dir = "./plugins_archive";
-                        let _ = fs::create_dir_all(archive_dir);
-
-                        let _ = fs::rename(
-                            &key_path,
-                            format!("{}/{}.key.running", archive_dir, &agent_hex),
-                        );
-                        let _ = fs::rename(
-                            &cert_path,
-                            format!("{}/{}.cert.running", archive_dir, &agent_hex),
-                        );
-                        let _ = fs::rename(
-                            &path,
-                            format!("{}/{}.wasm.running", archive_dir, agent_hex),
-                        );
-                    }
-                }
-            }
-        }
-    });
-
-    // Dedicated physical thread !Send publisher.
-    let cortex = CortexDataPlane::new(&topic_clone);
-    std::thread::spawn(move || {
-        // Initialize publisher inside the thread
-        let local_publisher = Arc::new(cortex.create_publisher().expect("Failed to map publisher"));
-
-        // blocking_rev() halts the thread until data arrives, no yield_now() needed
-        while let Some(bytes) = cortex_rx.blocking_recv() {
-            // Loan exactly the numbe rof bytes we need
-            if let Ok(sample) = local_publisher.loan_slice_uninit(bytes.len()) {
-                let _ = sample.write_from_slice(&bytes).send();
-            }
-        }
-    });
+    // Start Autonomous Daemon
+    compactor.clone().start_daemon();
 
     // 2 Background Listeners (Zenoh Global network)
     let global_net_clone = global_net.clone();
@@ -761,8 +531,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
     });
 
+    let (pause_tx, pause_rx) = tokio::sync::watch::channel(false);
+    let pause_tx = Arc::new(pause_tx);
+
     // Spawn the hardware interrupt loop
-    HealthMonitor::spawn_telemetry_loop(health_tx.clone());
+    let health_pause_rx = pause_rx.clone();
+    HealthMonitor::spawn_telemetry_loop(health_tx.clone(), health_pause_rx);
 
     let api_state = ApiState {
         config: config.clone(),
@@ -772,7 +546,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         axon: axon.clone(),
         brain: brain_shard.clone(),
         lance: lance_engine.clone(),
-        cortex_tx: cortex_tx.clone(),
         wal: wal.clone(),
         event_tx: event_tx.clone(),
 
@@ -783,6 +556,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         master_signing_key: master_signing_key.clone(),
 
         hot_buffer: hot_buffer.clone(),
+        pause_tx: pause_tx.clone(),
+        compactor: compactor.clone(),
     };
 
     let axum_app = build_admin_router(api_state).layer(
@@ -809,6 +584,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // JoinSet automatically tracks all spawned TCP worker tasks.
     let mut tcp_workers = JoinSet::new();
 
+    // Limit max concurrent live TCP agent sockets.
+    let connection_semaphore = Arc::new(tokio::sync::Semaphore::new(512));
+
     loop {
         tokio::select! {
                     // If cancelled is triggered, break the infinite loop.
@@ -824,24 +602,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Err(_) => continue
                     };
 
-                println!("External Agent connected from: {}", addr);
 
-                let task_axon = axon.clone();
-                let task_cortex_tx = cortex_tx.clone();
-                let task_wal = wal.clone();
-                let global_publisher = global_net.clone();
-                let task_event_tx = event_tx.clone();
-                let task_aegis = aegis.clone();
-                let task_ui_tx = ui_tx.clone();
-                let task_registry = registry.clone();
-                let task_brain = brain_shard.clone();
-                let task_mem_router = mem_router.clone();
+                    let permit = match connection_semaphore.clone().try_acquire_owned() {
+
+                        Ok(p) => p,
+                        Err(_) => {
+                            eprintln!("[INGRESS THROTTLED] Connectiton limit (512) reached. Dropping socket from {}", addr);
+                            drop(socket);
+                            continue;
+                        }
+
+                    };
+
+
+                    println!("External Agent connected from: {}", addr);
+
+                    let task_axon = axon.clone();
+                    let task_wal = wal.clone();
+                    let global_publisher = global_net.clone();
+                    let task_event_tx = event_tx.clone();
+                    let task_aegis = aegis.clone();
+                    let task_ui_tx = ui_tx.clone();
+                    let task_registry = registry.clone();
+                    let task_brain = brain_shard.clone();
+                    let task_mem_router = mem_router.clone();
+                    let task_pause_rx = pause_rx.clone();
+
 
                 // Spawn into the joinset
-                 tcp_workers.spawn(async move {
+            tcp_workers.spawn(async move {
+                let _permit = permit;
+
+                // split socket into independent read and write halves
+                let (read_half, mut write_half) = socket.into_split();
 
                 //  Syscall Amortization: Wrap the socket in a 1mb BufReader to eliminate kernel context switches
-                let mut reader = tokio::io::BufReader::with_capacity(1024 * 1024, socket);
+                let mut reader = tokio::io::BufReader::with_capacity(1024 * 1024, read_half);
 
                 // Heap Allocation Amortization: pre-allocate a 1mb scratch buffer ONCE to eliminate dynamic heap allocation.
                 let mut payload_scratch_buf = vec![0u8; 1024* 1024];
@@ -851,10 +647,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut cached_agent_hex = String::new();
                 let mut cached_group_name = String::new();
                 let mut session_pub_key = [0u8; 32];
+                let mut worker_pause_rx = task_pause_rx.clone();
 
                 loop {
+                    // ZERO-CPU ASYNC SUSPENSION:
+                    if *worker_pause_rx.borrow() {
+                        if worker_pause_rx.changed().await.is_err() {
+                            break;
+                        }
+
+                        if *worker_pause_rx.borrow() {
+                            continue;
+                        }
+
+                    }
+
                    //  THE FRAMING PROTOCOL: Read 4-byte length prefix first
-                //    Read from the BufReader
                     let mut len_buf = [0u8; 4];
                     if let Err(e) = tokio::io::AsyncReadExt::read_exact(&mut reader, &mut len_buf).await {
 
@@ -987,18 +795,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // --- The Raqim Cascade ---
                     // If the WAL or the Publisher channel are full, the .await creates a healthy backppressure rather than panicking.
-                    let res = execute_raqim_cascade(
+                    match execute_raqim_cascade(
                         &archived_state,
                         task_axon.clone(),
                         task_wal.clone(),
                         task_brain.clone(),
-                        task_cortex_tx.clone(),
                         global_publisher.clone(),
                         task_event_tx.clone(),
                         Vec::new(),
                         Vec::new(),
                     )
-                    .await;
+                    .await {
+
+                        Ok(tx_id) => {
+
+                                // Emit 20 byte server ack frame [4 bytes: Status] + [16 bytes: Little-Endian u128 TxID]
+                            let mut ack_buf = [0u8; 20];
+                            ack_buf[0..4].copy_from_slice(&0u32.to_le_bytes());
+                            ack_buf[4..20].copy_from_slice(&tx_id.to_le_bytes());
+
+                            if let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut write_half, &ack_buf).await {
+                                eprintln!("[TCP EDGE] Failed to deliver ACK frame: {} ", e);
+                                break;
+                            }
+
+                            let _ = task_ui_tx.send(UiEvent::ThoughtCommitted {
+                                agent_hex: agent_hex.clone(),
+                                intent_path: path_intent.to_string(),
+                                tx_id: format!("{:032x}", tx_id),
+                                text,
+                            });
+                     }
+                     Err(e) => {
+                        eprintln!("[TCP INGRESS REJECTED] Hardware Backpressure: {} ", e);
+
+                        let mut err_buf = [0u8; 20];
+                        err_buf[0..4].copy_from_slice(&1u32.to_le_bytes());
+
+                        let _ = tokio::io::AsyncWriteExt::write_all(&mut write_half, &err_buf).await;
+                        break;
+
+
+                    }
+
+
+                    }
 
                     // Update RAM process Table (O(1) nanoseconds lock)
                     task_registry.touch_agent(
@@ -1008,24 +849,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &alias,
                     );
 
-                    let tx_id = match res {
-                        Ok(id) => id,
-                        Err(e) => {
-                            eprintln!("[CASCADE ERROR]: Processing failed: {:?}", e);
-                            continue;
-                        }
-                    };
-
-                    let _ = task_ui_tx.send(UiEvent::ThoughtCommitted {
-                        agent_hex: agent_hex.clone(),
-                        intent_path: path_intent.to_string(),
-                        tx_id: format!("{:032x}", tx_id),
-                        text,
-                    });
-
-                }
+                 }
 
                 });
+
+
 
             }
         }
@@ -1053,11 +881,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Sever the Global Mesh
     global_net.shutdown().await;
-
+    let _ = wal.cmd_sender.send(WalCommand::Shutdown).await;
     // Seal the WAL safely to nvme
     drop(wal);
     println!("[WAL] Senders dropped. Awaiting final io_uring fsync to NVMe... ");
-
     let _ = handle.await;
 
     println!("[SYSTEM] Raqim OS terminated cleanly. Zero data loss. AlhamdulliLah.");

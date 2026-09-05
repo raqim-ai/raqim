@@ -413,4 +413,30 @@ impl AxonGateKeeper {
         );
         Ok(())
     }
+
+    /// Returns the exact count of all leaves stored across completed batches and active buffers
+    pub fn get_total_leaves(&self) -> usize {
+        let archived_leaves: usize = self
+            .batch_archive
+            .iter()
+            .map(|e| e.value().leaves.len())
+            .sum();
+
+        let active_leaves: usize = self
+            .active_buffers
+            .iter()
+            .map(|e| e.value().read().accumulated_leaves.len())
+            .sum();
+
+        archived_leaves + active_leaves
+    }
+
+    /// Returns the highest tx_id currently indexed in the merkle-dag
+    pub fn get_latest_tx_id(&self) -> u128 {
+        self.tx_to_location
+            .iter()
+            .map(|e| *e.key())
+            .max()
+            .unwrap_or(0)
+    }
 }

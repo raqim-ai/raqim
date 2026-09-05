@@ -3,8 +3,8 @@
 [groups.admin_group]
 allowed_namespaces = ["*"]
 blocked_namespaces = []
-max_tps = 10000
-burst_capacity = 1000
+max_tps = 1_000_000
+burst_capacity = 500_000
 
 [groups.finance_worker]
 allowed_namespaces = ["/rqm_finance/*", "/audit/*"]

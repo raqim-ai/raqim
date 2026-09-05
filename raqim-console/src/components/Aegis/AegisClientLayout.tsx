@@ -29,7 +29,7 @@ export function AegisClientLayout({
   initialQuarantineList,
 }: AegisClientLayoutProps) {
   useSwarmStream();
-
+  
   const [metrics, setMetrics] = useState<AegisMetricsData | null>(initialMetrics);
   const [quarantineList, setQuarantineList] = useState<QuarantineRecord[]>(initialQuarantineList);
   const [selectedAgent, setSelectedAgent] = useState<QuarantineRecord | null>(null);

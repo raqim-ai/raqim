@@ -23,13 +23,23 @@ export interface DashboardCardsData {
   global_transactions: number;
   active_agents: number;
   vault_capacity: number;
+  latest_tx_hex?: string | null;
+  cold_thoughts_count?: number;
+  hot_thoughts_count?: number;
+  embedder_name?: string;
+  embedder_dims?: number;
+  ingress_paused?: boolean;
 }
 
 export interface SystemHealthPayload {
   cpu_load_percent: number;
-  wasm_memory_mb: number;
-  core_temp_celcius: number;
-  mesh_latency_ms: number;
+  wasm_memory_mb?: number;
+  process_memory_mb?: number;
+  process_rss_mb?: number;
+  host_used_memory_mb?: number;
+  host_total_memory_mb?: number;
+  core_temp_celcius?: number;
+  mesh_latency_ms?: number;
 }
 
 export interface GroupPolicyTelemetry {
@@ -61,35 +71,60 @@ export interface QuarantineRecord {
   timestamp: number;
 }
 
-export interface ClusterInfoData {
-  node_id: string;
-  highest_tx_id?: number | string;
-  wal_bytes: number;
-  buffer_load: number;
-}
-
 export interface ClusterShard {
   namespace: string;
-  active_timelines: number;
   total_crdt_operation: number;
   total_crdt_operations?: number;
+  active_timelines: number;
+  estimated_ram_mb?: number;
+  attached_agents?: string[];
+  status?: string;
+}
+
+export interface ClusterInfoData {
+  node_id: string;
+  highest_tx_id?: number;
+  wal_bytes: number;
+  wal_size_mb?: number;
+  buffer_load: number;
+  allocated_shards?: number;
+  cumulative_crdt_ops?: number;
+  active_timelines?: number;
+}
+
+export interface ClusterEnclave {
+  alias: string;
+  identity_hex: string;
+  home_shard: string;
+  status: string;
+  last_seen_ts: number;
+  committed_tx?: number;
 }
 
 export interface VaultSearchResult {
-  tx_id: number | string;
-  agent_hex: string;
-  namespace: string;
-  payload: string;
-  timestamp: string;
-  source: string;
-  similarity_score: number;
+  tx_id: number;
+  agent_id?: string;
+  agent_hex?: string;
+  score?: number;
+  similarity_score?: number;
+  text?: string;
+  payload?: string;
+  namespace?: string;
+  source: 'HOT_WAL' | 'COLD_LANCEDB' | string;
 }
 
 export interface VaultTelemetry {
   total_vectors: number;
+  indexed_vectors?: number;
   index_size_mb: number;
+  cold_storage_size_mb?: number;
   wal_pending_count: number;
+  hot_wal_buffer_count?: number;
   densest_namespace: string;
+  densest_partition?: string;
+  embedder_name?: string;
+  embeder_dim?: number;
+  embedder_dims?: number;
 }
 
 export interface InclusionProof {
@@ -203,6 +238,25 @@ export async function getDashboardCards(): Promise<ApiResponse<DashboardCardsDat
   return request<DashboardCardsData>('/v1/dashboard/cards', { method: 'GET' });
 }
 
+/** POST /v1/admin/ingress/toggle */
+export async function toggleIngress(): Promise<ApiResponse<{ is_ingress_paused: boolean }>> {
+  return request<{ is_ingress_paused: boolean }>('/v1/admin/ingress/toggle', {
+    method: 'POST',
+  });
+}
+
+/** POST /v1/admin/compactor/trigger */
+export async function triggerCompaction(): Promise<
+  ApiResponse<{ success: boolean; status?: string; message?: string }>
+> {
+  return request<{ success: boolean; status?: string; message?: string }>(
+    '/v1/admin/compactor/trigger',
+    {
+      method: 'POST',
+    }
+  );
+}
+
 /** GET /v1/system/agents/aliases */
 export async function getAgentAliases(): Promise<ApiResponse<Record<string, string>>> {
   return request<Record<string, string>>('/v1/system/agents/aliases', { method: 'GET' });
@@ -257,6 +311,13 @@ export async function getClusterInfo(): Promise<ApiResponse<ClusterInfoData>> {
 /** GET /v1/admin/cluster/topology */
 export async function getClusterTopology(): Promise<ApiResponse<ClusterShard[]>> {
   return request<ClusterShard[]>('/v1/admin/cluster/topology', { method: 'GET' });
+}
+
+/** GET /v1/cluster/enclaves */
+export async function getClusterEnclaves(): Promise<ApiResponse<ClusterEnclave[]>> {
+  const res = await request<ClusterEnclave[]>('/v1/cluster/enclaves', { method: 'GET' });
+  if (res.success) return res;
+  return request<ClusterEnclave[]>('/v1/admin/cluster/enclaves', { method: 'GET' });
 }
 
 /**

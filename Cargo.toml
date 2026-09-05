@@ -3,8 +3,15 @@ resolver = "3"
 members = [
     "raqim-core",
     "raqim-cli"
-, "raqim-mcp", "raqim-agent-sdk", "raqim-py", "raqim-siege"]
+, "raqim-mcp", "raqim-py", "raqim-siege"]
 
 [patch.crates-io]
 # This must be the full path to the repository
 chrono = { git = "https://github.com/chronotope/chrono", tag = "v0.4.38" }
+
+[profile.release]
+opt-level = 3
+lto = "fat"            # Link-Time Optimization: Eliminates duplicate cross-crate code
+codegen-units = 1      # Maximizes dead-code elimination across crates
+panic = "abort"        # Drops landing pads and unwind tables (Saves ~15MB)
+strip = "symbols"      # Strips all debug info and symbol tables

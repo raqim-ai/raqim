@@ -3,15 +3,15 @@
 import React, { useRef, useEffect } from 'react';
 import { TimelineNode, formatTxIdHex } from '../../lib/api';
 import {
-  ChevronLeft,
-  ChevronRight,
-  ChevronsLeft,
-  ChevronsRight,
   GitCommit,
+  Terminal,
   Cpu,
   Database,
-  Terminal,
-  Zap,
+  ChevronsLeft,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsRight,
+  Radio,
 } from 'lucide-react';
 
 interface StepScrubberDeckProps {
@@ -19,20 +19,32 @@ interface StepScrubberDeckProps {
   selectedIndex: number;
   onSelectIndex: (index: number) => void;
   isLoading: boolean;
-  divergentIndex: number | null;
 }
 
-const parseEffectType = (payload: string, status: string) => {
-  if (payload.includes('[TOOL_EXEC]') || status === 'TOOL_EXEC') {
-    return { label: 'Tool Execution', icon: Cpu, color: 'text-amber-400 border-amber-800 bg-amber-950/60' };
+const getStatusBadge = (status: string, payload: string) => {
+  const normalized = status.toUpperCase();
+  if (normalized.includes('TOOL') || payload.includes('[TOOL')) {
+    return {
+      label: 'ToolExecution',
+      style: 'bg-amber-500/10 border-amber-500/30 text-amber-400',
+    };
   }
-  if (payload.includes('[SQL') || payload.toLowerCase().includes('select') || payload.toLowerCase().includes('query')) {
-    return { label: 'Database Query', icon: Database, color: 'text-emerald-400 border-emerald-800 bg-emerald-950/60' };
+  if (normalized.includes('REASON') || payload.includes('[REASON')) {
+    return {
+      label: 'Reasoning',
+      style: 'bg-purple-500/10 border-purple-500/30 text-purple-400',
+    };
   }
-  if (payload.includes('[REASONING]') || status === 'REASONING') {
-    return { label: 'LLM Completion', icon: Terminal, color: 'text-purple-400 border-purple-800 bg-purple-950/60' };
+  if (normalized.includes('IDLE') || normalized.includes('STANDBY')) {
+    return {
+      label: 'Idle',
+      style: 'bg-zinc-800 border-zinc-700 text-zinc-400',
+    };
   }
-  return { label: 'State Mutation', icon: GitCommit, color: 'text-cyan-400 border-cyan-800 bg-cyan-950/60' };
+  return {
+    label: status || 'Committed',
+    style: 'bg-cyan-500/10 border-cyan-500/30 text-cyan-400',
+  };
 };
 
 export function StepScrubberDeck({
@@ -40,7 +52,6 @@ export function StepScrubberDeck({
   selectedIndex,
   onSelectIndex,
   isLoading,
-  divergentIndex,
 }: StepScrubberDeckProps) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
@@ -66,15 +77,15 @@ export function StepScrubberDeck({
   const handleLast = () => onSelectIndex(Math.max(timeline.length - 1, 0));
 
   return (
-    <div className="bg-[#0D1322] border border-slate-800 rounded-sm overflow-hidden flex flex-col shrink-0 shadow-lg select-none">
+    <div className="bg-zinc-950/80 border border-zinc-800/80 rounded-sm overflow-hidden flex flex-col shrink-0 shadow-lg select-none">
       {/* Scrubber Controls Bar */}
-      <div className="bg-[#080C14] border-b border-slate-800 px-3 py-1.5 flex items-center justify-between gap-3 text-xs font-mono">
+      <div className="bg-zinc-900/90 border-b border-zinc-800 px-3 py-1.5 flex items-center justify-between gap-3 text-xs font-mono">
         <div className="flex items-center gap-2">
           <GitCommit className="w-3.5 h-3.5 text-cyan-400" />
-          <span className="font-sans text-xs uppercase tracking-wider font-bold text-slate-300">
+          <span className="font-sans text-xs uppercase tracking-wider font-bold text-zinc-300">
             Causal Execution Timeline &amp; Step Scrubber
           </span>
-          <span className="px-1.5 py-0.2 rounded-xs bg-slate-900 border border-slate-800 text-[10px] text-cyan-400 font-bold">
+          <span className="px-1.5 py-0.2 rounded-xs bg-zinc-800 border border-zinc-700 text-[10px] text-cyan-400 font-bold">
             {timeline.length} CAUSAL STEPS
           </span>
         </div>
@@ -84,29 +95,29 @@ export function StepScrubberDeck({
           <button
             onClick={handleFirst}
             disabled={selectedIndex <= 0 || timeline.length === 0}
-            title="First Step (Ordinal #0)"
-            className="p-1 rounded-xs bg-slate-950 border border-slate-800 text-slate-400 hover:text-white disabled:opacity-30 transition-colors"
+            title="First Step"
+            className="p-1 rounded-xs bg-zinc-950 border border-zinc-800 text-zinc-400 hover:text-white disabled:opacity-30 transition-colors"
           >
             <ChevronsLeft className="w-3.5 h-3.5" />
           </button>
           <button
             onClick={handlePrev}
             disabled={selectedIndex <= 0 || timeline.length === 0}
-            title="Step Back"
-            className="p-1 rounded-xs bg-slate-950 border border-slate-800 text-slate-400 hover:text-white disabled:opacity-30 transition-colors"
+            title="Previous Step"
+            className="p-1 rounded-xs bg-zinc-950 border border-zinc-800 text-zinc-400 hover:text-white disabled:opacity-30 transition-colors"
           >
             <ChevronLeft className="w-3.5 h-3.5" />
           </button>
 
           <span className="px-2 font-bold text-white text-[11px]">
-            STEP #{timeline.length > 0 ? selectedIndex : 0} / {Math.max(timeline.length - 1, 0)}
+            STEP #{timeline.length > 0 ? selectedIndex + 1 : 0} / {timeline.length}
           </span>
 
           <button
             onClick={handleNext}
             disabled={selectedIndex >= timeline.length - 1 || timeline.length === 0}
-            title="Step Forward"
-            className="p-1 rounded-xs bg-slate-950 border border-slate-800 text-slate-400 hover:text-white disabled:opacity-30 transition-colors"
+            title="Next Step"
+            className="p-1 rounded-xs bg-zinc-950 border border-zinc-800 text-zinc-400 hover:text-white disabled:opacity-30 transition-colors"
           >
             <ChevronRight className="w-3.5 h-3.5" />
           </button>
@@ -114,7 +125,7 @@ export function StepScrubberDeck({
             onClick={handleLast}
             disabled={selectedIndex >= timeline.length - 1 || timeline.length === 0}
             title="Head Step"
-            className="p-1 rounded-xs bg-slate-950 border border-slate-800 text-slate-400 hover:text-white disabled:opacity-30 transition-colors"
+            className="p-1 rounded-xs bg-zinc-950 border border-zinc-800 text-zinc-400 hover:text-white disabled:opacity-30 transition-colors"
           >
             <ChevronsRight className="w-3.5 h-3.5" />
           </button>
@@ -124,73 +135,61 @@ export function StepScrubberDeck({
       {/* Horizontal Scrubber Strip */}
       <div
         ref={scrollContainerRef}
-        className="p-2.5 overflow-x-auto flex items-stretch gap-2.5 min-h-[100px] bg-[#050811] scrollbar-thin scrollbar-thumb-slate-800"
+        className="p-2.5 overflow-x-auto flex items-stretch gap-2.5 min-h-[105px] bg-zinc-950 scrollbar-thin scrollbar-thumb-zinc-800"
       >
         {isLoading ? (
-          <div className="flex-1 flex items-center justify-center py-6 text-slate-400 font-mono text-xs gap-2">
-            <div className="w-4 h-4 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin" />
+          <div className="flex-1 flex items-center justify-center py-6 text-zinc-400 font-mono text-xs gap-2">
+            <div className="w-4 h-4 border-2 border-emerald-400 border-t-transparent rounded-full animate-spin" />
             <span>FETCHING CAUSAL TIMELINE FROM LANCEDB + WAL...</span>
           </div>
         ) : timeline.length === 0 ? (
-          <div className="flex-1 flex items-center justify-center py-6 text-slate-400 font-mono text-xs uppercase">
+          <div className="flex-1 flex items-center justify-center py-6 text-zinc-500 font-mono text-xs uppercase">
             [ ZERO RECORDED STEPS FOR THIS ENCLAVE ]
           </div>
         ) : (
           timeline.map((node, index) => {
             const isSelected = index === selectedIndex;
-            const isDivergent = divergentIndex !== null && index >= divergentIndex;
-            const txHex = formatTxIdHex(node.tx_id);
-            const { label, icon: Icon, color } = parseEffectType(node.payload_preview, node.agent_status);
+            const statusBadge = getStatusBadge(node.agent_status, node.payload_preview);
+            const previewText = node.payload_preview
+              ? node.payload_preview.length > 60
+                ? `${node.payload_preview.slice(0, 60)}...`
+                : node.payload_preview
+              : '[State Transition Committed]';
 
             return (
               <div
                 key={`${node.tx_id}-${index}`}
                 data-active={isSelected}
                 onClick={() => onSelectIndex(index)}
-                className={`w-60 shrink-0 p-2.5 rounded-sm border cursor-pointer transition-all duration-150 flex flex-col justify-between group ${
+                className={`w-64 shrink-0 p-2.5 rounded-sm border cursor-pointer transition-all duration-150 flex flex-col justify-between group ${
                   isSelected
-                    ? isDivergent
-                      ? 'bg-purple-950/60 border-purple-400 ring-2 ring-purple-400/40 shadow-[0_0_15px_rgba(168,85,247,0.3)]'
-                      : 'bg-slate-900 border-cyan-400 ring-2 ring-cyan-400/40 shadow-[0_0_15px_rgba(0,243,255,0.3)]'
-                    : isDivergent
-                    ? 'bg-[#0B0A17] border-purple-900/60 hover:border-purple-600'
-                    : 'bg-[#0A0F1D] border-slate-800/90 hover:border-slate-700 hover:bg-slate-900/50'
+                    ? 'bg-zinc-900 border-emerald-500 ring-2 ring-emerald-500/40 shadow-[0_0_15px_rgba(16,185,129,0.3)]'
+                    : 'bg-zinc-900/60 border-zinc-800/90 hover:border-zinc-700 hover:bg-zinc-900/80'
                 }`}
               >
-                {/* Step Index & Type */}
+                {/* Node Header: STEP #(index + 1) | timestamp */}
                 <div className="flex items-center justify-between gap-1 mb-1 font-mono text-[10px]">
-                  <span className={`font-bold ${isSelected ? 'text-white' : 'text-slate-300'}`}>
-                    Step #{index}
+                  <span className={`font-bold ${isSelected ? 'text-emerald-400' : 'text-zinc-300'}`}>
+                    STEP #{index + 1}
                   </span>
-                  <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-xs border text-[9px] font-bold ${color}`}>
-                    <Icon className="w-2.5 h-2.5" />
-                    <span>{label}</span>
+                  <span className="text-zinc-500 text-[9px] truncate max-w-[100px]" title={node.timestamp}>
+                    {node.timestamp || '00:00:00'}
                   </span>
                 </div>
 
-                {/* Payload Snippet */}
-                <p className="text-slate-300 text-[10px] font-mono line-clamp-2 leading-snug my-1">
-                  {node.payload_preview || '[State Transition Committed]'}
-                </p>
-
-                {/* Step Footer: Hash & Status Badge */}
-                <div className="pt-1.5 border-t border-slate-800/80 flex items-center justify-between font-mono text-[9px]">
-                  <span className="text-slate-400 truncate max-w-[90px]" title={txHex}>
-                    sig: {txHex.slice(0, 6)}...
-                  </span>
-
+                {/* Status Pill */}
+                <div className="my-0.5">
                   <span
-                    className={`px-1 py-0.2 rounded-xs border font-bold uppercase tracking-tight text-[8px] ${
-                      isDivergent
-                        ? 'bg-purple-950 text-purple-300 border-purple-700'
-                        : isSelected
-                        ? 'bg-emerald-950 text-emerald-300 border-emerald-700'
-                        : 'bg-slate-950 text-slate-400 border-slate-800'
-                    }`}
+                    className={`inline-block px-1.5 py-0.2 rounded-xs border text-[9px] font-bold uppercase font-mono ${statusBadge.style}`}
                   >
-                    {isDivergent ? '⚡ FORKED' : isSelected ? '🟢 REPLAYED' : '🔵 RECORDED'}
+                    {statusBadge.label}
                   </span>
                 </div>
+
+                {/* Payload Preview (slice 0, 60) */}
+                <p className="text-zinc-300 text-[10px] font-mono leading-snug my-1 line-clamp-2">
+                  {previewText}
+                </p>
               </div>
             );
           })

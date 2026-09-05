@@ -10,9 +10,11 @@ import { RAQIM_DAEMON_BASE_URL } from '../../lib/api';
 export function MainLayout({
   children,
   title,
+  headerAction,
 }: {
   children: React.ReactNode;
   title: string;
+  headerAction?: React.ReactNode;
 }) {
   const pathname = usePathname();
   const isTopology = pathname === '/topology';
@@ -21,6 +23,13 @@ export function MainLayout({
 
   const daemonOnline = useSwarmStore((state) => state.daemonOnline);
   const currentVitals = useSwarmStore((state) => state.currentVitals);
+
+  const ramMb = Math.round(
+    currentVitals?.process_memory_mb ??
+    currentVitals?.wasm_memory_mb ??
+    currentVitals?.process_rss_mb ??
+    0
+  );
 
   return (
     <div className="bg-surface text-on-surface antialiased h-screen w-screen overflow-hidden flex flex-col selection:bg-primary-container/30">
@@ -67,6 +76,7 @@ export function MainLayout({
               </div>
 
               <div className="flex items-center gap-4">
+                {headerAction}
                 {pathname === '/firewall' && (
                   <div className="text-[#ef4444] border border-[#ef4444]/30 bg-[#ef4444]/10 px-3.5 py-1.5 rounded-sm font-mono text-[10px] uppercase tracking-[0.2em] font-bold shadow-[0_0_10px_rgba(239,68,68,0.15)]">
                     [ AEGIS ENFORCEMENT: STRICT ]
@@ -114,7 +124,7 @@ export function MainLayout({
                   <div className="h-3 w-px bg-zinc-800 shrink-0"></div>
                   <span className="font-mono text-[10px] uppercase tracking-[0.15em] text-secondary">
                     {currentVitals
-                      ? `CPU: ${currentVitals.cpu_load_percent.toFixed(1)}% | RAM: ${currentVitals.wasm_memory_mb.toFixed(0)}MB`
+                      ? `CPU: ${currentVitals.cpu_load_percent.toFixed(1)}% | RAM: ${ramMb}MB`
                       : 'STANDALONE MODE'}
                   </span>
                 </div>

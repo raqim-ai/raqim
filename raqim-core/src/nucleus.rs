@@ -18,6 +18,7 @@ use std::{
 };
 use tokio::io::AsyncWriteExt;
 use tokio::{
+    io::AsyncSeekExt,
     sync::{RwLock, mpsc, oneshot},
     time::interval,
 };
@@ -30,8 +31,39 @@ pub struct WalEngine {
     pub index: Arc<RwLock<BTreeMap<u128, u64>>>,
 }
 
+#[derive(Debug)]
+pub enum WalError {
+    IngressQueueFull(String),
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for WalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WalError::IngressQueueFull(msg) => write!(f, "WAL channel saturated: {}", msg),
+            WalError::Io(e) => write!(f, "I/O error during WAL operation: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for WalError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            WalError::IngressQueueFull(_) => None,
+            WalError::Io(e) => Some(e),
+        }
+    }
+}
+
+impl From<std::io::Error> for WalError {
+    fn from(err: std::io::Error) -> Self {
+        WalError::Io(err)
+    }
+}
+
 pub enum WalCommand {
     Rotate(oneshot::Sender<String>),
+    Shutdown,
 }
 
 impl WalEngine {
@@ -48,7 +80,7 @@ impl WalEngine {
         })
     }
 
-    /// Bootstraps the enterprise crash-safe WAL with automatic torn-frame recovery
+    /// Bootstraps the crash-safe WAL with automatic torn-frame recovery
     pub async fn start(file_path: String) -> (Arc<Self>, tokio::task::JoinHandle<()>) {
         println!("Bismillah. Booting Portable Nucleus Crash-Safe WAL Engine...");
 
@@ -69,9 +101,16 @@ impl WalEngine {
                 .create(true)
                 .read(true)
                 .write(true)
+                .append(true)
                 .open(&file_path)
                 .await
-                .expect("Failed to open  WAL file");
+                .expect("Failed to open crash-safe WAL file");
+
+            // Explicit hardware seek to guarantee alignment with recovered index.
+            active_file
+                .seek(std::io::SeekFrom::Start(clean_offset))
+                .await
+                .expect("FATAL: Failed to seek WAL writes cursor to clean_offset");
 
             let mut current_offset = clean_offset;
             let mut batch: Vec<OpLog> = Vec::with_capacity(6_000);
@@ -117,8 +156,12 @@ impl WalEngine {
                     // Path C: Segment Rotation Command
                     cmd = cmd_rx.recv() => {
                         match cmd {
-                        Some(WalCommand::Rotate(reply_tx)) => {
+                        Some(WalCommand::Shutdown) => {
+                            let _ = active_file.sync_all().await;
+                            break;
+                        }
 
+                        Some(WalCommand::Rotate(reply_tx)) => {
                             println!("[WAL_ENGINE] Halting I/O. Rotating WAL segment...");
 
                             // 1. Force final hardware flush
@@ -126,14 +169,12 @@ impl WalEngine {
 
                             // Generate archived filename based on unix timestamp
                             let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
-                            let archived_name = format!("{fp_clone}_{timestamp}.wal");
+                            let archived_name = format!("{}_{}.wal", fp_clone, timestamp);
 
                             // Async File rename (non-blocking)
                             if let Err(e) = tokio::fs::rename(&fp_clone, &archived_name).await {
-
                                 eprintln!("[WAL_ENGINE ERROR] Rotation rename failed: {} ", e);
                                 continue;
-
                             }
 
                             // Open a fresh active file & reset offset
@@ -187,7 +228,7 @@ impl WalEngine {
         let payload_bytes = to_bytes::<rkyv::rancor::Error>(&batch.to_vec())
             .expect("Failed to serialize batch")
             .into_vec();
-        
+
         // Compute CRC32 checksums over payload bytes
         let payload_len = payload_bytes.len() as u32;
         let checksum = crc32fast::hash(&payload_bytes);
@@ -308,7 +349,7 @@ impl WalEngine {
 
             offset += 4 + 4 + payload_len as u64;
         }
-        
+
         // Truncate file back to the last 100% valid checksum-verified boundary
         if let Err(e) = file.set_len(offset) {
             eprintln!(
@@ -332,8 +373,11 @@ impl WalEngine {
     }
 
     /// Fire and forget. The TCP/Agent networking layer NEVER blocks here.
-    pub async fn append(&self, log: OpLog) {
-        let _ = self.sender.send(log).await;
+    pub async fn append(&self, log: OpLog) -> Result<(), WalError> {
+        self.sender
+            .send(log)
+            .await
+            .map_err(|e| WalError::IngressQueueFull(e.to_string()))
     }
 
     /// Extremely fast binary scan of the active WAL for a specific substring
@@ -345,11 +389,8 @@ impl WalEngine {
         wal_path: &str,
     ) -> Result<Vec<VaultSearchResult>, anyhow::Error> {
         let file = File::open(wal_path)?;
-
-        // Page the WAL directly into virtual memory. Zero read() syscall overhead
         let mmap = unsafe { MmapOptions::new().map(&file)? };
 
-        // Compile the search automaton (case-insensitive)
         let ac = AhoCorasick::builder()
             .ascii_case_insensitive(true)
             .build(vec![query])
@@ -358,85 +399,58 @@ impl WalEngine {
         let mut results = Vec::new();
         let mut cursor = 0;
 
-        while cursor < mmap.len() && results.len() < limit {
-            if cursor + 4 > mmap.len() {
+        while cursor + 8 <= mmap.len() && results.len() < limit {
+            let len = u32::from_le_bytes(mmap[cursor..cursor + 4].try_into().unwrap()) as usize;
+            let expected_crc = u32::from_le_bytes(mmap[cursor + 4..cursor + 8].try_into().unwrap());
+            cursor += 8; // FIXED: Advance past [4B Length] + [4B CRC32]
+
+            if cursor + len > mmap.len() {
                 break;
             }
-            let len = u32::from_le_bytes(mmap[cursor..cursor + 4].try_into().unwrap()) as usize;
-            cursor += 4;
-
             let payload = &mmap[cursor..cursor + len];
             cursor += len;
 
-            // Zero-copy rkyv extraction
-            let archived_log =
-                unsafe { rkyv::access_unchecked::<<OpLog as rkyv::Archive>::Archived>(payload) };
-            let text = archived_log.state.text.as_str();
-            let ns = archived_log.state.namespace.as_str();
+            if crc32fast::hash(payload) != expected_crc {
+                continue;
+            }
 
-            if let Some(filter) = namespace_filter {
-                if !filter.is_empty() && filter != ns {
-                    continue;
+            // TRUE ZERO-COPY: Inspects Vec<OpLog> pointer directly in kernel mmap page
+            if let Ok(archived_batch) = rkyv::access::<
+                <Vec<OpLog> as rkyv::Archive>::Archived,
+                rkyv::rancor::Error,
+            >(payload)
+            {
+                for archived_log in archived_batch.as_slice() {
+                    let text = archived_log.state.text.as_str();
+                    let ns = archived_log.state.namespace.as_str();
+
+                    if let Some(filter) = namespace_filter {
+                        if !filter.is_empty() && filter != ns {
+                            continue;
+                        }
+                    }
+
+                    if ac.is_match(text) {
+                        results.push(VaultSearchResult {
+                            agent_hex: hex::encode(archived_log.agent_id.as_slice()),
+                            tx_id: archived_log.state.transaction_id.to_native(),
+                            namespace: ns.to_string(),
+                            payload: text.to_string(),
+                            timestamp: archived_log.state.timestamp.to_string(),
+                            source: "HOT_WAL".to_string(),
+                            similarity_score: 1.0,
+                        });
+
+                        if results.len() >= limit {
+                            break;
+                        }
+                    }
                 }
             }
-
-            //  SIMD-accelerated search over the exact text slice
-            if ac.is_match(text) {
-                results.push(VaultSearchResult {
-                    agent_hex: hex::encode(archived_log.state.agent_id.unwrap()),
-                    tx_id: archived_log.state.transaction_id.into(),
-                    namespace: archived_log.state.namespace.to_string(),
-                    payload: text.to_string(),
-                    timestamp: archived_log.state.timestamp.to_string(),
-                    source: "HOT_WAL".to_string(),
-                    similarity_score: 1.0,
-                });
-            }
         }
+
         results.reverse();
         Ok(results)
-    }
-
-    /// Scans the raw WAL file to find the highest TxID it contains.
-    /// Executes syncronously during the OS Bootstrap phase.
-    pub fn get_highest_tx_id(&self, file_path: &str) -> u128 {
-        let mut file = match std::fs::File::open(file_path) {
-            Ok(f) => f,
-            Err(_) => {
-                println!(
-                    "[WAL] No existing WAL found at {}. Starting fresh. ",
-                    file_path
-                );
-                return 0;
-            }
-        };
-
-        let mut highest_tx: u128 = 0;
-        let mut len_buf = [0u8; 4];
-
-        // PHYSICS: Iterate throught the append-only binary log.
-        while file.read_exact(&mut len_buf).is_ok() {
-            let payload_len = u32::from_le_bytes(len_buf) as usize;
-            let mut payload = vec![0u8; payload_len];
-
-            if file.read_exact(&mut payload).is_err() {
-                eprintln!("[WAL WARNING] Corrupted trailing bytes detected. Truncation required. ");
-                break;
-            }
-
-            // Bounds-checked zero-copy pointer access
-            if let Ok(archived_log) =
-                rkyv::access::<<OpLog as rkyv::Archive>::Archived, rkyv::rancor::Error>(&payload)
-            {
-                let tx_id = archived_log.state.transaction_id.to_native();
-
-                if tx_id > highest_tx {
-                    highest_tx = tx_id;
-                }
-            }
-        }
-
-        highest_tx
     }
 
     pub fn fetch_hot_timeline(
@@ -456,37 +470,99 @@ impl WalEngine {
         let mut cursor = 0;
         let target_bytes = hex::decode(agent_hex).unwrap_or(vec![0; 16]);
 
-        while cursor < mmap.len() {
-            if cursor + 4 > mmap.len() {
+        while cursor + 8 <= mmap.len() {
+            let len = u32::from_le_bytes(mmap[cursor..cursor + 4].try_into().unwrap()) as usize;
+            let expected_crc = u32::from_le_bytes(mmap[cursor + 4..cursor + 8].try_into().unwrap());
+            cursor += 8;
+
+            if cursor + len > mmap.len() {
                 break;
             }
-
-            let len = u32::from_le_bytes(mmap[cursor..cursor + 4].try_into().unwrap()) as usize;
-            cursor += 4;
 
             let payload = &mmap[cursor..cursor + len];
             cursor += len;
 
-            let archived_bytes =
-                unsafe { rkyv::access_unchecked::<<OpLog as rkyv::Archive>::Archived>(payload) };
+            if crc32fast::hash(payload) != expected_crc {
+                continue;
+            }
 
-            let current_bytes = archived_bytes.agent_id;
+            if let Ok(archived_batch) = rkyv::access::<
+                <Vec<OpLog> as rkyv::Archive>::Archived,
+                rkyv::rancor::Error,
+            >(payload)
+            {
+                for archived_log in archived_batch.as_slice() {
+                    if archived_log.agent_id.as_slice() == target_bytes.as_slice() {
+                        let status_str = match &archived_log.state.status {
+                            rkyv::Archived::<AgentStatus>::Idle => "Idle",
+                            rkyv::Archived::<AgentStatus>::Reasoning => "Reasoning",
+                            rkyv::Archived::<AgentStatus>::Halted => "Halted",
+                            rkyv::Archived::<AgentStatus>::ToolExecution => "ToolExecution",
+                        };
 
-            if current_bytes.as_slice() == target_bytes.as_slice() {
-                let native_status = rkyv::deserialize::<AgentStatus, rkyv::rancor::Error>(
-                    &archived_bytes.state.status,
-                )
-                .unwrap();
-
-                nodes.push(TimelineNode {
-                    tx_id: archived_bytes.state.transaction_id.into(),
-                    timestamp: archived_bytes.state.timestamp.to_string(),
-                    agent_status: format!("{:?}", native_status),
-                    payload_preview: archived_bytes.state.text.to_string(),
-                });
+                        nodes.push(TimelineNode {
+                            tx_id: archived_log.state.transaction_id.to_native(),
+                            timestamp: archived_log.state.timestamp.to_string(),
+                            agent_status: status_str.to_string(),
+                            payload_preview: archived_log.state.text.as_str().to_string(),
+                        });
+                    }
+                }
             }
         }
 
         Ok(nodes)
+    }
+
+    /// Scans the raw WAL file to find the highest TxID it contains.
+    /// Executes syncronously during the OS Bootstrap phase.
+    pub fn get_highest_tx_id(&self, file_path: &str) -> u128 {
+        let mut file = match std::fs::File::open(file_path) {
+            Ok(f) => f,
+            Err(_) => {
+                println!(
+                    "[WAL] No existing WAL found at {}. Starting fresh. ",
+                    file_path
+                );
+                return 0;
+            }
+        };
+
+        let mut highest_tx: u128 = 0;
+        let mut len_buf = [0u8; 4];
+        let mut crc_buf = [0u8; 4];
+
+        // Iterate throught the append-only binary log.
+        while file.read_exact(&mut len_buf).is_ok() {
+            let payload_len = u32::from_le_bytes(len_buf) as usize;
+
+            if file.read_exact(&mut crc_buf).is_err() {
+                break;
+            }
+
+            let mut payload = vec![0u8; payload_len];
+
+            if file.read_exact(&mut payload).is_err() {
+                eprintln!("[WAL WARNING] Corrupted trailing bytes detected. Truncation required. ");
+                break;
+            }
+
+            // Bounds-checked zero-copy pointer access
+            if let Ok(batch) = rkyv::access::<
+                <Vec<OpLog> as rkyv::Archive>::Archived,
+                rkyv::rancor::Error,
+            >(&payload)
+            {
+                for archived_log in batch.as_slice() {
+                    let tx_id = archived_log.state.transaction_id.to_native();
+
+                    if tx_id > highest_tx {
+                        highest_tx = tx_id;
+                    }
+                }
+            }
+        }
+
+        highest_tx
     }
 }

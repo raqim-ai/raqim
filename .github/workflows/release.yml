@@ -1,58 +1,170 @@
-name: Sovereign OS Release Pipeline
+name: Global Release & Packaging Pipeline
 
-# 1. THE TRIGGER: Only run this factory when a version tag is pushed
 on:
-  push: 
-    tags: 
+  push:
+    tags:
       - 'v*'
 
-# 2. TH PERMISSION: Give the factory the right to push to the right registry
 permissions:
-  contents: read
+  contents: write
   packages: write
+  id-token: write
 
-jobs: 
-  build-and-pulish: 
-    name:   Build & Push Distroless Image
-    runs-on: ubuntu-latest # The Sterile cloud server
+jobs:
+  # =========================================================================
+  # JOB 1: Cross-Platform Native Binaries (raqim-core, raqim-cli, raqim-mcp)
+  # =========================================================================
+  build-binaries:
+    name: Build Native Binaries (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: raqim-linux-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: raqim-macos-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: raqim-windows-x86_64
 
-    steps: 
-    # Step A: Checkout the exact code at this tag
-    - name: Checkout Code 
-      uses: actions/checkout@v4
-    
-    # Step B: Set up Docker Buildx (Multi-architectural builder)
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
 
-    # Step C: Log into the GHCR using the factory's automated token
-    - name: Authenticate to GHCR
-      uses: docker/login-action@v3
-      with: 
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
-    # Step D: Extract metadata to tag the image properly (e.g., v1.0.0 and 'latest' )
-    - name: Extract Docker Metadata
-      id: meta 
-      uses: docker/metadata-action@v5
-      with: 
-        images: ghcr.io/${{ github.repository }}/raqim-daemon
-        tags: |
-          type=semver,pattern={{version}}
-          type=raw,value=latest
+      - name: Install Linux Build Dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev protobuf-compiler build-essential
 
-    # Step E: The Physical Build & Push
-    # Runs Dockerfile, compiles rust code, strips it to distroless and pushes the final 40MB artifact to the global CDN.
-    - name: Build and Push to GHCR
-      uses: docker/build-push-action@v5
-      with: 
-        context: .
-        push: true
-        tags: ${{steps.meta.outputs.tags}}
-        labels: ${{steps.meta.outputs.labels}}
-        # Utiliize github action cache to prevent compiling dependency crates from scratch every time
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-    
+      - name: Compile Release Binaries
+        run: |
+          cargo build --release --target ${{ matrix.target }} --bin raqim-core --bin raqim-cli --bin raqim-mcp
+
+      - name: Package Binaries (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/raqim-core dist/
+          cp target/${{ matrix.target }}/release/raqim-cli dist/
+          cp target/${{ matrix.target }}/release/raqim-mcp dist/
+          cd dist && tar -czvf ../${{ matrix.artifact_name }}.tar.gz *
+
+      - name: Package Binaries (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          mkdir dist
+          copy target\${{ matrix.target }}\release\raqim-core.exe dist\
+          copy target\${{ matrix.target }}\release\raqim-cli.exe dist\
+          copy target\${{ matrix.target }}\release\raqim-mcp.exe dist\
+          Compress-Archive -Path dist\* -DestinationPath ${{ matrix.artifact_name }}.zip
+
+      - name: Upload Release Artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            raqim-*.tar.gz
+            raqim-*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # =========================================================================
+  # JOB 2: Multi-Stage Container Build & Push to GHCR
+  # =========================================================================
+  publish-container:
+    name: Build & Push OCI Image to GHCR
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}/core
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest
+
+      - name: Build and Push Daemon Image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # =========================================================================
+  # JOB 3: Compile PyO3 C-Extensions & Publish Python Wheel to PyPI
+  # =========================================================================
+  publish-pypi:
+    name: Build & Publish raqim-py (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Build Wheels with Maturin
+        uses: PyO3/maturin-action@v1
+        with:
+          target: auto
+          args: --release --out dist --manifest-path raqim-py/Cargo.toml
+          sccache: 'true'
+          manylinux: auto
+
+      - name: Upload Wheels to Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: dist
+
+  release-pypi:
+    name: Publish Wheels to PyPI
+    needs: [publish-pypi]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all Wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+
+      - name: Publish Package to PyPI
+        uses: PyO3/maturin-action@v1
+        env:
+          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        with:
+          command: upload
+          args: --skip-existing dist/*

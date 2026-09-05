@@ -2,7 +2,7 @@
 
 import React from 'react';
 import { GroupPolicyTelemetry } from '../../lib/api';
-import { Gauge, ShieldCheck, Lock, CheckCircle2 } from 'lucide-react';
+import { Gauge, Lock, CheckCircle2 } from 'lucide-react';
 
 interface TokenBucketGaugesProps {
   policies: GroupPolicyTelemetry[];
@@ -28,22 +28,22 @@ export function TokenBucketGauges({ policies }: TokenBucketGaugesProps) {
   };
 
   return (
-    <div className="bg-[#0D1322] border border-slate-800 rounded-sm p-3.5 flex flex-col gap-3 shadow-lg">
+    <div className="bg-zinc-950/80 border border-zinc-800/80 rounded-sm p-3.5 flex flex-col gap-3 shadow-lg select-none">
       {/* Header */}
-      <div className="flex items-center justify-between text-slate-400 pb-2 border-b border-slate-800 select-none">
-        <div className="flex items-center gap-1.5 font-sans text-xs uppercase tracking-wider font-bold text-slate-200">
+      <div className="flex items-center justify-between text-zinc-400 pb-2 border-b border-zinc-800 select-none">
+        <div className="flex items-center gap-1.5 font-sans text-xs uppercase tracking-wider font-bold text-zinc-200">
           <Gauge className="w-3.5 h-3.5 text-cyan-400" />
           <span>Token Bucket Rate-Limit Gauges</span>
         </div>
-        <span className="font-mono text-[10px] text-cyan-400">
+        <span className="font-mono text-[10px] text-cyan-400 font-bold">
           {policies.length} POLICIES ACTIVE
         </span>
       </div>
 
       {/* Policies List */}
-      <div className="space-y-3.5 overflow-y-auto max-h-72">
+      <div className="space-y-3.5 overflow-y-auto max-h-72 scrollbar-thin scrollbar-thumb-zinc-800">
         {policies.length === 0 ? (
-          <div className="text-center py-6 text-slate-400 font-mono text-[11px] uppercase tracking-wider">
+          <div className="text-center py-6 text-zinc-500 font-mono text-[11px] uppercase tracking-wider">
             [ POLICIES SYNCED WITH DAEMON DEFAULTS ]
           </div>
         ) : (
@@ -59,7 +59,7 @@ export function TokenBucketGauges({ policies }: TokenBucketGaugesProps) {
             return (
               <div
                 key={policy.group_name}
-                className={`bg-slate-950/80 border ${color.border} rounded-xs p-3 space-y-2.5 transition-colors`}
+                className={`bg-zinc-900 border ${color.border} rounded-xs p-3 space-y-2.5 transition-colors`}
               >
                 {/* Group Name & Status */}
                 <div className="flex items-center justify-between font-mono">
@@ -73,13 +73,13 @@ export function TokenBucketGauges({ policies }: TokenBucketGaugesProps) {
 
                 {/* Progress Bar */}
                 <div className="space-y-1">
-                  <div className="w-full h-2 bg-slate-900 rounded-xs overflow-hidden border border-slate-800/80">
+                  <div className="w-full h-2 bg-zinc-950 rounded-xs overflow-hidden border border-zinc-800">
                     <div
                       className={`h-full ${color.bar} transition-all duration-300`}
                       style={{ width: `${pct}%` }}
                     />
                   </div>
-                  <div className="flex items-center justify-between font-mono text-[10px] text-slate-400">
+                  <div className="flex items-center justify-between font-mono text-[10px] text-zinc-400">
                     <span className={color.text}>
                       {remaining.toLocaleString()} / {burst.toLocaleString()} TOKENS
                     </span>
@@ -93,7 +93,7 @@ export function TokenBucketGauges({ policies }: TokenBucketGaugesProps) {
                   {allowed.map((ns) => (
                     <span
                       key={ns}
-                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-xs bg-emerald-950/60 border border-emerald-800/60 text-emerald-400"
+                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-xs bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 font-bold"
                     >
                       <CheckCircle2 className="w-2.5 h-2.5" />
                       <span>{ns}</span>
@@ -104,7 +104,7 @@ export function TokenBucketGauges({ policies }: TokenBucketGaugesProps) {
                   {blocked.map((ns) => (
                     <span
                       key={ns}
-                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-xs bg-rose-950/60 border border-rose-800/60 text-rose-400"
+                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-xs bg-rose-950/60 border border-rose-800/60 text-rose-400 font-bold"
                     >
                       <Lock className="w-2.5 h-2.5" />
                       <span>{ns}</span>

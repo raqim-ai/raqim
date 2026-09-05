@@ -1,0 +1,43 @@
+version: "3.8"
+
+services: 
+  raqim-daemon: 
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    image: raqim/core:v1.0.0
+    container_name: raqim-core-daemon
+    restart: unless-stopped
+    ports: 
+      - "8080:8080"
+      - "8081:8081"
+      - "7447:7447"
+    volumes:
+      - ./data:/var/lib/raqim/data
+      - ./ca-keys:/var/lib/raqim/ca-keys
+      - ./vault:/var/lib/raqim/vault
+      - ./aegis.toml:/var/lib/raqim/aegis.toml
+    environment: 
+    - RUST_LOG=info 
+    - RAQIM_PORT=8080
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/v1/dashboard/cards || exit 1"] 
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+    # The Frontend
+    raqim-console: 
+      build: 
+        context: ./raqim-console
+        dockerfile: Dockerfile
+      image: raqim/console:v1.0.0
+      container_name: raqim-console-ui
+      restart: unless-stopped
+      ports: 
+      - "3000:3000"
+      environment: 
+        - NEXT_PUBLIC_RAQIM_DAEMON_URL=http://localhost:8081
+      depends_on: 
+        raqim-daemon: 
+          condition: service_healthy

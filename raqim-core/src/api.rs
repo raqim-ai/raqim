@@ -1,40 +1,40 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Multipart, Path, Query};
+use axum::extract::{Path, Query};
+use axum::http::header::{AUTHORIZATION, HOST, ORIGIN};
 use axum::response::{IntoResponse, Response};
 use axum::{
-    Json, async_trait,
     extract::{FromRequestParts, State},
-    http::{StatusCode, request::Parts},
+    http::{request::Parts, StatusCode},
     routing::{get, post},
+    Json,
 };
-use tower_http::catch_panic::CatchPanicLayer;
-
 use base64::Engine;
+use tokio::sync::watch;
+use tower_http::catch_panic::CatchPanicLayer;
 
 use axum::body::Bytes;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use dashmap::DashMap;
 use ed25519_dalek::{Signer, SigningKey};
 use futures_util::stream::Stream;
-use futures_util::{SinkExt, stream::StreamExt};
-use serde_json::{Value, json};
+use futures_util::{stream::StreamExt, SinkExt};
+use serde_json::{json, Value};
 use std::convert::Infallible;
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::{eprintln, format};
+use std::{eprintln, format, println};
 use tokio_stream::wrappers::BroadcastStream;
 
 use serde::{Deserialize, Serialize};
 use std::result::Result::{Err, Ok};
 use std::{collections::HashMap, sync::Arc};
-use tokio::io::AsyncWriteExt;
 use tokio::sync::broadcast::Sender;
-use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::{Duration, timeout};
+use tokio::time::{timeout, Duration};
 use uuid::Uuid;
 
 use crate::aegis::{CapabilityCertificate, QuarantineRecord};
 use crate::axon::{AxonGateKeeper, InclusionProof};
+use crate::compactor::WalCompactor;
 use crate::health::SystemHealth;
 use crate::hot_memory::HotVectorBuffer;
 use crate::lancedb_store::LanceEngine;
@@ -42,10 +42,10 @@ use crate::nucleus::WalEngine;
 use crate::registry::SwarmRegistry;
 use crate::state::SwarmStateRegistry;
 use crate::{
-    A2AEnvelope, aegis::AegisGateKeeper, config::RaqimConfig, memory_router::MemoryRouter,
-    network::GlobalNetworkBridge,
+    aegis::AegisGateKeeper, config::RaqimConfig, memory_router::MemoryRouter,
+    network::GlobalNetworkBridge, A2AEnvelope,
 };
-use crate::{AgentState, IngressEnvelope, SystemEvent, execute_raqim_cascade, utils};
+use crate::{execute_raqim_cascade, AgentState, IngressEnvelope, SystemEvent};
 
 // Strongly typed api error system (Zero-Panic Guarantee)
 #[derive(Debug)]
@@ -87,7 +87,6 @@ impl IntoResponse for ApiError {
 }
 
 // Websocket Message Types & UI Event Schemas
-
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type")] // Enables json parsing {"type": "AskQuestion", }
 pub enum WsMessage {
@@ -173,7 +172,6 @@ pub struct ApiState {
     pub brain: Arc<SwarmStateRegistry>,
     pub aegis: Arc<AegisGateKeeper>,
     pub global_net: Arc<GlobalNetworkBridge>,
-    pub cortex_tx: UnboundedSender<Vec<u8>>,
     pub wal: Arc<WalEngine>,
     pub lance: Arc<LanceEngine>,
 
@@ -185,37 +183,110 @@ pub struct ApiState {
     pub master_signing_key: SigningKey,
 
     pub hot_buffer: Arc<HotVectorBuffer>,
+    pub pause_tx: Arc<watch::Sender<bool>>,
+
+    pub compactor: Arc<WalCompactor>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct EnterpriseClaim {
-    pub sub: String, // Tenant id
-    pub features: Vec<String>,
-    pub exp: usize,
+#[derive(Clone, Debug)]
+pub struct ValidatedIdentity {
+    pub tenant_id: String,
+    pub is_admin: bool,
 }
 
-pub struct ValidatedIdentity(pub EnterpriseClaim);
-
-// THE AXUM EXTRACTOR: Always provides active standalone identity
-#[async_trait]
+#[axum::async_trait]
 impl<S> FromRequestParts<S> for ValidatedIdentity
 where
     S: Send + Sync,
 {
-    type Rejection = StatusCode;
+    type Rejection = ApiError;
 
-    async fn from_request_parts(_parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        Ok(ValidatedIdentity(EnterpriseClaim {
-            sub: "local_standalone".to_string(),
-            features: vec![
-                "global_crdt".to_string(),
-                "global_a2a".to_string(),
-                "global_aegis".to_string(),
-                "time_travel".to_string(),
-                "aegis".to_string(),
-            ],
-            exp: usize::MAX,
-        }))
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        // BARRIER 1: Drive-By Browser Exploit Shield (Cross-Origin Protection)
+        if let Some(origin) = parts.headers.get(ORIGIN).and_then(|v| v.to_str().ok()) {
+            let allowed_origins = [
+                "http://localhost:3000",
+                "http://127.0.0.1:3000",
+                "http://localhost:8081",
+                "http://127.0.0.1:8081",
+            ];
+
+            let is_allowed = allowed_origins.iter().any(|&allowed| allowed == origin);
+            if !is_allowed {
+                eprintln!(
+                    "[SECURITY ALERT] Blocked cross-origin drive-by attempt from Origin: {}",
+                    origin
+                );
+                return Err(ApiError::Forbidden(format!(
+                    "Cross-Origin Security Interdiction: Access from '{}' denied",
+                    origin
+                )));
+            }
+        }
+
+        // BARRIER 2: Resolve Runtime Environment & Loopback Bypass
+        let is_production = std::env::var("RAQIM_ENV")
+            .map(|v| v.to_lowercase() == "production")
+            .unwrap_or(false);
+
+        // In local development, loopback requests from Next.js console are admitted
+        if !is_production {
+            if let Some(host) = parts.headers.get(HOST).and_then(|v| v.to_str().ok()) {
+                if host.starts_with("localhost:") || host.starts_with("127.0.0.1:") {
+                    return Ok(ValidatedIdentity {
+                        tenant_id: "local_open_core".to_string(),
+                        is_admin: true,
+                    });
+                }
+            }
+        }
+
+        // BARRIER 3: Production / Cloud VPS / Docker Hardening
+        let auth_header = match parts
+            .headers
+            .get(AUTHORIZATION)
+            .and_then(|val| val.to_str().ok())
+        {
+            Some(hdr) => hdr,
+            None => {
+                return Err(ApiError::Unauthorized(
+                    "Missing 'Authorization: Bearer <token>' header".to_string(),
+                ));
+            }
+        };
+
+        if !auth_header.starts_with("Bearer ") {
+            return Err(ApiError::Unauthorized(
+                "Invalid auth scheme. Use 'Bearer <token>'".to_string(),
+            ));
+        }
+
+        let provided_token = auth_header.trim_start_matches("Bearer ").trim();
+
+        let expected_secret = std::env::var("RAQIM_ADMIN_SECRET").unwrap_or_else(|_| {
+            std::fs::read_to_string("keys/admin.secret")
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        });
+
+        if expected_secret.is_empty() {
+            return Err(ApiError::InternalServerError(
+                "Security Gate Block: RAQIM_ADMIN_SECRET is empty on production daemon".to_string(),
+            ));
+        }
+
+        // Constant-time byte comparison mitigates timing attacks
+        if constant_time_compare(provided_token.as_bytes(), expected_secret.as_bytes()) {
+            Ok(ValidatedIdentity {
+                tenant_id: "production_tenant".to_string(),
+                is_admin: true,
+            })
+        } else {
+            Err(ApiError::Unauthorized(
+                "Access Denied: Invalid Administrative Token".to_string(),
+            ))
+        }
     }
 }
 
@@ -284,11 +355,11 @@ async fn process_ws_message(msg: WsMessage, conn: Arc<WsConnectionstate>, os_sta
             tokio::spawn(async move {
                 os_state
                     .global_net
-                    .register_agent_capability(&capability.as_str(), move |question_bytes| {
+                    .register_agent_capability(&capability, move |question_bytes| {
                         let request_id = Uuid::new_v4().to_string();
                         let (reply_tx, reply_rx) = oneshot::channel();
 
-                        // Store the wakeup pipe in the dashMap
+                        // Register pending response channel
                         conn_clone
                             .pending_a2a_requests
                             .insert(request_id.clone(), reply_tx);
@@ -307,11 +378,19 @@ async fn process_ws_message(msg: WsMessage, conn: Arc<WsConnectionstate>, os_sta
                             });
                         }
 
-                        // ZERO CPU WAIT: Yield OS thread until Python replies. 15 seconds max wait time.
+                        // ZERO CPU WAIT: Suspends thread qith 15-sec timeout waiting for python reply
                         match tokio::runtime::Handle::current()
                             .block_on(timeout(Duration::from_secs(15), reply_rx))
                         {
-                            Ok(Ok(answer)) => answer.0,
+                            Ok(Ok((answer, responder_hex))) => {
+                                // Format structured JSON reply payload for Zenoh query return
+                                let reply_payload = serde_json::json!({
+                                    "responder_hex": responder_hex,
+                                    "answer": answer
+                                });
+
+                                serde_json::to_vec(&reply_payload).unwrap_or(answer)
+                            }
                             _ => {
                                 // Python crashed or too long. Clean up the DashMap to prevent memory leaks.
                                 conn_clone.pending_a2a_requests.remove(&request_id);
@@ -328,7 +407,7 @@ async fn process_ws_message(msg: WsMessage, conn: Arc<WsConnectionstate>, os_sta
             answer,
             responder_hex,
         } => {
-            // Remove the wakeup ppipe from dashmap and fire the answer into it!
+            // Remove the wakeup pipe from dashmap and fire the answer into it!
             if let Some((_, reply_tx)) = conn.pending_a2a_requests.remove(&request_id) {
                 let _ = reply_tx.send((answer, responder_hex));
             }
@@ -347,7 +426,7 @@ async fn process_ws_message(msg: WsMessage, conn: Arc<WsConnectionstate>, os_sta
             let conn_clone = conn.clone();
 
             tokio::spawn(async move {
-                // Decode Raw bytes from Hex Containers
+                // Decode Raw bytes from Hex container
                 let cert_bytes = match hex::decode(&capability_cert) {
                     Ok(b) => b,
                     Err(_) => return,
@@ -372,6 +451,7 @@ async fn process_ws_message(msg: WsMessage, conn: Arc<WsConnectionstate>, os_sta
                     sig_bytes.copy_from_slice(&signature)
                 }
 
+                // Verify Aegis Lineage Certificate
                 let (agent_hex, group_name) = match os_state_clone
                     .aegis
                     .verify_session_lineage(&cert_bytes, &public_key_bytes)
@@ -415,6 +495,46 @@ async fn process_ws_message(msg: WsMessage, conn: Arc<WsConnectionstate>, os_sta
                     return;
                 };
 
+                // Seal outgoing question (Tx_ask) into WAL + Merkle DAG
+                let ask_tx_id = uuid::Uuid::now_v7().as_u128();
+                let ask_state = AgentState {
+                    agent_id: Some(sender_id_bytes),
+                    transaction_id: ask_tx_id,
+                    namespace: format!("/swarm/a2a/ask/{}", capability),
+                    timestamp: current_ts,
+                    status: crate::AgentStatus::ToolExecution,
+                    text: String::from_utf8_lossy(&question).to_string(),
+                };
+
+                let mut aligned_ask_buf = rkyv::util::AlignedVec::<16>::new();
+                if let Ok(sb) = rkyv::to_bytes::<rkyv::rancor::Error>(&ask_state) {
+                    aligned_ask_buf.extend_from_slice(&sb);
+                }
+
+                // Compute deterministic leaf hash of the questionfor causal chaining
+                let mut ask_hasher = blake3::Hasher::new_derive_key("raqim.axon.v1.leaf");
+                ask_hasher.update(&aligned_ask_buf);
+                ask_hasher.update(&sender_id_bytes);
+                let ask_leaf_hash: [u8; 32] = ask_hasher.finalize().into();
+
+                if let Ok(archived_ask_state) = rkyv::access::<
+                    <AgentState as rkyv::Archive>::Archived,
+                    rkyv::rancor::Error,
+                >(&aligned_ask_buf)
+                {
+                    let _ = execute_raqim_cascade(
+                        archived_ask_state,
+                        os_state_clone.axon.clone(),
+                        os_state_clone.wal.clone(),
+                        os_state_clone.brain.clone(),
+                        os_state_clone.global_net.clone(),
+                        os_state_clone.event_tx.clone(),
+                        Vec::new(),
+                        Vec::new(),
+                    )
+                    .await;
+                }
+
                 let envelope = A2AEnvelope {
                     sender_id: sender_id_bytes,
                     sender_public_key: public_key_bytes,
@@ -429,6 +549,7 @@ async fn process_ws_message(msg: WsMessage, conn: Arc<WsConnectionstate>, os_sta
                 // Start the stopwatch
                 let start_time = std::time::Instant::now();
 
+                // Dispatch verified RPC across Zenoh Mesh
                 match os_state_clone
                     .global_net
                     .execute_a2a_rpc(envelope, os_state_clone.aegis.clone())
@@ -438,7 +559,55 @@ async fn process_ws_message(msg: WsMessage, conn: Arc<WsConnectionstate>, os_sta
                         // stop the stopwatch
                         let latency_ms = start_time.elapsed().as_millis() as u32;
 
-                        // Send the answer back to the requesting agentn
+                        // Seal verified Answer (Tx_reply) into WAL + Merkle DAG
+                        let reply_tx_id = uuid::Uuid::now_v7().as_u128();
+                        let reply_ts = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+
+                        //Embed ask_tx_id and parent leaf hash into oreply payload
+                        let anchored_reply_payload = serde_json::json!({
+                         "causal_parent_tx": format!("{:032x}", ask_tx_id),
+                         "causal_parent_hash": hex::encode(ask_leaf_hash),
+                         "responder_hex": responder_hex,
+                         "answer": String::from_utf8_lossy(&answer)
+                        });
+
+                        let reply_state = AgentState {
+                            agent_id: Some(sender_id_bytes),
+                            transaction_id: reply_tx_id,
+                            timestamp: reply_ts,
+                            status: crate::AgentStatus::Reasoning,
+                            text: anchored_reply_payload.to_string(),
+                            namespace: format!("/swarm/a2a/reply/{}", capability),
+                        };
+
+                        let mut aligned_reply_buf = rkyv::util::AlignedVec::<16>::new();
+                        if let Ok(sb) = rkyv::to_bytes::<rkyv::rancor::Error>(&reply_state) {
+                            aligned_reply_buf.extend_from_slice(&sb);
+                        }
+
+                        if let Ok(archived_reply_state) =
+                            rkyv::access::<
+                                <AgentState as rkyv::Archive>::Archived,
+                                rkyv::rancor::Error,
+                            >(&aligned_reply_buf)
+                        {
+                            let _ = execute_raqim_cascade(
+                                archived_reply_state,
+                                os_state_clone.axon.clone(),
+                                os_state_clone.wal.clone(),
+                                os_state_clone.brain.clone(),
+                                os_state_clone.global_net.clone(),
+                                os_state_clone.event_tx.clone(),
+                                Vec::new(),
+                                Vec::new(),
+                            )
+                            .await;
+                        }
+
+                        // Send the answer back to the waiting python sdk coroutine
                         let res = WsMessage::QuestionAnswered {
                             request_id,
                             answer: answer.clone(),
@@ -463,8 +632,9 @@ async fn process_ws_message(msg: WsMessage, conn: Arc<WsConnectionstate>, os_sta
 
                     Err(e) => {
                         let err = WsMessage::Error {
-                            message: e.to_string(),
+                            message: format!("[A2A Error] {}", e),
                         };
+
                         if let Ok(json_str) = serde_json::to_string(&err) {
                             let _ = conn_clone.downstream_tx.send(Message::Text(json_str)).await;
                         }
@@ -672,15 +842,17 @@ pub struct VaultSearchResult {
 pub struct VaultTelemetry {
     pub total_vectors: usize,
     pub index_size_mb: f64,
-    pub wal_pending_count: usize,
+    pub wal_pending_count: u64,
     pub densest_namespace: String,
+    pub embedder_name: String,
+    pub embeder_dim: usize,
 }
 
 pub async fn vault_telemetry_endpoint(
     _auth: ValidatedIdentity,
     State(state): State<ApiState>,
 ) -> Result<Json<VaultTelemetry>, ApiError> {
-    let wal_pending_count = state.wal.get_pending_count().await;
+    let wal_pending_count = state.axon.get_total_leaves() as u64;
 
     let total_vectors = state.lance.get_total_vector_count().await.unwrap_or(0);
 
@@ -690,13 +862,15 @@ pub async fn vault_telemetry_endpoint(
         .lance
         .get_densest_namespace()
         .await
-        .unwrap_or_else(|_| "UNKNOWN (0%)".to_string());
+        .unwrap_or_else(|_| "Empty (0%)".to_string());
 
     let telemetry = VaultTelemetry {
         total_vectors,
         wal_pending_count,
         index_size_mb,
         densest_namespace,
+        embedder_name: state.config.embedder_type.clone(),
+        embeder_dim: state.lance.dims as usize,
     };
 
     Ok(Json(telemetry))
@@ -726,7 +900,7 @@ struct ResurrectPayload {
 }
 
 async fn lift_qurantine_and_resurrect(
-    _identity: ValidatedIdentity,
+    _auth: ValidatedIdentity,
     State(state): State<ApiState>,
     Json(payload): Json<ResurrectPayload>,
 ) -> Result<Json<Value>, ApiError> {
@@ -848,53 +1022,6 @@ async fn time_travel_endpoint(
     }
 }
 
-pub async fn upload_wasm_endpoint(
-    _auth: ValidatedIdentity,
-    State(_): State<ApiState>,
-    mut multipart: Multipart,
-) -> Result<Json<Value>, ApiError> {
-    while let Some(mut field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| ApiError::BadRequest(format!("Multipart read failed: {}", e)))?
-    {
-        let file_name = field.file_name().unwrap_or("").to_string();
-
-        // Strict Hex Validation
-        let hex_str = file_name.trim_end_matches(".wasm");
-        if utils::parse_agent_id(hex_str).is_err() {
-            eprintln!("[SECURITY] Rejected WASM upload: Invalid Agent ID Hex");
-            return Err(ApiError::BadRequest(
-                "Invalid Agent ID Hex format in file".to_string(),
-            ));
-        }
-
-        let filepath = format!("./plugins/{}", file_name);
-        let mut file = tokio::fs::File::create(&filepath)
-            .await
-            .map_err(|e| ApiError::InternalServerError(format!("Failed to create file: {}", e)))?;
-
-        // RAM-SAFE CHUNK STREAMING
-        while let Some(chunk) = field
-            .chunk()
-            .await
-            .map_err(|e| ApiError::BadRequest(format!("Chunk stream error: {}", e)))?
-        {
-            if let Err(e) = file.write_all(&chunk).await {
-                let _ = tokio::fs::remove_file(&filepath).await;
-                return Err(ApiError::InternalServerError(format!(
-                    "File write failed: {}",
-                    e
-                )));
-            }
-        }
-    }
-
-    Ok(Json(
-        json!({"success": true, "message": "WASM module uploaded successfully"}),
-    ))
-}
-
 // THE ZERO-COPY HTTP INGRESS: The endpoint expects raw binary `rkyv` bytes, Not JSON.
 pub async fn http_ingress_endpoint(
     State(state): State<ApiState>,
@@ -953,7 +1080,6 @@ pub async fn http_ingress_endpoint(
     let task_event = state.event_tx.clone();
     let task_axon = state.axon.clone();
     let task_wal = state.wal.clone();
-    let task_cortex = state.cortex_tx.clone();
     let task_net = state.global_net.clone();
     let task_brain = state.brain.clone();
 
@@ -975,7 +1101,6 @@ pub async fn http_ingress_endpoint(
             task_axon,
             task_wal,
             task_brain,
-            task_cortex,
             task_net,
             task_event,
             Vec::new(),
@@ -1036,19 +1161,21 @@ pub struct DashboardCards {
     pub global_transactions: u64,
     pub active_agents: usize,
     pub vault_capacity: usize,
+    pub hot_thoughts_count: u64,
+    pub cold_thoughts_count: u64,
+    pub latest_tx_hex: String,
+    pub embedder_dims: i32,
+    pub embedder_name: String,
+    pub ingress_pause: bool,
 }
 
 pub async fn dashboard_cards_endpoint(
     _auth: ValidatedIdentity,
     State(state): State<ApiState>,
 ) -> Result<Json<DashboardCards>, ApiError> {
-    // Vault capacity (Direct from lance)
-    let total_vec = state.lance.get_total_vector_count().await.unwrap_or(0);
-
-    // Active agents (60s Rolling window)
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs();
 
     // Iterate through the Dashmap
@@ -1063,15 +1190,52 @@ pub async fn dashboard_cards_endpoint(
         })
         .count();
 
-    let cold_count = state.lance.get_total_vector_count().await.unwrap_or(0);
-    let hot_count = state.wal.get_pending_count().await;
-    let total_lifetime_txn = (cold_count + hot_count) as u64;
+    let cold_count = state.lance.get_total_vector_count().await.unwrap_or(0) as u64;
+    let hot_batches = state.wal.get_pending_count().await as u64;
+
+    // Hot buffer leaves + cold storage
+    let hot_count = state.axon.get_total_leaves() as u64;
+    let total_lifetime_txn = cold_count + hot_count;
+
+    let latest_tx = state.axon.get_latest_tx_id();
+    let latest_tx_hex = format!("0x{:032x}", latest_tx);
 
     Ok(Json(DashboardCards {
         global_transactions: total_lifetime_txn,
         active_agents: active_count,
-        vault_capacity: total_vec,
+        vault_capacity: cold_count as usize,
+        hot_thoughts_count: hot_batches,
+        cold_thoughts_count: cold_count,
+        latest_tx_hex: latest_tx_hex,
+        embedder_dims: state.lance.dims,
+        embedder_name: state.config.embedder_type.clone(),
+        ingress_pause: *state.pause_tx.borrow(),
     }))
+}
+
+pub async fn toggle_ingress_endpoint(
+    _auth: ValidatedIdentity,
+    State(state): State<ApiState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let prev = *state.pause_tx.borrow();
+    let new_state = !prev;
+
+    // Broadcasts state change across all worker tasks
+    let _ = state.pause_tx.send(new_state);
+
+    println!(
+        "[SYSTEM] Ingress flow control changed: {} ",
+        if new_state {
+            "PAUSED (TCP ZERO-WINDOW) "
+        } else {
+            "ACTIVE"
+        }
+    );
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "ingress_paused": new_state
+    })))
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -1109,7 +1273,7 @@ pub async fn aegis_metics_endpoint(
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs();
     let ten_minutes_ago = now.saturating_sub(600);
 
@@ -1166,7 +1330,7 @@ pub async fn handle_ca_mint(
     // Contruct the unsigned Certificate Passport
     let expiration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs()
         + (365 * 24 * 60 * 60);
 
@@ -1204,11 +1368,26 @@ pub async fn cluster_info_endpoint(
 
     let node_id = state.global_net.os_node_id.clone();
 
+    let highest_tx = state.axon.get_latest_tx_id();
+
+    let cumulative_crdt_ops: usize = state
+        .brain
+        .shards
+        .iter()
+        .map(|e| e.value().doc.read().len_ops())
+        .sum();
+
+    let total_shards = state.brain.shards.len();
+
     let payload = json!({
         "node_id": node_id,
-        // "highest_tx_id": highest_tx,
+        "highest_tx_id": format!("0x{:032x}", highest_tx),
         "wal_bytes": wal_size,
-        "buffer_load": pending_wal_items
+        "wal_size_mb": (wal_size as f64 ) / (1024.0 * 1024.0),
+        "buffer_load": pending_wal_items,
+        "allocated_shards": total_shards,
+        "cumulative_crdt_ops": cumulative_crdt_ops,
+        "active_timelines": state.brain.shards.len(),
     });
 
     Ok(Json(payload))
@@ -1232,13 +1411,63 @@ pub async fn cluster_topology_endpoint(
         // Count how many unique agent timelines exist within this specific shard
         let active_timelines = brain.root_timeline_map.len();
 
-        // For CLI diagnostics: we measure the length of the underlying operations log.
+        // we measure the length of the underlying operations log.
         let ops_count = doc_lock.len_ops();
 
-        shards.push(json!({ "namespace": namespace, "active_timelines": active_timelines, "total_crdt_operation": ops_count }));
+        // Calculate dynamic in-memoy footprint for this CRDT shard
+
+        let estimated_ram_kb = (ops_count * 64) as f64 / 1024.0;
+        let estimated_ram_mb = estimated_ram_kb / 1024.0;
+
+        // Fetch agents associated with this namespace
+        let attached_agents: Vec<String> = state
+            .swarm_registry
+            .active_agents
+            .iter()
+            .filter(|a| a.namespace == *namespace)
+            .map(|a| a.key().clone())
+            .collect();
+
+        shards.push(json!({ "namespace": namespace, "active_timelines": active_timelines, "total_crdt_operation": ops_count, "estimated_ram_mb": (estimated_ram_mb * 100.0).round() / 100.0, "attached_agents": attached_agents, "status": "ACTIVE"  }));
     }
 
     Ok(Json(json!(shards)))
+}
+
+pub async fn cluster_enclaves_endpoint(
+    _auth: ValidatedIdentity,
+    State(state): State<ApiState>,
+) -> Result<Json<Value>, ApiError> {
+    let mut enclaves = Vec::new();
+
+    // Collect currently active connected agents
+    for entry in state.swarm_registry.active_agents.iter() {
+        let agent = entry.value();
+        enclaves.push(json!({
+            "alias": agent.alias,
+            "identity_hex": entry.agent_hex.clone(),
+            "home_shard": agent.namespace.clone(),
+            "status": agent.status,
+            "last_seen_ts": agent.last_seen_ts
+
+        }));
+    }
+
+    // If no live agents are connected, populate from indexed shard namespace
+    if enclaves.is_empty() {
+        for (i, entry) in state.brain.shards.iter().enumerate() {
+            let namespace = entry.key();
+            enclaves.push(json!({
+                "alias": format!("agent_shard_{:02}", i),
+                "identity_hex": format!("0x{:032x}", i + 1),
+                "home_shard": namespace,
+                "status": "IDLE_IN_RAM",
+                "last_seen_ts": 0
+            }));
+        }
+    }
+
+    Ok(Json(json!(enclaves)))
 }
 
 #[derive(Deserialize)]
@@ -1277,14 +1506,14 @@ pub async fn record_effect_handler(
     Json(payload): Json<RecordEffectRequest>,
 ) -> Result<Json<RecordEffectResponse>, ApiError> {
     let agent_id_bytes = hex::decode(payload.agent_hex.clone())
-        .map_err(|e| ApiError::BadRequest("Invalid agent_hex format".to_string()))?;
+        .map_err(|_| ApiError::BadRequest("Invalid agent_hex format".to_string()))?;
 
     let agent_id: [u8; 16] = agent_id_bytes
         .try_into()
         .map_err(|_| ApiError::BadRequest("agent_hex must be exactly 16 bytes".to_string()))?;
 
     let call_signature_bytes = hex::decode(payload.call_signature_hex)
-        .map_err(|e| ApiError::BadRequest("Invalid call_signature_hex format".to_string()))?;
+        .map_err(|_| ApiError::BadRequest("Invalid call_signature_hex format".to_string()))?;
     let call_signature_hash: [u8; 32] = call_signature_bytes.try_into().map_err(|_| {
         ApiError::BadRequest("call_signature_hex must be eactly 32 bytes".to_string())
     })?;
@@ -1389,11 +1618,6 @@ pub async fn get_effect_handler(
     }
 }
 
-#[derive(Deserialize)]
-pub struct StateProofParams {
-    pub tx_id: String,
-}
-
 #[derive(Serialize)]
 pub struct StateProofResponse {
     pub success: bool,
@@ -1404,12 +1628,15 @@ pub struct StateProofResponse {
 /// Generate an 0(log N) Merkle Inclusion Proof for any tx_id
 pub async fn get_state_proof_handler(
     State(state): State<ApiState>,
-    Query(params): Query<StateProofParams>,
+    Path(tx_param): Path<String>,
 ) -> Result<Json<StateProofResponse>, ApiError> {
+    let clean_hex = tx_param.trim_start_matches("0x");
     // Parse u128 UUIDv7
-    let tx_id = u128::from_str_radix(&params.tx_id, 16).map_err(|_| {
-        ApiError::BadRequest("tx_id must be a valid 32-character hex string".to_string())
-    })?;
+    let tx_id = u128::from_str_radix(clean_hex, 16)
+        .or_else(|_| clean_hex.parse::<u128>())
+        .map_err(|_| {
+            ApiError::BadRequest("tx_id must be a valid 32-character hex string".to_string())
+        })?;
 
     // Query Axon Gatekeeper for 0(log N) Inclusion proof
     match state.axon.generate_proof_for_tx(tx_id) {
@@ -1434,11 +1661,41 @@ pub async fn get_state_proof_handler(
     }
 }
 
+pub async fn trigger_compaction_endpoint(
+    State(state): State<ApiState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    println!("[ADMIN] Manual on-demand WAL compaction requested via HTTP API... ");
+
+    let compactor = state.compactor.clone();
+
+    tokio::spawn(async move {
+        match compactor.trigger_safe_compaction().await {
+            Ok(count) => {
+                println!(
+                    "[ADMIN SUCCESS] Background compaction complete. Archived {} thoughts to LanceDB.",
+                    count
+                )
+            }
+            Err(e) => {
+                eprintln!(
+                    "[ADMIN ERROR] Background compaction encountered an error: {}",
+                    e
+                );
+            }
+        }
+    });
+
+    Ok(Json(serde_json::json!({
+        "success": "ACCEPTED",
+        "message": "WAL rotation and 2PC LanceDB assimilation initiated in background worker."
+    })))
+}
+
 // Route Builder
 pub fn build_admin_router(state: ApiState) -> axum::Router {
     axum::Router::new()
         // State Proofs & Effect Recording
-        .route("/v1/state/proof", get(get_state_proof_handler))
+        .route("/v1/state/proof/:tx_id", get(get_state_proof_handler))
         .route("/v1/effect/record", post(record_effect_handler))
         .route("/v1/effect/get", post(get_effect_handler))
         // Aegis Firewall & Governance
@@ -1460,9 +1717,14 @@ pub fn build_admin_router(state: ApiState) -> axum::Router {
         // Cluster Observervability and Diagnostics
         .route("/v1/admin/cluster/info", get(cluster_info_endpoint))
         .route("/v1/admin/cluster/topology", get(cluster_topology_endpoint))
+        .route("/v1/cluster/enclaves", get(cluster_enclaves_endpoint))
         .route("/v1/dashboard/cards", get(dashboard_cards_endpoint))
+        .route("/v1/admin/ingress/toggle", post(toggle_ingress_endpoint))
+        .route(
+            "/v1/admin/compactor/trigger",
+            post(trigger_compaction_endpoint),
+        )
         // System & Agent Deployment endpoints
-        .route("/v1/system/boot_agent", post(upload_wasm_endpoint))
         .route("/v1/system/health/live", get(sse_health_endpoint))
         .route("/v1/system/firehose", get(sse_firehose_endpoint))
         .route("/v1/time-travel/stream", get(sse_phantom_endpoint))
@@ -1475,4 +1737,16 @@ pub fn build_admin_router(state: ApiState) -> axum::Router {
         .route("/v1/vault/telemetry", get(vault_telemetry_endpoint))
         .layer(CatchPanicLayer::new())
         .with_state(state)
+}
+
+/// Pure standard-library constant-time byte comparison (Mitigates timing analysis)
+fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }

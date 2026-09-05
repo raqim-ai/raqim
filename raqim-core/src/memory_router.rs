@@ -1,42 +1,31 @@
 use arrow_array::Array;
 use dashmap::DashMap;
-use ed25519_dalek::Signer;
-use ed25519_dalek::SigningKey;
 use futures::StreamExt;
 use lancedb::query::ExecutableQuery;
 use lancedb::query::QueryBase;
 use memmap2::MmapOptions;
-use rand_core::OsRng;
 use rkyv::{Archive, Archived};
 use std::collections::HashMap;
+use std::eprintln;
 use std::format;
-use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::println;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
+
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use std::u64;
 use std::{fs::File, sync::Arc};
-use tokio::sync::broadcast;
 use tokio::sync::broadcast::Sender;
-use tokio::sync::mpsc;
 
 use crate::AgentState;
 use crate::AgentStatus;
 use crate::EffectKey;
 use crate::EffectRecord;
-use crate::aegis::AegisGateKeeper;
-use crate::aegis::CapabilityCertificate;
 use crate::api::ForkConfig;
 use crate::api::UiEvent;
 use crate::axon::AxonGateKeeper;
 use crate::generate_uuidv7_txid;
 use crate::hot_memory::HotVectorBuffer;
-use crate::network::GlobalNetworkBridge;
-use crate::sandbox::SandboxContent;
-use crate::sandbox::WasmEngine;
 use crate::state::SwarmStateRegistry;
 use crate::{
     OpLog, SystemEvent, config::RaqimConfig, lancedb_store::LanceEngine, nucleus::WalEngine,
@@ -49,17 +38,11 @@ pub enum RebuildMode {
 
 pub struct MemoryRouter {
     config: Arc<RaqimConfig>,
-    aegis: Arc<AegisGateKeeper>,
     axon: Arc<AxonGateKeeper>,
     brain: Arc<SwarmStateRegistry>,
     lance_engine: Arc<LanceEngine>,
-    wasm_engine: Arc<WasmEngine>,
     wal_engine: Arc<WalEngine>,
-    cortex_tx: mpsc::UnboundedSender<Vec<u8>>,
-    global_net: Arc<GlobalNetworkBridge>,
     event_tx: Sender<SystemEvent>,
-    master_signing_key: SigningKey,
-    allow_time_travel: Arc<AtomicBool>,
     effect_index: DashMap<EffectKey, EffectRecord>,
 }
 
@@ -76,67 +59,80 @@ pub struct UnifiedSearchResult {
 impl MemoryRouter {
     pub fn new(
         config: Arc<RaqimConfig>,
-        aegis: Arc<AegisGateKeeper>,
         axon: Arc<AxonGateKeeper>,
         brain: Arc<SwarmStateRegistry>,
         lance_engine: Arc<LanceEngine>,
-        wasm_engine: Arc<WasmEngine>,
         wal_engine: Arc<WalEngine>,
-        cortex_tx: mpsc::UnboundedSender<Vec<u8>>,
-        global_net: Arc<GlobalNetworkBridge>,
         event_tx: Sender<SystemEvent>,
-        master_signing_key: SigningKey,
-        allow_time_travel: Arc<AtomicBool>,
     ) -> Self {
         Self {
             config,
-            aegis,
             axon,
             brain,
             lance_engine,
-            wasm_engine,
             wal_engine,
-            cortex_tx,
-            global_net,
             event_tx,
-            master_signing_key,
-            allow_time_travel,
             effect_index: DashMap::new(),
         }
     }
 
-    /// : Scans the WAL and executes a closure on the Zero-Copy Archived data
-    pub fn scan_wal_zero_copy<F>(&self, mut callback: F)
+    /// STATIC ZERO-COPY SCANNER: Scans any WAL segment with 8-byte frame header validation
+    pub fn scan_wal_file<F>(wal_path: &str, mut callback: F) -> Result<(), anyhow::Error>
     where
         F: FnMut(&Archived<OpLog>),
     {
-        if let Ok(file) = File::open(&self.config.wal_path) {
-            if let Ok(mmap) = unsafe { MmapOptions::new().map(&file) } {
-                let mut offset = 0;
-                while offset < mmap.len() {
-                    if offset + 4 > mmap.len() {
-                        break;
-                    }
+        let file = match File::open(wal_path) {
+            Ok(f) => f,
+            Err(_) => return Ok(()), // File not created yet; clean return
+        };
 
-                    let mut len_bytes = [0u8; 4];
-                    len_bytes.copy_from_slice(&mmap[offset..offset + 4]);
-                    let entry_len = u32::from_le_bytes(len_bytes) as usize;
-                    offset += 4;
-                    let entry_slice = &mmap[offset..offset + entry_len];
+        let mmap = unsafe { MmapOptions::new().map(&file)? };
+        let mut offset = 0;
+        let mut aligned_buf = rkyv::util::AlignedVec::<16>::new();
 
-                    //  TRUE ZERO-COPY: We cast a pointer. No mem allocation. No deserialization
-                    let archived_log = unsafe {
-                        rkyv::access_unchecked::<<OpLog as Archive>::Archived>(entry_slice)
-                    };
+        while offset + 8 <= mmap.len() {
+            let entry_len =
+                u32::from_le_bytes(mmap[offset..offset + 4].try_into().unwrap()) as usize;
+            let expected_crc = u32::from_le_bytes(mmap[offset + 4..offset + 8].try_into().unwrap());
+            let frame_total = 8 + entry_len;
 
-                    callback(archived_log);
+            if offset + frame_total > mmap.len() {
+                break; // Incomplete or torn frame at EOF
+            }
 
-                    offset += entry_len;
+            let entry_slice = &mmap[offset + 8..offset + frame_total];
+
+            // Hardware CRC32 verification
+            if crc32fast::hash(entry_slice) != expected_crc {
+                offset += frame_total;
+                continue;
+            }
+
+            aligned_buf.clear();
+            aligned_buf.extend_from_slice(entry_slice);
+
+            // Safe, verified deserialization of Vec<OpLog> batch
+            if let Ok(archived_batch) =
+                rkyv::access::<<Vec<OpLog> as Archive>::Archived, rkyv::rancor::Error>(&aligned_buf)
+            {
+                for log in archived_batch.as_slice() {
+                    callback(log);
                 }
             }
+
+            offset += frame_total;
         }
+
+        Ok(())
     }
 
+    /// Scans the active WAL path configured on the router
+    pub fn scan_wal_zero_copy<F>(&self, callback: F) -> Result<(), anyhow::Error>
+    where
+        F: FnMut(&Archived<OpLog>),
+    {
+        Self::scan_wal_file(&self.config.wal_path, callback)
+    }
     // RAG CONTEXT: Prioritize the hot WAL, fills the rest with semantic lanceDB
     pub async fn semantic_search_with_context(
         &self,
@@ -154,7 +150,8 @@ impl MemoryRouter {
             if log_namespace.starts_with(namespace) {
                 final_context.push(format!("[Recent] {} ", archived.state.text.as_str()));
             }
-        });
+        })
+        .map_err(|e| anyhow::anyhow!("Error scanning wal file: {}", e))?;
 
         // 2. Supplement with Deep Semantic search
         let mut deep_memories = self
@@ -181,7 +178,8 @@ impl MemoryRouter {
                     archievd.state.text.as_str()
                 ))
             }
-        });
+        })
+        .map_err(|e| anyhow::anyhow!("Error scanning wal file: {}", e))?;
 
         if let Some(res) = result {
             return Ok(res);
@@ -299,8 +297,10 @@ impl MemoryRouter {
             let mut stream = table
                 .query()
                 .only_if(format!(
-                    "agent_id = '{}' AND tx_id >= {} AND tx_id <= {}",
-                    agent_hex, next_txid, target_tx_id
+                    "agent_id = '{}' AND tx_id >= '{}' AND tx_id <= '{}'",
+                    agent_hex,
+                    format!("{:032x}", next_txid),
+                    format!("{:032x}", target_tx_id)
                 ))
                 .execute()
                 .await?;
@@ -473,50 +473,35 @@ impl MemoryRouter {
         is_isolated_debug: bool,
         phantom_ui_tx: tokio::sync::broadcast::Sender<UiEvent>,
     ) -> Result<(), anyhow::Error> {
-        // Zero-overhead dynamic atomic inspection safely checks the states across hypervisor calls
-        if is_isolated_debug && !self.allow_time_travel.load(Ordering::Relaxed) {
-            return Err(anyhow::anyhow!(
-                "LICENCE VIOLATION: Agent {} attempted to initiate a Temporal Reality Fork. Enterprise 'time_travel' claim required.",
-                agent_hex
-            ));
-        }
-
         let fetch_target = target_tx_id.unwrap_or(u128::MAX);
 
-        let (memory_blob, historical_oplog, snapshot_tx, snapshot_timestamp) = self
+        let (_memory_blob, historical_oplog, _snapshot_tx, _snapshot_timestamp) = self
             .rebuild_agent_timeline(agent_hex, fetch_target, self.wal_engine.clone())
             .await?;
 
-        // Fallback boundary: if there's no history on history on disk, this operation is invalid.
         if historical_oplog.is_empty() {
             return Err(anyhow::anyhow!(
-                "CRITICAL: Agent {} has no immutable memory on disk. Rollback aborted.",
+                "CRITICAL: Agent {} has no immutable memory on disk. Rebuild aborted.",
                 agent_hex
             ));
         }
 
-        // Dynamic namespace discovery
         let real_namespace = &historical_oplog[0].state.namespace;
 
-        // Extract flight recorded data
-        let mut recovered_seeds = Vec::new();
-        let mut recovered_networks = Vec::new();
-        let mut recovered_timestamps = Vec::new();
-
-        // The phantom brain initialization
-        // The XOR Cryptographic Mutation.
-        let original_bytes = hex::decode(agent_hex).expect("Invalid agent hex");
+        // Deterministic Phantom Salt Derivation
+        let original_bytes =
+            hex::decode(agent_hex).map_err(|e| anyhow::anyhow!("Invalid agent hex: {}", e))?;
         let mut phantom_bytes = [0u8; 16];
-        phantom_bytes.copy_from_slice(&original_bytes);
+        if original_bytes.len() == 16 {
+            phantom_bytes.copy_from_slice(&original_bytes);
+        }
 
         if is_isolated_debug {
-            // Deriving a deterministic salt from target_tx_id
             let tx_id_bytes = target_tx_id.unwrap_or(0).to_be_bytes();
             let mut salt = [0u8; 16];
             salt[0..8].copy_from_slice(&tx_id_bytes);
             salt[8..16].copy_from_slice(&tx_id_bytes);
 
-            // Apply the cryptograhic XOR mutation
             for i in 0..16 {
                 phantom_bytes[i] ^= salt[i];
                 phantom_bytes[i] ^= 0xFF;
@@ -525,201 +510,53 @@ impl MemoryRouter {
 
         let sandbox_agent_hex = hex::encode(phantom_bytes);
 
-        // 2. IDENTITY AND CERTIFICATE RESOLUTION SUBLOGIC
-        let (agent_private_key, capability_cert_bytes) = if is_isolated_debug {
-            println!(
-                "[TIME MACHINE] Generating Ephemeral Sandbox Credentials for Phantom: {} ",
-                sandbox_agent_hex
-            );
-
-            // Generate a completely isolated cryptographic keypair for the simulation context
-            let mut csprng = OsRng;
-            let phantom_signing_key = SigningKey::generate(&mut csprng);
-
-            // Forge a valid CapabilityCertificate template mimicking our new role layout
-            let mut mock_certificate = CapabilityCertificate {
-                agent_hex: sandbox_agent_hex.clone(),
-                group_name: "simulation_sandbox".to_string(),
-                expiration_timestamp: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs()
-                    + 3600,
-                master_signature: vec![0u8; 64],
-            };
-
-            // Sign the mock passport using the server's Master Private key to bypass forewall boundaries
-            let serialized_raw = postcard::to_allocvec(&mock_certificate)?;
-            let master_signature = self.master_signing_key.sign(&serialized_raw);
-            mock_certificate.master_signature = master_signature.to_bytes().to_vec();
-
-            (
-                phantom_signing_key,
-                postcard::to_allocvec(&mock_certificate)?,
-            )
-        } else {
-            // Production Resurrection: Pull the immutable production keys from secure vault backup directory
-            let key_bytes = fs::read(format!("./plugins_archive/{}.key.running", agent_hex))?;
-            let cert_bytes = fs::read(format!("./plugins_archive/{}.cert.running", agent_hex))?;
-            let key_array: &[u8; 32] = key_bytes.as_slice().try_into()?;
-
-            (SigningKey::from_bytes(key_array), cert_bytes)
-        };
-
-        // Isolated Infrastructure (The Quarantine Sandbox)
-        let (dummy_wal, _) =
-            WalEngine::start(format!("phamtom_{}", sandbox_agent_hex).to_string()).await;
-        let dummy_net = Arc::new(
-            GlobalNetworkBridge::new(
-                "phantom_tenant",
-                format!("phamtom_{}", sandbox_agent_hex).as_str(),
-                self.aegis.clone(),
-                format!("phantom_{}", sandbox_agent_hex).to_string(),
-                Arc::new(AtomicBool::new(false)),
-                Arc::new(AtomicBool::new(false)),
-                Arc::new(AtomicBool::new(false)),
-            )
-            .await,
-        );
-        let (dummy_tx, mut dummy_event_rx) = broadcast::channel(100);
-
-        // We must route the dummy events to the React UI so the Admin can watch the fork!
-        let ui_tx_clone = phantom_ui_tx.clone();
-
-        if is_isolated_debug {
-            tokio::spawn(async move {
-                while let Ok(event) = dummy_event_rx.recv().await {
-                    if let SystemEvent::ThoughtCommitted {
-                        agent_id,
-                        tx_id,
-                        namespace,
-                        text,
-                    } = event
-                    {
-                        let ui_event = UiEvent::ThoughtCommitted {
-                            agent_hex: agent_id,
-                            intent_path: namespace,
-                            tx_id,
-                            text,
-                        };
-                        let _ = ui_tx_clone.send(ui_event);
-                    }
-                }
-            });
-        }
-
-        let actual_tx = if is_isolated_debug {
-            dummy_tx.clone()
-        } else {
-            self.event_tx.clone()
-        };
-
+        // Resolve Target CRDT Hive-Mind Shard
         let target_brain = if is_isolated_debug {
             let phantom_namespace = format!("phantom_{}_{}", real_namespace, sandbox_agent_hex);
+            println!(
+                "[TIME MACHINE] Branching into isolated CRDT shard: {}",
+                phantom_namespace
+            );
             self.brain.get_or_create_brain(&phantom_namespace)
         } else {
+            println!(
+                "[RESURRECTION] Re-synchronizing canonical CRDT shard: {}",
+                real_namespace
+            );
             self.brain.get_or_create_brain(real_namespace)
         };
 
-        // 3. Cure Schizophrenia ( Syncing the CRDT )
-        for log in historical_oplog {
-            recovered_seeds.extend(log.entropy_seeds);
-            recovered_networks.extend(log.network_responses);
-            recovered_timestamps.push(log.state.timestamp);
-
-            // Physically rebuild the LORO CRDT Memory
+        // Replay historical deltas into the CRDT Hive-Mind
+        for log in &historical_oplog {
             if let Err(e) = target_brain.assimilate_foreign_thought(&log.delta) {
                 eprintln!("[WARNING] Failed to assimilate historical delta: {}", e);
             }
         }
 
-        // APPLY REALITY FORK OVERRIDES
+        // Apply reality fork overrides if specified
         if let Some(fork) = &fork_config {
-            if let Some(seed) = fork.override_seed {
-                recovered_seeds.push(seed);
-            }
-            if let Some(network) = &fork.inject_network {
-                recovered_networks.push(network.clone());
-            }
+            println!(
+                "[TIME MACHINE] Applied {} reality fork overrides",
+                fork.env_overrides.len()
+            );
         }
 
-        let wasi_ctx = WasmEngine::build_wasi_context(fork_config);
-
-        // SERVE THE OS TIES DEBUGGING
-        let active_wal = if is_isolated_debug {
-            dummy_wal.clone()
-        } else {
-            self.wal_engine.clone()
-        };
-        let active_net = if is_isolated_debug {
-            dummy_net.clone()
-        } else {
-            self.global_net.clone()
-        };
-
-        // 6. Construct the Sandbox Content
-        let content = SandboxContent {
-            axon: self.axon.clone(),
-            aegis: self.aegis.clone(),
-            wal: active_wal.clone(),
-            shard: self.brain.clone(),
-            cortex_tx: self.cortex_tx.clone(),
-            global_net: active_net.clone(),
-            event_tx: actual_tx.clone(),
-            wasi: wasi_ctx,
-            lance: self.lance_engine.clone(),
-            agent_hex: sandbox_agent_hex.clone().to_string(),
-
-            agent_private_key,
-            capability_cert_bytes,
-
-            // Live queue start empty
-            live_responses: Vec::new(),
-            live_seeds: Vec::new(),
-            live_timestamps: Vec::new(),
-
-            // Relay queues loaded with history + admin overrides
-            replay_seeds: recovered_seeds,
-            replay_responses: recovered_networks,
-            replay_timestamps: recovered_timestamps,
-
-            a2a_receiver: None,
-            a2a_reply_channel: None,
-            a2a_response_cache: Vec::new(),
-            http_response_cache: Vec::new(),
-            a2a_incoming_cache: Vec::new(),
-        };
-
-        // 7. Boot the Forked reality into the OS thread.
-        let engine = self.wasm_engine.clone();
-        let agent_id_clone = agent_hex.to_string();
-
-        // If we're time travelling the agent starts from the target_tx_id
-        // If Resurrection, we pass in the CURRENT global counter so it resumes at the tip of reality
-        let execution_start_tx = target_tx_id.unwrap_or(snapshot_tx);
-
-        tokio::spawn(async move {
-            // Read the WASM binary from the disk
-            let archive_batch = format!("./plugins_archive/{}.wasm.running", &agent_id_clone);
-            let wasm_bytes = std::fs::read(&archive_batch).unwrap_or_default();
-
-            let mut tracker = crate::sandbox::CheckPointTracker {
-                last_snapshot_time: snapshot_timestamp,
-                last_snapshot_tx: snapshot_tx,
-            };
-
-            // Execute the agent, injecting the snapshot first
-            if let Err(e) = engine.execute_agent(
-                &wasm_bytes,
-                content,
-                &mut tracker,
-                execution_start_tx,
-                Some(memory_blob),
-            ) {
-                eprintln!("[TIME MACHINE]  Agent {} crashed: {} ", agent_id_clone, e)
-            }
+        // Broadcast glass UI event for the temporal scrubber
+        let _ = phantom_ui_tx.send(UiEvent::ThoughtCommitted {
+            agent_hex: if is_isolated_debug {
+                sandbox_agent_hex
+            } else {
+                agent_hex.to_string()
+            },
+            intent_path: real_namespace.clone(),
+            tx_id: format!("{:032x}", fetch_target),
+            text: format!(
+                "[TEMPORAL FORK] State restored up to TxID 0x{:032x}",
+                fetch_target
+            ),
         });
 
+        // Cleanup dead simulation shards
         self.brain.purge_phantom_shards();
 
         Ok(())
@@ -886,7 +723,11 @@ impl MemoryRouter {
                 .send(SystemEvent::MarkleBatchCrystallized { batch });
         }
 
-        self.wal_engine.append(sealed_log).await;
+        let scan_res = self.wal_engine.append(sealed_log).await;
+
+        if let Err(e) = scan_res {
+            eprintln!("[WAL ERROR] Failed to append thought to WalEngine: {}  ", e);
+        }
 
         println!(
             " [EFFECT ENGINE] Recorded Side-Effect for Agent: {} at Step: {} [TxID: {:032x}] ",

@@ -62,3 +62,6 @@
 
         gatekeeper
     }
+
+
+raqim-core = {path = "../raqim-core", default-features = false, features = ["mock-embedding"]}

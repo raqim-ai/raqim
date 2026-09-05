@@ -1,23 +1,30 @@
 import { create } from 'zustand';
 import { Node, Edge } from '@xyflow/react';
 import {
+  ClusterShard,
   getClusterTopology,
   getAgentAliases,
-  ClusterShard,
-  QuarantineRecord,
-  SystemHealthPayload,
-  ClusterInfoData,
-  VaultTelemetry,
-  DashboardCardsData,
 } from '../api';
 
-export type { ClusterShard, QuarantineRecord, ClusterInfoData, VaultTelemetry, DashboardCardsData };
+export type ThoughtStatus =
+  | 'COMMITTED'
+  | 'TOOL_EXEC'
+  | 'REASONING'
+  | 'HALTED'
+  | 'REJECTED'
+  | 'FORKED'
+  | 'IDLE'
+  | 'PENDING';
 
-export interface AegisRecord {
+export interface UiThought {
+  tx_id: number;
+  tx_id_hex: string;
   agent_hex: string;
-  violation_type: 'CRYPTO_SPOOF' | 'NAMESPACE_BREACH' | 'RAG_POISONING' | string;
-  attempted_path: string;
-  payload_preview: string;
+  intent_path: string;
+  text: string;
+  status: ThoughtStatus;
+  is_a2a_query: boolean;
+  parent_tx_id: number | null;
   timestamp: number;
 }
 
@@ -27,7 +34,7 @@ export type UiEvent =
       agent_hex: string;
       intent_path: string;
       tx_id: number;
-      tx_id_hex?: string;
+      tx_id_hex: string;
       text: string;
     }
   | {
@@ -41,7 +48,13 @@ export type UiEvent =
     }
   | {
       event_type: 'AegisAlert';
-      record: AegisRecord;
+      record: {
+        agent_hex: string;
+        violation_type: string;
+        attempted_path: string;
+        payload_preview: string;
+        timestamp: number;
+      };
     }
   | {
       event_type: 'RealityForked';
@@ -49,24 +62,52 @@ export type UiEvent =
       original_namespace: string;
       phantom_namespace: string;
       step_ordinal: number;
-      tx_id: string;
+      tx_id: number;
     };
 
-export interface UiThought {
-  agent_hex: string;
-  intent_path: string;
-  text: string;
-  tx_id: number;
-  tx_id_hex?: string;
-  status: 'IDLE' | 'REASONING' | 'TOOL_EXEC' | 'HALTED' | 'COMMITTED' | 'PENDING' | 'FORKED' | 'REJECTED';
-  is_a2a_query: boolean;
-  parent_tx_id: number | null;
-  timestamp?: number;
+export interface ClusterInfoData {
+  node_id: string;
+  wal_bytes: number;
+  buffer_load: number;
+}
+
+export interface VaultTelemetry {
+  total_vectors: number;
+  index_size_mb: number;
+  wal_pending_count: number;
+  densest_namespace: string;
+}
+
+export interface DashboardCardsData {
+  global_transactions: number;
+  active_agents: number;
+  vault_capacity: number;
+  latest_tx_hex?: string | null;
+  cold_thoughts_count?: number;
+  hot_thoughts_count?: number;
+  embedder_name?: string;
+  embedder_dims?: number;
+  ingress_paused?: boolean;
+}
+
+export interface SystemHealthPayload {
+  cpu_load_percent: number;
+  wasm_memory_mb?: number;
+  process_memory_mb?: number;
+  process_rss_mb?: number;
+  host_used_memory_mb?: number;
+  host_total_memory_mb?: number;
+  core_temp_celcius?: number;
+  mesh_latency_ms?: number;
 }
 
 export interface SystemHealth {
   cpu_load_percent: number;
   wasm_memory_mb: number;
+  process_memory_mb?: number;
+  process_rss_mb?: number;
+  host_used_memory_mb?: number;
+  host_total_memory_mb?: number;
   core_temp_celcius: number;
   mesh_latency_ms: number;
   time: number;
@@ -112,17 +153,15 @@ export interface SwarmState {
   activeTopology: ClusterShard[];
   agentAliases: Record<string, string>;
 
-  // Firewall / Aegis State
-  aegisAlerts: AegisRecord[];
+  // Security & Hardware Vitals
+  aegisAlerts: any[];
   quarantinedAgents: string[];
+  currentVitals: SystemHealth | null;
+  vitalsHistory: SystemHealth[];
 
-  // Temporal Router / Stream State
+  // Interactivity Controls
   isPaused: boolean;
   isForking: boolean;
-
-  // System Health Vitals
-  vitalsHistory: SystemHealth[];
-  currentVitals: SystemHealth | null;
 
   // Actions
   recordHealthVitals: (payload: SystemHealthPayload) => void;
@@ -177,21 +216,28 @@ export const useSwarmStore = create<SwarmState>((set, get) => ({
 
   aegisAlerts: [],
   quarantinedAgents: [],
+  currentVitals: null,
+  vitalsHistory: [],
 
   isPaused: false,
   isForking: false,
 
-  vitalsHistory: [],
-  currentVitals: null,
-
   recordHealthVitals: (payload) =>
     set((state) => {
       const now = Date.now();
+      const memMb = payload.process_memory_mb ?? payload.wasm_memory_mb ?? payload.process_rss_mb ?? 0;
+      const hostTotal = payload.host_total_memory_mb ?? 24576;
+      const hostUsed = payload.host_used_memory_mb ?? memMb;
+
       const newVitals: SystemHealth = {
         cpu_load_percent: payload.cpu_load_percent,
-        wasm_memory_mb: payload.wasm_memory_mb,
-        core_temp_celcius: payload.core_temp_celcius,
-        mesh_latency_ms: payload.mesh_latency_ms,
+        wasm_memory_mb: memMb,
+        process_memory_mb: memMb,
+        process_rss_mb: memMb,
+        host_used_memory_mb: hostUsed,
+        host_total_memory_mb: hostTotal,
+        core_temp_celcius: payload.core_temp_celcius ?? 0,
+        mesh_latency_ms: payload.mesh_latency_ms ?? 0,
         time: now,
       };
 
@@ -220,26 +266,24 @@ export const useSwarmStore = create<SwarmState>((set, get) => ({
         const aliases = aliasRes.success && aliasRes.data ? aliasRes.data : {};
 
         set((state) => {
-          const newNamespaces = new Set(state.namespaces);
           const newNodes: Node[] = [];
+          const newNamespaces = new Set<string>();
 
-          shards.forEach((shard, index) => {
-            const ns = shard.namespace;
-            newNamespaces.add(ns);
+          shards.forEach((shard, idx) => {
+            newNamespaces.add(shard.namespace);
+            const angle = (idx / shards.length) * 2 * Math.PI;
             const radius = 450;
-            const angle = index * (Math.PI / 3);
+            const x = Math.cos(angle) * radius;
+            const y = Math.sin(angle) * radius;
 
             newNodes.push({
-              id: `cluster-${ns}`,
+              id: `cluster-${shard.namespace}`,
               type: 'cluster',
-              position: {
-                x: Math.cos(angle) * radius,
-                y: Math.sin(angle) * radius,
-              },
+              position: { x, y },
               data: {
-                label: ns,
+                label: shard.namespace,
+                crdt_ops: shard.total_crdt_operation ?? shard.total_crdt_operations ?? 0,
                 active_timelines: shard.active_timelines,
-                total_crdt_operation: shard.total_crdt_operation,
               },
               style: {
                 width: 350,

@@ -1,46 +1,48 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import styled, { keyframes } from 'styled-components';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import styled, { keyframes } from 'styled-components';
 import { motion } from 'framer-motion';
 import { useSwarmStore } from '../../lib/store/useSwarmStore';
 import { fetchClusterDiagnostics } from '../../actions/admin';
+import { History, LayoutDashboard, Network, Shield, Vault } from 'lucide-react';
 
 const blinkHeartbeat = keyframes`
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.3; }
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.3; transform: scale(0.85); }
 `;
 
 const SidebarContainer = styled.aside`
   width: 256px;
-  background-color: #050505;
+  height: 100%;
   border-right: 1px solid #1f1f23;
+  background-color: #09090b;
   display: flex;
   flex-direction: column;
-  height: 100%;
-  font-family: monospace;
   box-sizing: border-box;
   flex-shrink: 0;
   z-index: 40;
 `;
 
 const LogoSection = styled.div`
-  padding: 16px;
+  padding: 24px 20px;
   display: flex;
   align-items: center;
   gap: 12px;
   border-bottom: 1px solid #1f1f23;
+  background-color: #020202;
   box-sizing: border-box;
 `;
 
 const LogoWrapper = styled.div`
-  width: 44px;
-  height: 44px;
+  width: 32px;
+  height: 32px;
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
 `;
 
 const BrandName = styled.div`
@@ -49,23 +51,25 @@ const BrandName = styled.div`
 `;
 
 const BrandTitle = styled.span`
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 900;
-  letter-spacing: 0.25em;
+  letter-spacing: 0.2em;
   color: #ffffff;
+  font-family: monospace;
 `;
 
 const BrandSubtitle = styled.span`
   font-size: 9px;
-  letter-spacing: 0.15em;
   color: #00f3ff;
+  letter-spacing: 0.15em;
   text-transform: uppercase;
+  font-family: monospace;
 `;
 
 const ProfileSection = styled.div`
-  padding: 14px 16px;
+  padding: 16px 20px;
   border-bottom: 1px solid #1f1f23;
-  background-color: rgba(9, 9, 11, 0.4);
+  background-color: #0c0c0e;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -179,7 +183,7 @@ const NavLink = styled(Link)<{ $isActive: boolean }>`
   position: relative;
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 12px;
   padding: 10px 14px;
   color: ${props => (props.$isActive ? '#ffffff' : '#71717a')};
   text-decoration: none;
@@ -263,11 +267,11 @@ export function Sidebar() {
   }, [daemonOnline]);
 
   const navLinks = [
-    { href: '/', label: 'Dashboard' },
-    { href: '/topology', label: 'Topology' },
-    { href: '/aegis', label: 'Aegis Governance' },
-    { href: '/vault', label: 'Audit Vault' },
-    { href: '/router', label: 'Memory Router' },
+    { href: '/', label: 'Dashboard', icon: LayoutDashboard },
+    { href: '/topology', label: 'Topology', icon: Network },
+    { href: '/aegis', label: 'Aegis Governance', icon: Shield },
+    { href: '/vault', label: 'Audit Vault', icon: Vault },
+    { href: '/replay', label: 'Time Travel // Replay', icon: History },
   ];
 
   return (
@@ -335,7 +339,13 @@ export function Sidebar() {
 
       <NavList>
         {navLinks.map((link) => {
-          const isActive = pathname === link.href || (link.href === '/aegis' && pathname === '/firewall');
+          const isActive =
+            pathname === link.href ||
+            (link.href === '/aegis' && pathname === '/firewall') ||
+            (link.href === '/vault' && pathname === '/audit-vault') ||
+            (link.href === '/replay' && pathname === '/router');
+          const Icon = link.icon;
+
           return (
             <NavLink key={link.href} href={link.href} $isActive={isActive}>
               {isActive && (
@@ -344,6 +354,7 @@ export function Sidebar() {
                   transition={{ type: 'spring', stiffness: 400, damping: 30 }}
                 />
               )}
+              <Icon className={`w-4 h-4 ${isActive ? 'text-cyan-400' : 'text-zinc-500'}`} />
               <span>{link.label}</span>
             </NavLink>
           );

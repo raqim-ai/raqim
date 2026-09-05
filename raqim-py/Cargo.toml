@@ -1,14 +1,21 @@
 [package]
 name = "raqim-py"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+
+[lib]
+name = "raqim_core"
+crate-type = ["cdylib"]
 
 [dependencies]
-raqim-core = {path = "../raqim-core", default-features = false, features = ["mock-embedding"]}
-
-ed25519-dalek = "2.2.0"
-pyo3 = "0.28.3"
+raqim-core = {path = "../raqim-core"}
 rkyv = "0.8.15"
 
+ed25519-dalek = "3.0.0"
+pyo3 = { version = "0.28.3", features = ["extension-module"] }
+
+postcard = "1.0"
 hex =  "0.4"
 blake3 = "1.5"
+uuid = {version = "1.10", features = ["v7"] }
+serde = { version = "1.0", features = ["derive"] }

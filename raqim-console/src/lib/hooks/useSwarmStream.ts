@@ -80,8 +80,16 @@ export function useSwarmStream() {
         }
       },
       onmessage(event) {
+        // Ignore non-string or empty / whitespace data
+        if (!event.data || typeof event.data !== 'string') return;
+        const trimmed = event.data.trim();
+        // Ignore keep-alive heartbeats, pings, or comments
+        if (!trimmed || trimmed.startsWith(':') || trimmed === 'ping' || trimmed === 'keepalive' || trimmed === '""') {
+          return;
+        }
+
         try {
-          const rawData = JSON.parse(event.data);
+          const rawData = JSON.parse(trimmed);
           const eventType = rawData.event_type || rawData.type;
           const now = Date.now();
 
@@ -146,8 +154,8 @@ export function useSwarmStream() {
             });
           }
           setDaemonOnline(true, null);
-        } catch (e) {
-          console.error('Failed to parse Firehose Event frame', e);
+        } catch {
+          // Quietly ignore malformed non-JSON keepalive frames
         }
       },
       onclose() {

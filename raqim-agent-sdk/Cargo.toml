@@ -1,8 +1,0 @@
-[package]
-name = "raqim-agent-sdk"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-rkyv = "0.8.15"
-raqim-core = { path = "../raqim-core", default-features = false, features = ["mock-embedding"] }

@@ -6,8 +6,9 @@ use mcp_rust_sdk::transport::stdio::StdioTransport;
 use mcp_rust_sdk::types::{ClientCapabilities, Implementation, ServerCapabilities, Tool};
 use raqim_core::api::WsMessage;
 use serde_json::{Value, json};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
-use std::{eprintln, fs, println};
+use std::{eprintln, format, fs, println};
 
 use async_trait::async_trait;
 use raqim_core::{AgentState, AgentStatus, IngressEnvelope};
@@ -21,26 +22,25 @@ struct RaqimHandler {
     pub_key_bytes: [u8; 32],
     capability_cert_bytes: Vec<u8>,
     daemon_http_url: String,
-    license_key: String,
+    daemon_tcp_addr: SocketAddr,
     http_client: reqwest::Client,
-
     commit_tool: Tool,
     query_tool: Tool,
     ask_swarm_tool: Tool,
 }
 
 impl RaqimHandler {
-    fn new(
-        private_key_path: &str,
-        cert_path: &str,
-        daemon_http_url: &str,
-        license_key: &str,
-    ) -> Self {
+    fn new(private_key_path: &str, cert_path: &str, tcp_port: u16, daemon_http_url: &str) -> Self {
         println!("[MCP HANDLER] Loading Cryptographic Identity and capability credentials...  ");
 
         // Load Signing Private Key
-        let key_bytes = fs::read(private_key_path)
-            .expect(" FATAL: Missing Private Key. Aegis identity key required. ");
+        let key_bytes = fs::read(private_key_path).unwrap_or_else(|_| {
+            panic!(
+                " FATAL: Missing Private Key at '{}'. Aegis identity key required. ",
+                private_key_path
+            )
+        });
+
         let key_array: &[u8; 32] = key_bytes
             .as_slice()
             .try_into()
@@ -62,13 +62,16 @@ impl RaqimHandler {
             .build()
             .expect("Failed to initialize HTTP client");
 
+        let daemon_tcp_addr =
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), tcp_port));
+
         Self {
             signing_key,
             pub_key_bytes,
             capability_cert_bytes,
-            license_key: license_key.to_string(),
             http_client,
             daemon_http_url: daemon_http_url.to_string(),
+            daemon_tcp_addr,
             ask_swarm_tool: Tool {
                 name: "ask_swarm".to_string(),
                 description: "Ask another agent a question via the A2A Zero-Trust network"
@@ -76,8 +79,8 @@ impl RaqimHandler {
                 schema: json!({
                     "type": "object",
                     "properties": {
-                        "target_capability": {"type": "string", "description": "e.g. rqm_medical/vitals"},
-                        "question": {"type": "string"}
+                        "target_capability": {"type": "string", "description": "e.g. /finance/fraud_eval"},
+                        "question": {"type": "string", "description": "The precise investigative query"}
                     },
                     "required": ["target_capability", "question"]
                 }),
@@ -85,13 +88,13 @@ impl RaqimHandler {
 
             commit_tool: Tool {
                 name: "commit_thought".to_string(),
-                description: "Commits a verified thought to the Raqim OS CRDT".to_string(),
+                description: "Commits a cryptographically verified decision to the Raqim OS CRDT and  Merkle DAG ".to_string(),
                 schema: json!({
                     "type": "object",
                     "properties": {
-                        "thought_text": {"type": "string"},
+                        "thought_text": {"type": "string", "description": "The reasoning or action payload"},
                         "status": {"type": "string", "enum": ["Reasoning", "ToolExecution", "Halted", "Idle"]},
-                        "intent_path": {"type": "string", "description": "The namespace e.g rqm_finance/ledger"},
+                        "intent_path": {"type": "string", "description": "Target namespace e.g /finance/audit"},
                     },
                     "required": ["thought_text", "status", "intent_path", "agent_id_hex"]
                 }),
@@ -99,12 +102,12 @@ impl RaqimHandler {
 
             query_tool: Tool {
                 name: "query_memory".to_string(),
-                description: "Semantic RAG search bounded by namespace.".to_string(),
+                description: "Semantic Hyybrid RAG search across Hot RAM and Cold LanceDB storage.".to_string(),
                 schema: json!({
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string", "description": "The english question to search for"},
-                        "intent_path": {"type": "string", "description": "The namespase to isolate the search" }
+                        "query": {"type": "string", "description": "Natural language query to search for"},
+                        "intent_path": {"type": "string", "description": "Target namespace filter (e.g. /finance/*)" }
 
                     },
                     "required": ["query", "intent_path"]
@@ -154,11 +157,8 @@ impl ServerHandler for RaqimHandler {
                     // The hash the exact public key that was used to initialize this MCP Server instance.
                     let mut hasher = blake3::Hasher::new_derive_key("raqim.agent.v1.identity");
                     hasher.update(&self.pub_key_bytes);
-
                     let mut derived_16_bytes = [0u8; 16];
                     hasher.finalize_xof().fill(&mut derived_16_bytes);
-
-                    // let agent_hex = hex::encode(derived_16_bytes);
 
                     // --- Translation layer ----
                     let intent_path = args
@@ -198,7 +198,11 @@ impl ServerHandler for RaqimHandler {
 
                     // THE CRYPTOGRAPHIC ENVELOPE
                     //  Hash the state bytes.
-                    let state_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&state).unwrap();
+                    let state_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&state)
+                        .map_err(|e| {
+                            mcp_rust_sdk::Error::Other(format!("State serialization failed: {}", e))
+                        })?
+                        .into_vec();
 
                     // Mathematically sign the state bytes with our private key.
                     let signature = self.signing_key.sign(&state_bytes).to_bytes();
@@ -207,25 +211,41 @@ impl ServerHandler for RaqimHandler {
                         intent_path,
                         public_key: self.pub_key_bytes,
                         signature,
-                        state_bytes: state_bytes.into_vec(),
+                        state_bytes,
                         capability_cert: self.capability_cert_bytes.clone(),
                     };
 
                     // Zero-copy serialize the state
-                    let serialized_envelope =
-                        rkyv::to_bytes::<rkyv::rancor::Error>(&envelope).unwrap();
+                    let serialized_envelope = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope)
+                        .map_err(|e| {
+                            mcp_rust_sdk::Error::Other(format!(
+                                "Envelope Serialization failed: {}",
+                                e
+                            ))
+                        })?
+                        .into_vec();
                     let payload_len = (serialized_envelope.len() as u32).to_le_bytes();
 
                     // Fire to the running Raqim daemon Over TCP
-                    if let Ok(mut stream) = TcpStream::connect("127.0.0.1:8080").await {
-                        let _ = stream.write_all(&payload_len).await;
-                        let _ = stream.write_all(&serialized_envelope).await;
+                    if let Ok(mut stream) = TcpStream::connect(self.daemon_tcp_addr).await {
+                        stream
+                            .write_all(&payload_len)
+                            .await
+                            .map_err(|e| mcp_rust_sdk::Error::Other(e.to_string()))?;
+                        stream
+                            .write_all(&serialized_envelope)
+                            .await
+                            .map_err(|e| mcp_rust_sdk::Error::Other(e.to_string()))?;
+                        stream
+                            .flush()
+                            .await
+                            .map_err(|e| mcp_rust_sdk::Error::Other(e.to_string()))?;
 
                         //  Tell the LLM it succeeded
                         return Ok(json!({
                            "content": [{
                                "type": "text",
-                               "text": "Thought securely committed."
+                               "text": format!(" Thought commited to WAL: TxID 0x{:032x}", state.transaction_id)
                            }]
                         }));
                     }
@@ -243,10 +263,9 @@ impl ServerHandler for RaqimHandler {
                     );
 
                     // AXUM HTTP RAG CALL
-                    let response = self
-                        .http_client
-                        .get(&url)
-                        .header("Authorization", format!("Bearer {}", self.license_key))
+                    let req = self.http_client.get(&url);
+
+                    let response = req
                         .send()
                         .await
                         .map_err(|e| mcp_rust_sdk::Error::Other(e.to_string()))?;
@@ -255,10 +274,14 @@ impl ServerHandler for RaqimHandler {
                         let memories: Vec<String> =
                             response.json::<Vec<String>>().await.unwrap_or_default();
                         return Ok(
-                            json!({"content": [{"type": "text", "text": format!("Retrieved:\n{}", memories.join("\n"))}]}),
+                            json!({"content": [{"type": "text", "text": if memories.is_empty() {"No relevant historical records found".to_string()} else {format!("Retreived Historical Context: \n{}", memories.join("\n"))}}]}),
                         );
+                    } else {
+                        return Err(mcp_rust_sdk::Error::Other(format!(
+                            " RAG Query failed with status {}",
+                            response.status()
+                        )));
                     }
-                    return Err(mcp_rust_sdk::Error::Other("RAG Query Failed".to_string()));
                 } else if name == "ask_swarm" {
                     let target_capability = args
                         .get("target_capability")
@@ -291,8 +314,12 @@ impl ServerHandler for RaqimHandler {
                     };
 
                     // 2. Connect to RQM Daemon Websocket.
-                    let ws_url = self.daemon_http_url.replace("http", "ws") + "/v1/mcp/ws";
-
+                    let ws_url = format!(
+                        "{}/v1/mcp/ws",
+                        self.daemon_http_url
+                            .replace("http://", "ws://")
+                            .replace("https://", "wss://")
+                    );
                     let (mut ws_stream, _) = tokio_tungstenite::connect_async(&ws_url)
                         .await
                         .map_err(|e| {
@@ -318,10 +345,10 @@ impl ServerHandler for RaqimHandler {
                                 }) = serde_json::from_str(&text)
                                 {
                                     if incoming_id == request_id {
-                                        return Ok(String::from_utf8(answer).unwrap());
+                                        return Ok(String::from_utf8_lossy(&answer).to_string());
                                     }
                                 } else if let Ok(WsMessage::Error { message }) =
-                                    serde_json::from_str(&text)
+                                    serde_json::from_str::<WsMessage>(&text)
                                 {
                                     return Err(message);
                                 }
@@ -378,19 +405,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let daemon_url =
         std::env::var("RQM_DEAMON_URL").unwrap_or_else(|_| "http://127.0.0.1:8081".to_string());
-    let license_key = std::env::var("RQM_LICENSE_KEY").unwrap_or_else(|_| "".to_string());
 
     let (transport, _message_sender) = StdioTransport::new();
 
-    let handler = Arc::new(RaqimHandler::new(
-        &key_path,
-        &cert_path,
-        &daemon_url,
-        &license_key,
-    ));
+    let handler = Arc::new(RaqimHandler::new(&key_path, &cert_path, 8080, &daemon_url));
     let server = Server::new(Arc::new(transport), handler as Arc<dyn ServerHandler>);
 
     server.start().await?;
-    
+
     Ok(())
 }

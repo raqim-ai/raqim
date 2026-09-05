@@ -7,6 +7,5 @@ trash.txt
 *.keys
 /ca-keys
 /keys
-/.fastembed_cache
 .fastembed_cache
-.fastembed_cache
+archive

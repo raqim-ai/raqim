@@ -4,7 +4,6 @@ pub mod axon;
 pub mod compactor;
 
 pub mod config;
-pub mod cortex;
 pub mod embedding;
 pub mod health;
 pub mod lancedb_store;
@@ -12,9 +11,7 @@ pub mod memory_router;
 pub mod network;
 pub mod nucleus;
 pub mod registry;
-pub mod sandbox;
 pub mod state;
-pub mod telemetry;
 pub mod utils;
 
 pub mod hot_memory;
@@ -144,7 +141,6 @@ pub async fn execute_raqim_cascade(
     axon: Arc<AxonGateKeeper>,
     wal: Arc<WalEngine>,
     shard_brain: Arc<SwarmStateRegistry>,
-    cortex_tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     global_net: Arc<GlobalNetworkBridge>,
     tx: Sender<SystemEvent>,
     seeds: Vec<u64>,
@@ -188,7 +184,7 @@ pub async fn execute_raqim_cascade(
     let delta = shard_brain
         .get_or_create_brain(&enriched_state.namespace.clone())
         .append_agent_thought(&agent_hex, &enriched_state)
-        .unwrap();
+        .map_err(|e| anyhow::anyhow!("CRDT allocation failed: {}", e))?;
 
     // telemetry.record_crdt_merge();
 
@@ -212,11 +208,9 @@ pub async fn execute_raqim_cascade(
     }
 
     // 4. Fire to wal (Durability)
-    wal.append(sealed_log.clone()).await;
-
-    // 5. Fire to Local Cortex (Zero-Copy IPC )
-    let serialized_log = rkyv::to_bytes::<rkyv::rancor::Error>(&sealed_log).unwrap();
-    let _ = cortex_tx.send(serialized_log.into_vec());
+    wal.append(sealed_log.clone())
+        .await
+        .map_err(|e| anyhow::anyhow!("Durability Breach / WAL Saturated: {}", e))?;
 
     global_net.broadcast_to_world(&sealed_log).await;
 

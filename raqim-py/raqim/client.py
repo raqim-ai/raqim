@@ -18,6 +18,7 @@ from typing import (
 
 import blake3
 import httpx
+import concurrent.futures
 import websockets
 import zenoh
 
@@ -32,7 +33,7 @@ class ReplayDivergedError(Exception):
 class RaqimClientError(Exception): 
     """Raised for general Raqim client communication or cryptographic errors."""
     pass
-
+    
 # Task-Local context tracker 
 _execution_step_context: contextvars.ContextVar[int] = contextvars.ContextVar("raqim_step_context", default = 0)
 
@@ -58,7 +59,7 @@ class CanonicalSerializer:
             return dataclasses.asdict(obj)
         # Byte support
         if isinstance(obj, (bytes, bytearray)): 
-            return base64.b64decode(obj).decode("ascii")
+            return base64.b16encode(obj).decode("ascii")
         
         # Fallback to string representation
         return str(obj)
@@ -89,13 +90,13 @@ class CanonicalSerializer:
         canonical_str = cls.canonical_json(normalized_payload)
         
         # 4. Compute 32-byte BLAKE3 Hash using Domain Separation Key
-        hasher = blake3.blake3(derive_key="raqim.effect.v1.signature")
+        hasher = blake3.blake3(derive_key_context="raqim.effect.v1.signature")
         hasher.update(canonical_str.encode("utf-8"))
         call_sig_hash = hasher.digest(length=32)
         
         return call_sig_hash.hex(), canonical_str
         
-        
+
 class RaqimClient:
     def __init__(
         self, alias: str, tenant: str, private_key_path: str, cert_path: Optional[str] = None,
@@ -106,10 +107,12 @@ class RaqimClient:
         self.alias = alias 
         self.tenant = tenant 
         self.crypto_core = RaqimCryptoCore(private_key_path, cert_path)
+        self.cert_bytes = bytes(self.crypto_core.capability_cert_bytes)
+        self.cert_hex = self.cert_bytes.hex()
 
        # Mathematically derive 16-byte Agent ID via Blake3 Domain Separation
-        public_key_bytes = bytes(self.crypto_core.public_key_bytes)
-        derived_16_bytes = blake3.blake3(public_key_bytes, derive_key="raqim.agent.v1.identity").digest(length=16)
+        public_key_bytes = bytes(self.crypto_core.pub_key_bytes)
+        derived_16_bytes = blake3.blake3(public_key_bytes, derive_key_context="raqim.agent.v1.identity").digest(length=16)
        
         # The 32-character hex string representing the 16-bytes
         self.agent_hex = derived_16_bytes.hex()
@@ -129,7 +132,6 @@ class RaqimClient:
         # The callback function provided by the developer
         self._reality_fork_hook: Callable[[str], None] = None 
     
- 
     async def boot(self): 
         """
         Enterprise Ignition Sequence: 
@@ -157,7 +159,6 @@ class RaqimClient:
             Registers the developer callback for Aegis FORCE_CONTEXT_EVICTION events.
         """
         self._reality_fork_hook = callback
-
 
     def _handle_os_control_override(self, sample: Any) -> None:
         """Listener that wipes corrupted context when Aegis trips a circuit breaker """
@@ -202,21 +203,21 @@ class RaqimClient:
             return resp.json()
 
     # @raqim.trace DECORATOR 
-    def trace(self, namespace: str = "/default", custom_signature: Optional[str] = None ) -> Callable[..., Any]: 
+    def trace(self, namespace: str = "/default", custom_signature: Optional[str] = None) -> Callable[..., Any]: 
         """ 
         @raqim.trace Decorator: 
         Wraps any sync function, async coroutine, or async streaming generator. 
         - In 'record' mode: Runs fn live, records result to Raqim WAL. 
         - In 'replay' mode: Bypasses execution, fetches output from WAL ($0 API cost). 
-        - On code change: Autoo-forks execution into a parallel universe branch
+        - On code change: Auto-forks execution into a parallel universe branch.
         """
         def decorator(fn: Callable[..., Any]) -> Callable[..., Any]: 
             if inspect.isasyncgenfunction(fn): 
-                # path A: Async Generator (streeaming LLM token)
+                # Path A: Async Generator (Streaming LLM tokens)
                 @functools.wraps(fn)
                 async def async_gen_wrapper(*args: Any, **kwargs: Any) -> AsyncGenerator[Any, None]:
                     step = _execution_step_context.get()
-                    _execution_step_context.set(step+1)
+                    _execution_step_context.set(step + 1)
                     
                     call_sig_hex, _ = CanonicalSerializer.derive_call_signature_hash(fn, args, kwargs, custom_signature)
                     
@@ -225,16 +226,16 @@ class RaqimClient:
                         target_ns = f"phantom_{namespace}_{self.agent_hex}_step{step}"
 
                     # Replay Check
-                    if self.mode == "replay" and not self.is_forked : 
+                    if self.mode == "replay" and not self.is_forked: 
                         cached = await self._fetch_recorded_effect(step, call_sig_hex)
                         if cached is not None: 
-                            print(f"[RAQIM REPLAY] Step {step}. (Stream) replayed from WAL ($0 API cost).")
+                            print(f"[RAQIM REPLAY] Step {step} (Stream) replayed from WAL ($0 API cost).")
                             for chunk in cached: 
                                 yield chunk
                             return 
                         
                         # Divergence Triggered
-                        self._handle_divergence(self, call_sig_hex, namespace)
+                        self._handle_divergence(step, call_sig_hex, namespace)
                         target_ns = f"phantom_{namespace}_{self.agent_hex}_step{step}"
 
                     # Live Execution & accumulation
@@ -249,7 +250,7 @@ class RaqimClient:
                 return async_gen_wrapper
             
             elif asyncio.iscoroutinefunction(fn): 
-                # Path B: Stadard Async Coroutine
+                # Path B: Standard Async Coroutine
                 @functools.wraps(fn) 
                 async def async_wrapper(*args: Any, **kwargs: Any) -> Any: 
                     step = _execution_step_context.get()
@@ -259,16 +260,14 @@ class RaqimClient:
                     
                     target_ns = namespace
                     if self.is_forked: 
-                        target_ns = f"phantom_{namespace}_{self.agent_hex}_step_{step}"
-                    
+                        target_ns = f"phantom_{namespace}_{self.agent_hex}_step{step}"
                     
                     # Replay Check
                     if self.mode == "replay" and not self.is_forked: 
                         cached = await self._fetch_recorded_effect(step, call_sig_hex)
                         if cached is not None: 
-                            print(f"[RAQIM REPLAY] Step {step} replayed from WAL ($0 API cost) ")
+                            print(f"[RAQIM REPLAY] Step {step} replayed from WAL ($0 API cost).")
                             return cached
-                        
                         
                         # Divergence Triggered
                         self._handle_divergence(step, call_sig_hex, namespace)
@@ -280,22 +279,44 @@ class RaqimClient:
                     return result
                 
                 return async_wrapper
+            
             else: 
                 # Path C: Synchronous function
                 @functools.wraps(fn)
                 def sync_wrapper(*args: Any, **kwargs: Any) -> Any: 
-                    @functools.wraps(fn)
-                    def sync_wrapper(*args: Any, **kwargs: Any) -> Any: 
-                        step = _execution_step_context.get()
-                        _execution_step_context.set(step+1)
+                    step = _execution_step_context.get()
+                    _execution_step_context.set(step + 1)
+                    
+                    call_sig_hex, _ = CanonicalSerializer.derive_call_signature_hash(fn, args, kwargs, custom_signature)
+                    
+                    target_ns = namespace
+                    if self.is_forked:
+                        target_ns = f"phantom_{namespace}_{self.agent_hex}_step{step}"
                         
-                        call_sig_hex, _ = CanonicalSerializer.derive_call_signature_hash(fn, args, kwargs, custom_signature)
-                        
-                        target_ns = namespace
-                        if self.is_forked:
-                            target = f"phantom_{namespace}_{self.agent_hex}_step{step}"
+                    # For sync functions, bridge to async execution via loop runner
+                    try: 
+                        running_loop = asyncio.get_running_loop()
+                    except: 
+                        running_loop = None 
+                    if running_loop and running_loop.is_running():
+                        # Scenario 1: Sync function called inside active async loop (e.g. inside main())
+                        if self.mode == "replay" and not self.is_forked: 
+                            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                                cached = pool.submit(lambda: asyncio.run(self._fetch_recorded_effect(step, call_sig_hex))).result()
                             
-                        # For sync functions, bridge to async execution via loop runner
+                            if cached is not None: 
+                                print(f"[RAQIM REPLAY] Step {step} (Sync) replayed from WAL ($0 API cost).")
+                                return cached 
+
+                            self._handle_divergence(step, call_sig_hex, namespace)
+                            target_ns = f"phantom_{namespace}_{self.agent_hex}_step{step}"
+                        
+                        result = fn(*args, **kwargs)
+                        # Schedule persistence without blocking the running loop
+                        asyncio.create_task(self._persist_effect(step, call_sig_hex, result, target_ns))
+                        return result
+                    else:
+                        # Scenario 2: Sync function called from standard synchronous context
                         loop = self._get_or_create_event_loop()
                         
                         if self.mode == "replay" and not self.is_forked: 
@@ -303,7 +324,7 @@ class RaqimClient:
                                 self._fetch_recorded_effect(step, call_sig_hex)
                             ) 
                             if cached is not None: 
-                                print(f"[RAQIM REPLA] Step {step} (Sync) replayed from WAL ($0 API cost.) "  )
+                                print(f"[RAQIM REPLAY] Step {step} (Sync) replayed from WAL ($0 API cost).")
                                 return cached 
 
                             self._handle_divergence(step, call_sig_hex, namespace)
@@ -312,13 +333,13 @@ class RaqimClient:
                         result = fn(*args, **kwargs)
                         loop.run_until_complete(self._persist_effect(step, call_sig_hex, result, target_ns))
                         return result 
-                    
-                    return sync_wrapper
                 
-                return decorator
+                return sync_wrapper
 
+        return decorator
+   
     # Internal Effect Engine Helpers
-    async def _fetch_recorded_effect(self, step_ordinal: int, call_sig_hex: str) -> Optional[Any]:
+    async def _fetch_recorded_effect(self, step_ordinal: int, call_sig_hex  : str) -> Optional[Any]:
         """Fetches recorded effect from daemon. Returns None if signature diverged."""
         async with httpx.AsyncClient() as http: 
             try: 
@@ -377,12 +398,16 @@ class RaqimClient:
         
     def _get_or_create_event_loop(self) -> asyncio.AbstractEventLoop: 
         try: 
-            return asyncio.get_event_loop
+            loop = asyncio.get_event_loop() 
+            if loop.is_closed(): 
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            return loop 
         except RuntimeError: 
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             return loop
-        
+    
     # A2A Websocket Swarm router 
     async def connect_swarm(self):
         """Connect  background WebSocket Multiplexer to Raqim's A2A gateway"""
@@ -444,9 +469,9 @@ class RaqimClient:
             "capability": capability,
             "question": list(question),
             "sender_hex": sender_hex,
-            "public_key": list(self.crypto_core.public_key_bytes),
+            "public_key": list(self.crypto_core.pub_key_bytes),
             "signature": list(signature),
-            "capability_cert": ""
+            "capability_cert": self.cert_hex
         }
 
         await self._ws_connection.send(json.dumps(ask_msg))
@@ -473,7 +498,7 @@ def verify_state_proof_offline(payload_bytes: bytes, agent_id_str: str, proof_di
     agent_id_bytes = bytes.fromhex(agent_id_str)
     
     # Recompute leaf hash 
-    hasher = blake3.blake3(derive_key="raqim.axon.v1.leaf")
+    hasher = blake3.blake3(derive_key_context="raqim.axon.v1.leaf")
     hasher.update(payload_bytes)
     hasher.update(agent_id_bytes)
     current_hash = hasher.digest(length=32)
@@ -484,7 +509,7 @@ def verify_state_proof_offline(payload_bytes: bytes, agent_id_str: str, proof_di
     for sibling_hex in proof_dict["sibling_hashes_hex"]: 
         sibling_bytes = bytes.fromhex(sibling_hex) 
         
-        node_hasher = blake3.blake3(derive_key="raqim.axon.v1.node")
+        node_hasher = blake3.blake3(derive_key_context="raqim.axon.v1.node")
         if index % 2 == 0: 
             node_hasher.update(current_hash)
             node_hasher.update(sibling_bytes)
