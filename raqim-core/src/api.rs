@@ -1480,9 +1480,9 @@ pub struct RecordEffectRequest {
 
     // Cryptographic perimeter
     pub timestamp: i64,
-    pub pub_key_hex: String,
-    pub capability_cert: String,
-    pub signature: String,
+    pub public_key_hex: String,
+    pub capability_cert_hex: String,
+    pub signature_hex: String,
 }
 
 #[derive(Serialize)]
@@ -1518,10 +1518,22 @@ pub async fn record_effect_handler(
         .try_into()
         .map_err(|_| ApiError::BadRequest("agent_hex must be exactly 16 bytes".to_string()))?;
 
-    // Enforce aegis security perimeter on http effects
-    // if let Some(agent_proc) = state.swarm_registry.active_agents.get(&payload.agent_hex) {
-    //     let group_name = agent_proc.gr
-    // }
+    let pub_key_bytes = hex::decode(payload.public_key_hex.clone())
+        .map_err(|_| ApiError::BadRequest("Invalid pub_key_hex format".to_string()))?;
+
+    let pub_key: [u8; 32] = pub_key_bytes
+        .try_into()
+        .map_err(|_| ApiError::BadRequest("pub_key must be exactly 32 bytes".to_string()))?;
+
+    let signature_bytes = hex::decode(payload.signature_hex.clone())
+        .map_err(|_| ApiError::BadRequest("Invalid signature format".to_string()))?;
+
+    let signature: [u8; 64] = signature_bytes
+        .try_into()
+        .map_err(|_| ApiError::BadRequest("signature must be exactly 64 bytes".to_string()))?;
+
+    let capability_cert = hex::decode(payload.capability_cert_hex)
+        .map_err(|_| ApiError::BadRequest("Invalid capability_cert_hex format".to_string()))?;
 
     let call_signature_bytes = hex::decode(payload.call_signature_hex.clone())
         .map_err(|_| ApiError::BadRequest("Invalid call_signature_hex format".to_string()))?;
@@ -1532,6 +1544,41 @@ pub async fn record_effect_handler(
     let output_payload = base64::engine::general_purpose::STANDARD
         .decode(&payload.output_payload_base64)
         .map_err(|_| ApiError::BadRequest("Invalid base64 payload".to_string()))?;
+
+    // Aegis barrier 1: Lineage Verification
+    let (verified_agent_hex, group_name) = state
+        .aegis
+        .verify_session_lineage(&capability_cert, &pub_key)
+        .map_err(|e| ApiError::Unauthorized(format!("Aegis lineage rejection: {}", e)))?;
+
+    if verified_agent_hex != payload.agent_hex {
+        return Err(ApiError::Forbidden(
+            " Security violation: Certificate identity mismatch with caller ".to_string(),
+        ));
+    }
+
+    let canonical_attestation = format!(
+        "{}:{}:{}:{}:{}",
+        payload.namespace.clone(),
+        payload.step_ordinal,
+        payload.call_signature_hex.clone(),
+        payload.output_payload_base64,
+        payload.timestamp
+    );
+
+    // Aegis Barrier 2: Fast-path policy audit
+    state
+        .aegis
+        .authorize_packet_fast(
+            &payload.agent_hex,
+            &group_name,
+            &pub_key,
+            canonical_attestation.as_bytes(),
+            &signature,
+            &payload.namespace,
+            payload.timestamp,
+        )
+        .map_err(|e| ApiError::Forbidden(format!("Aegis Interdiction: {}", e)))?;
 
     let is_forked = payload.namespace.starts_with("phantom_");
 
@@ -1570,7 +1617,6 @@ pub async fn record_effect_handler(
                     .unwrap_or_default()
                     .as_secs() as i64;
 
-                let original_ns = payload.namespace.clone().replace("phantom_", "");
                 // Audit Trail: Emitted to System Event Bus -> Persisted to lanceDB System event table
                 let _ = state.event_tx.send(SystemEvent::RealityForked {
                     agent_id: payload.agent_hex.clone(),

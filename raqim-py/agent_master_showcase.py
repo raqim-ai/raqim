@@ -3,7 +3,6 @@ import os
 import sys
 import time
 import json
-import uuid
 import httpx
 from dotenv import load_dotenv
 
@@ -43,7 +42,7 @@ async def forge_agent_credentials(agent_alias: str, security_group: str) -> tupl
     1. Generates local Ed25519 Keypair (agent holds private key).
     2. Derives 16-byte Agent ID via BLAKE3 identity domain separation.
     3. Requests signed CapabilityCertificate from Daemon CA Mint API.
-    4. Writes .pem and .cert locally. (Agent never sees master key).
+    4. Writes .pem and .cert locally. .
     """
     key_path = os.path.join(KEY_DIR, f"{agent_alias}.pem")
     cert_path = os.path.join(KEY_DIR, f"{agent_alias}.cert")
@@ -174,7 +173,7 @@ async def main():
     # DEMO RUN 2: ZERO-COST DETERMINISTIC REPLAY ($0 API Cost, 0.0ms)
     # ==========================================================================
     print("------------------------------------------------------------------")
-    print("PHASE 2: DETERMINISTIC REPLAY (0.0ms Latency, $0 API Billing)")
+    print("PHASE 2: DETERMINISTIC REPLAY (0.0ms Latency, $0 API COST)")
     print("------------------------------------------------------------------")
     
     # Switch agent to replay mode
