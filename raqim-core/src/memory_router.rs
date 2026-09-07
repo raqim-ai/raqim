@@ -17,18 +17,18 @@ use std::u64;
 use std::{fs::File, sync::Arc};
 use tokio::sync::broadcast::Sender;
 
-use crate::AgentState;
-use crate::AgentStatus;
-use crate::EffectKey;
-use crate::EffectRecord;
 use crate::api::ForkConfig;
 use crate::api::UiEvent;
 use crate::axon::AxonGateKeeper;
 use crate::generate_uuidv7_txid;
 use crate::hot_memory::HotVectorBuffer;
 use crate::state::SwarmStateRegistry;
+use crate::AgentState;
+use crate::AgentStatus;
+use crate::EffectKey;
+use crate::EffectRecord;
 use crate::{
-    OpLog, SystemEvent, config::RaqimConfig, lancedb_store::LanceEngine, nucleus::WalEngine,
+    config::RaqimConfig, lancedb_store::LanceEngine, nucleus::WalEngine, OpLog, SystemEvent,
 };
 
 pub enum RebuildMode {
@@ -705,10 +705,16 @@ impl MemoryRouter {
             ),
         };
 
+        let delta = self
+            .brain
+            .get_or_create_brain(namespace)
+            .append_agent_thought(&agent_hex, &state)
+            .unwrap_or_default();
+
         let raw_oplog = OpLog {
             agent_id,
             state,
-            delta: output_payload.clone(),
+            delta,
             previous_hash: [0u8; 32],
             current_hash: [0u8; 32],
             entropy_seeds: Vec::new(),
