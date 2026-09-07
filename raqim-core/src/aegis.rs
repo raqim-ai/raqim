@@ -353,11 +353,24 @@ impl AegisGateKeeper {
             ));
         }
 
+        // Clean phantom prefix to prevent security policy evasion
+        let clean_intent = if intent_path.starts_with("phantom_") {
+            let stripped = intent_path.trim_start_matches("phantom_");
+
+            if let Some(slash_idx) = stripped.find("/") {
+                &stripped[slash_idx..]
+            } else {
+                stripped
+            }
+        } else {
+            intent_path
+        };
+
         for blocked in &live_policy.blocked_namespaces {
             let match_found = if blocked.ends_with("*") {
-                intent_path.starts_with(&blocked[..blocked.len() - 1])
+                clean_intent.starts_with(&blocked[..blocked.len() - 1])
             } else {
-                intent_path == blocked
+                clean_intent == blocked
             };
 
             if match_found {
@@ -375,9 +388,9 @@ impl AegisGateKeeper {
 
         for allowed in &live_policy.allowed_namespaces {
             let match_found = if allowed.ends_with("*") {
-                intent_path.starts_with(&allowed[..allowed.len() - 1])
+                clean_intent.starts_with(&allowed[..allowed.len() - 1])
             } else {
-                allowed == intent_path
+                allowed == clean_intent
             };
 
             if match_found {

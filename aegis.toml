@@ -13,13 +13,13 @@ max_tps = 1000
 burst_capacity = 100
 
 [groups.untrusted_agent]
-allowed_namespaces = ["/sandbox/temp/*"]
+allowed_namespaces = ["/sandbox/temp/*", /system/*]
 blocked_namespaces = ["*"]
 max_tps = 10
 burst_capacity = 5
 
 [groups.analyst_group]
-allowed_namespaces = ["/finance/tools/*", "/finance/reasoning/*"]
+allowed_namespaces = ["/system/*", "/finance/tools/*", "/finance/reasoning/*"]
 blocked_namespaces = ["/finance/restricted/*", "/admin/*"]
 max_tps = 100
 burst_capacity = 200
