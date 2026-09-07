@@ -404,6 +404,25 @@ export async function getAgentTimeline(
   );
 }
 
+export interface RecentThought {
+  tx_id: string;
+  tx_id_hex: string;
+  agent_hex: string;
+  intent_path: string;
+  text: string;
+  status: string;
+  timestamp: number;
+}
+
+/** GET /v1/system/thoughts/recent */
+export async function fetchRecentThoughts(
+  limit: number = 50
+): Promise<ApiResponse<RecentThought[]>> {
+  return request<RecentThought[]>(`/v1/system/thoughts/recent?limit=${limit}`, {
+    method: 'GET',
+  });
+}
+
 // ─── Stream & Gateway URL Helpers ───────────────────────────────────────────
 
 export function getHealthLiveStreamUrl(): string {

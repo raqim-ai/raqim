@@ -3,7 +3,7 @@
 import { useEffect, useRef } from 'react';
 import { useSwarmStore, UiThought, UiEvent, formatTxIdHex } from '../store/useSwarmStore';
 import { fetchEventSource } from '@microsoft/fetch-event-source';
-import { getFirehoseStreamUrl } from '../api';
+import { getFirehoseStreamUrl, fetchRecentThoughts } from '../api';
 
 const inferStatus = (text: string, path: string): UiThought['status'] => {
   const lower = (text + ' ' + path).toLowerCase();
@@ -61,7 +61,42 @@ export function useSwarmStream() {
       pruneEphemeralEdges();
     }, 100);
 
-    // 3. Connect to canonical SSE Firehose endpoint
+    // 3. Hydrate recent historical thoughts from RAM / WAL
+    fetchRecentThoughts(50)
+      .then((res) => {
+        if (res.success && Array.isArray(res.data) && res.data.length > 0) {
+          const historicalThoughts: UiThought[] = res.data.map((raw) => {
+            const hexTx = raw.tx_id_hex?.startsWith('0x')
+              ? raw.tx_id_hex
+              : `0x${raw.tx_id_hex || raw.tx_id}`;
+            return {
+              tx_id: hexTx,
+              tx_id_hex: hexTx,
+              agent_hex: raw.agent_hex,
+              intent_path: raw.intent_path,
+              text: raw.text,
+              status: (raw.status as UiThought['status']) || inferStatus(raw.text, raw.intent_path),
+              is_a2a_query: raw.intent_path?.includes('/a2a/') || false,
+              parent_tx_id: null,
+              timestamp: raw.timestamp,
+            };
+          });
+          batchAddThoughts(historicalThoughts);
+
+          const historicalEvents: UiEvent[] = historicalThoughts.map((t) => ({
+            event_type: 'ThoughtCommitted',
+            agent_hex: t.agent_hex,
+            intent_path: t.intent_path,
+            tx_id: t.tx_id,
+            tx_id_hex: t.tx_id_hex,
+            text: t.text,
+          }));
+          processUiEvents(historicalEvents);
+        }
+      })
+      .catch(() => {});
+
+    // 4. Connect to canonical SSE Firehose endpoint
     const controller = new AbortController();
     const sseUrl = getFirehoseStreamUrl();
 
@@ -95,21 +130,23 @@ export function useSwarmStream() {
 
           if (eventType === 'ThoughtCommited' || eventType === 'ThoughtCommitted') {
             const rawTx = rawData.tx_id;
-            const numericTx = typeof rawTx === 'number' ? rawTx : (parseInt(rawTx, 16) || now);
-            const hexTx = typeof rawTx === 'string' && rawTx.length >= 10 ? rawTx : formatTxIdHex(rawTx);
+            const hexTx =
+              typeof rawTx === 'string' && rawTx.length >= 10
+                ? (rawTx.startsWith('0x') ? rawTx : `0x${rawTx}`)
+                : formatTxIdHex(rawTx);
 
             const text = rawData.text || rawData.payload || '';
             const path = rawData.intent_path || rawData.namespace || '/rqm_core';
 
             const data: UiThought = {
-              tx_id: numericTx,
+              tx_id: hexTx,
               tx_id_hex: hexTx,
               agent_hex: rawData.agent_hex || '0xUNKNOWN',
               intent_path: path,
               text,
               status: inferStatus(text, path),
               is_a2a_query: path?.includes('/a2a/') || false,
-              parent_tx_id: numericTx > 0 ? numericTx - 1 : null,
+              parent_tx_id: null,
               timestamp: rawData.timestamp || now,
             };
             thoughtsBufferRef.current.push(data);

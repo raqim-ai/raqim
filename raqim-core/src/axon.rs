@@ -439,4 +439,40 @@ impl AxonGateKeeper {
             .max()
             .unwrap_or(0)
     }
+
+    /// Collects recent thoughts from active RAM buffers across all namespaces
+    pub fn get_recent_thoughts_ram(&self, limit: usize) -> Vec<crate::RecentThought> {
+        let mut thoughts = Vec::new();
+        for entry in self.active_buffers.iter() {
+            let buffer = entry.value().read();
+            for log in buffer.accumulated_logs.iter() {
+                let tx_id = log.state.transaction_id;
+                let tx_id_hex = format!("0x{:032x}", tx_id);
+                let raw_ts = log.state.timestamp;
+                let timestamp = if raw_ts < 10_000_000_000 {
+                    raw_ts * 1000
+                } else {
+                    raw_ts
+                };
+                let status_str = match &log.state.status {
+                    crate::AgentStatus::Idle => "IDLE",
+                    crate::AgentStatus::Reasoning => "REASONING",
+                    crate::AgentStatus::ToolExecution => "TOOL_EXEC",
+                    crate::AgentStatus::Halted => "HALTED",
+                };
+                thoughts.push(crate::RecentThought {
+                    tx_id: format!("{:032x}", tx_id),
+                    tx_id_hex,
+                    agent_hex: hex::encode(log.agent_id),
+                    intent_path: log.state.namespace.clone(),
+                    text: log.state.text.clone(),
+                    status: status_str.to_string(),
+                    timestamp,
+                });
+            }
+        }
+        thoughts.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        thoughts.truncate(limit);
+        thoughts
+    }
 }

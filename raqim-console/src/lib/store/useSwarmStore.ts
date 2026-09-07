@@ -17,14 +17,14 @@ export type ThoughtStatus =
   | 'PENDING';
 
 export interface UiThought {
-  tx_id: number;
+  tx_id: number | string;
   tx_id_hex: string;
   agent_hex: string;
   intent_path: string;
   text: string;
   status: ThoughtStatus;
   is_a2a_query: boolean;
-  parent_tx_id: number | null;
+  parent_tx_id: number | string | null;
   timestamp: number;
 }
 
@@ -33,7 +33,7 @@ export type UiEvent =
       event_type: 'ThoughtCommitted';
       agent_hex: string;
       intent_path: string;
-      tx_id: number;
+      tx_id: number | string;
       tx_id_hex: string;
       text: string;
     }
@@ -128,8 +128,8 @@ export interface SwarmState {
   setDaemonOnline: (online: boolean, error?: string | null) => void;
 
   // Stream & Thought Pipeline
-  thoughts: Record<number, UiThought>;
-  thoughtOrder: number[];
+  thoughts: Record<string, UiThought>;
+  thoughtOrder: string[];
   activeTxId: number | null;
   latestTxIdHex: string | null;
   tpsHistory: { time: number; tps: number }[];
@@ -326,15 +326,16 @@ export const useSwarmStore = create<SwarmState>((set, get) => ({
       const now = Date.now();
 
       for (const t of newThoughts) {
-        if (!updatedThoughts[t.tx_id]) {
-          updatedThoughts[t.tx_id] = t;
-          newOrder.push(t.tx_id);
+        const key = t.tx_id_hex || String(t.tx_id);
+        if (!updatedThoughts[key]) {
+          updatedThoughts[key] = t;
+          newOrder.push(key);
           newThoughtsThisSecond++;
           newAgentLastSeen[t.agent_hex] = now;
-          if (t.tx_id > maxTx) {
+          if (typeof t.tx_id === 'number' && t.tx_id > maxTx) {
             maxTx = t.tx_id;
-            lastHex = t.tx_id_hex || formatTxIdHex(t.tx_id);
           }
+          lastHex = t.tx_id_hex || formatTxIdHex(t.tx_id);
         }
       }
 

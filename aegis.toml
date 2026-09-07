@@ -13,7 +13,7 @@ max_tps = 1000
 burst_capacity = 100
 
 [groups.untrusted_agent]
-allowed_namespaces = ["/sandbox/temp/*", /system/*]
+allowed_namespaces = ["/sandbox/temp/*", "/system/*"]
 blocked_namespaces = ["*"]
 max_tps = 10
 burst_capacity = 5

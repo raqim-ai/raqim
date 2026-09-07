@@ -1,5 +1,5 @@
 use crate::{
-    AgentStatus, OpLog,
+    AgentStatus, OpLog, RecentThought,
     api::{TimelineNode, VaultSearchResult},
 };
 use aho_corasick::AhoCorasick;
@@ -564,5 +564,79 @@ impl WalEngine {
         }
 
         highest_tx
+    }
+
+    /// Reads trailing thoughts directly from crash-safe WAL file on disk
+    pub fn read_recent_wal_thoughts(
+        &self,
+        wal_path: &str,
+        limit: usize,
+    ) -> Vec<RecentThought> {
+        let file = match File::open(wal_path) {
+            Ok(f) => f,
+            Err(_) => return Vec::new(),
+        };
+        let mmap = match unsafe { MmapOptions::new().map(&file) } {
+            Ok(m) => m,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut thoughts = Vec::new();
+        let mut cursor = 0;
+
+        while cursor + 8 <= mmap.len() {
+            let len = u32::from_le_bytes(mmap[cursor..cursor + 4].try_into().unwrap()) as usize;
+            let expected_crc = u32::from_le_bytes(mmap[cursor + 4..cursor + 8].try_into().unwrap());
+            cursor += 8;
+
+            if cursor + len > mmap.len() {
+                break;
+            }
+
+            let payload = &mmap[cursor..cursor + len];
+            cursor += len;
+
+            if crc32fast::hash(payload) != expected_crc {
+                continue;
+            }
+
+            if let Ok(archived_batch) = rkyv::access::<
+                <Vec<OpLog> as rkyv::Archive>::Archived,
+                rkyv::rancor::Error,
+            >(payload)
+            {
+                for archived_log in archived_batch.as_slice() {
+                    let tx_id = archived_log.state.transaction_id.to_native();
+                    let tx_id_hex = format!("0x{:032x}", tx_id);
+                    let raw_ts = archived_log.state.timestamp.to_native();
+                    let timestamp = if raw_ts < 10_000_000_000 {
+                        raw_ts * 1000
+                    } else {
+                        raw_ts
+                    };
+                    let status_str = match &archived_log.state.status {
+                        rkyv::Archived::<AgentStatus>::Idle => "IDLE",
+                        rkyv::Archived::<AgentStatus>::Reasoning => "REASONING",
+                        rkyv::Archived::<AgentStatus>::Halted => "HALTED",
+                        rkyv::Archived::<AgentStatus>::ToolExecution => "TOOL_EXEC",
+                    };
+
+                    thoughts.push(RecentThought {
+                        tx_id: format!("{:032x}", tx_id),
+                        tx_id_hex,
+                        agent_hex: hex::encode(archived_log.agent_id.as_slice()),
+                        intent_path: archived_log.state.namespace.as_str().to_string(),
+                        text: archived_log.state.text.as_str().to_string(),
+                        status: status_str.to_string(),
+                        timestamp,
+                    });
+                }
+            }
+        }
+
+        if thoughts.len() > limit {
+            thoughts = thoughts.split_off(thoughts.len() - limit);
+        }
+        thoughts
     }
 }

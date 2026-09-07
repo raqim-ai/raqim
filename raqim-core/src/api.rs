@@ -45,7 +45,7 @@ use crate::{
     aegis::AegisGateKeeper, config::RaqimConfig, memory_router::MemoryRouter,
     network::GlobalNetworkBridge, A2AEnvelope,
 };
-use crate::{execute_raqim_cascade, AgentState, IngressEnvelope, SystemEvent};
+use crate::{execute_raqim_cascade, AgentState, IngressEnvelope, RecentThought, SystemEvent};
 
 // Strongly typed api error system (Zero-Panic Guarantee)
 #[derive(Debug)]
@@ -726,6 +726,51 @@ pub async fn sse_health_endpoint(
     });
 
     Sse::new(stream).keep_alive(KeepAlive::new())
+}
+
+#[derive(Deserialize)]
+pub struct RecentThoughtsParams {
+    pub limit: Option<usize>,
+}
+
+pub async fn recent_thoughts_endpoint(
+    _auth: ValidatedIdentity,
+    State(state): State<ApiState>,
+    Query(params): Query<RecentThoughtsParams>,
+) -> Result<Json<Vec<RecentThought>>, ApiError> {
+    let limit = params.limit.unwrap_or(50).min(500);
+
+    // 1. Gather thoughts from active RAM buffers
+    let ram_thoughts = state.axon.get_recent_thoughts_ram(limit);
+
+    // 2. Gather thoughts from WAL disk
+    let wal_thoughts = state
+        .wal
+        .read_recent_wal_thoughts(&state.config.wal_path, limit);
+
+    // 3. Merge and deduplicate by tx_id
+    let mut seen = std::collections::HashSet::new();
+    let mut all_thoughts = Vec::new();
+
+    for t in ram_thoughts {
+        if seen.insert(t.tx_id.clone()) {
+            all_thoughts.push(t);
+        }
+    }
+
+    for t in wal_thoughts.into_iter().rev() {
+        if seen.insert(t.tx_id.clone()) {
+            all_thoughts.push(t);
+        }
+    }
+
+    // Sort chronologically (oldest first so UI appends cleanly)
+    all_thoughts.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+    if all_thoughts.len() > limit {
+        all_thoughts = all_thoughts.split_off(all_thoughts.len() - limit);
+    }
+
+    Ok(Json(all_thoughts))
 }
 
 pub async fn agent_alias_endpoint(
@@ -1800,6 +1845,7 @@ pub fn build_admin_router(state: ApiState) -> axum::Router {
         // System & Agent Deployment endpoints
         .route("/v1/system/health/live", get(sse_health_endpoint))
         .route("/v1/system/firehose", get(sse_firehose_endpoint))
+        .route("/v1/system/thoughts/recent", get(recent_thoughts_endpoint))
         .route("/v1/time-travel/stream", get(sse_phantom_endpoint))
         .route("/v1/system/agents/aliases", get(agent_alias_endpoint))
         // Swarm & A2A Ingress

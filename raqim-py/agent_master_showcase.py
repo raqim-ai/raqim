@@ -149,7 +149,7 @@ async def main():
         }
 
     @agent_rogue.trace(namespace="/finance/restricted/vault_transfer")
-    def tool_unauthorized_transfer(target: str, amount: float) -> str:
+    async def tool_unauthorized_transfer(target: str, amount: float) -> str:
         """Target namespace '/finance/restricted/*' is blocked by policy."""
         return f"Transferred ${amount:,.2f} to {target} executed."
 
@@ -224,7 +224,7 @@ async def main():
     interdiction_confirmed = False 
 
     try:
-        tool_unauthorized_transfer("ATTACKER_ACCOUNT_888", 50000.00)
+        await tool_unauthorized_transfer("ATTACKER_ACCOUNT_888", 50000.00)
     except Exception as e:
         interdiction_confirmed = True
         print(f"🛡️ [AEGIS INTERDICTION CONFIRMED OVER @trace]")

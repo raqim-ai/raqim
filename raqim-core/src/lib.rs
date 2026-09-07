@@ -57,6 +57,17 @@ pub enum AgentStatus {
     Halted,        // Interdicted by the Aegis security layer
 }
 
+#[derive(Debug, PartialEq, Clone, SerdeDeserialize, SerdeSerialize)]
+pub struct RecentThought {
+    pub tx_id: String,
+    pub tx_id_hex: String,
+    pub agent_hex: String,
+    pub intent_path: String,
+    pub text: String,
+    pub status: String,
+    pub timestamp: i64,
+}
+
 // Every thought and action is an Op.
 #[derive(
     Archive, Deserialize, Serialize, Debug, PartialEq, Clone, SerdeDeserialize, SerdeSerialize,
