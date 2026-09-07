@@ -1477,6 +1477,12 @@ pub struct RecordEffectRequest {
     pub call_signature_hex: String,
     pub output_payload_base64: String,
     pub namespace: String,
+
+    // Cryptographic perimeter
+    pub timestamp: i64,
+    pub pub_key_hex: String,
+    pub capability_cert: String,
+    pub signature: String,
 }
 
 #[derive(Serialize)]
@@ -1511,6 +1517,11 @@ pub async fn record_effect_handler(
     let agent_id: [u8; 16] = agent_id_bytes
         .try_into()
         .map_err(|_| ApiError::BadRequest("agent_hex must be exactly 16 bytes".to_string()))?;
+
+    // Enforce aegis security perimeter on http effects
+    // if let Some(agent_proc) = state.swarm_registry.active_agents.get(&payload.agent_hex) {
+    //     let group_name = agent_proc.gr
+    // }
 
     let call_signature_bytes = hex::decode(payload.call_signature_hex.clone())
         .map_err(|_| ApiError::BadRequest("Invalid call_signature_hex format".to_string()))?;

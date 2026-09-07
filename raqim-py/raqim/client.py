@@ -4,6 +4,7 @@ import contextvars
 import functools
 import inspect
 import json
+import time
 import uuid
 from typing import (
     Any,
@@ -337,7 +338,48 @@ class RaqimClient:
                 return sync_wrapper
 
         return decorator
-    
+        
+    async def _persist_effect(self, step_ordinal: int, call_signature_hex: str, result: Any, namespace: str) -> None: 
+        """
+        Crypptographically signs and persist live execution output into Raqim's WAL + Merkle DAG.
+        Enforce Zero-Trust Aegis authorization over HTTP.
+        """
+        canonical_output = CanonicalSerializer.canonical_json(result)
+        b64_output = base64.b64encode(canonical_output.encode("utf-8")).decode("ascii")
+        
+        now_ts = int(time.time())
+        
+        # Construst a canonical payload for cryptographic attestation
+        attestation_payload = f"{namespace}:{step_ordinal}:{call_signature_hex}:{b64_output}:{now_ts}".encode("utf-8")
+        
+        # Signs via native rust py03 extension
+        signature_bytes = bytes(self.crypto_core.sign_payload(attestation_payload))
+        pub_key_bytes = bytes(self.crypto_core.pub_key_bytes)
+
+        payload = {
+                        "agent_hex": self.agent_hex, 
+                        "public_key_hex": pub_key_bytes.hex(), 
+                        "signature_hex": signature_bytes.hex(), 
+                        "capability_cert_hex": self.cert_hex,
+                        "timestamp": now_ts,
+                        "step_ordinal": step_ordinal, 
+                        "call_signature_hex": call_signature_hex, 
+                        "namespace": namespace,
+                        "output_payload_base64": b64_output 
+                    }
+        
+        async with httpx.AsyncClient(timeout=5.0) as http:
+            resp = await http.post(f"{self.http_url}/v1/effect/record", json=payload)
+            
+            if resp.status_code == 403 or resp.status_code == 401:
+                error_detail = resp.json().get("message", resp.text)
+                raise PermissionError(f"[AEGIS INTERDICTION]: {error_detail}")
+                
+            if resp.status_code != 200:
+                raise RuntimeError(f"[RAQIM RECORD ERROR] Daemon rejected effect (HTTP {resp.status_code}): {resp.text}")
+
+            if self.is_forked:
+                print(f"[RAQIM EFFECT RECORD] Step {step_ordinal} recorded to branch: {namespace}")
     # Internal Effect Engine Helpers
     async def _fetch_recorded_effect(self, step_ordinal: int, call_sig_hex  : str) -> Optional[Any]:
         """Fetches recorded effect from daemon. Returns None if signature diverged."""
@@ -357,29 +399,6 @@ class RaqimClient:
             except Exception as e: 
                 print(f"[RAQIM REPLAY WARN] Effect fetch error at step {step_ordinal}: {e}")
         return None
-
-    async def _persist_effect(self, step_ordinal: int, call_signature_hex: str, result: Any, namespace: str) -> None: 
-        """Persists live execution output into Raqim's WAL + Merkle DAG."""
-        canonical_output = CanonicalSerializer.canonical_json(result)
-        b64_output = base64.b64encode(canonical_output.encode("utf-8")).decode("ascii")
-        
-        async with httpx.AsyncClient() as http: 
-            try: 
-                await http.post(
-                    f"{self.http_url}/v1/effect/record", 
-                    json={
-                        "agent_hex": self.agent_hex, 
-                        "step_ordinal": step_ordinal, 
-                        "call_signature_hex": call_signature_hex, 
-                        "namespace": namespace,
-                        "output_payload_base64": b64_output 
-                    }, 
-                    timeout=5.0
-                )
-                if self.is_forked: 
-                    print(f"[RAQIM FORM RECORD] Step {step_ordinal} recorded to branch: {namespace}")
-            except Exception as e: 
-                print(f"[RAQIM RECORD ERROR] Failed to persist effect at step {step_ordinal}: {e}")
 
     def _handle_divergence(self, step: int, call_sig_hex: str, namespace: str) -> None: 
         """Executes the divergence policy when replayed code does not match WAL history.""" 
@@ -520,3 +539,4 @@ def verify_state_proof_offline(payload_bytes: bytes, agent_id_str: str, proof_di
         index //= 2
         
     return current_hash.hex() == merkle_root
+
