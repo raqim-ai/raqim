@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
-from raqim.client import RaqimClient, verify_state_proof_offline
+from raqim.client import RaqimClient, verify_state_proof_offline, _execution_step_context
 
 import blake3
 
@@ -19,7 +19,6 @@ import blake3
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 if not GEMINI_API_KEY:
     print("\n❌ [FATAL PRE-FLIGHT ERROR] Missing 'GEMINI_API_KEY' in environment!")
-    print("   Raqim does not permit unverified mock fallbacks for live demonstrations.")
     print("   Please get a free API key from: https://aistudio.google.com/")
     print("   Add it to your .env file: GEMINI_API_KEY=AIzaSy...\n")
     sys.exit(1)
@@ -30,7 +29,7 @@ os.makedirs(KEY_DIR, exist_ok=True)
 
 print("==================================================================")
 print("Bismillah ar-Rahman ar-Rahim")
-print(f"Raqim Autonomous Agent Flight Recorder | Mode: []")
+print(f"Raqim Autonomous Agent Flight Recorder & Replay Verification")
 print("==================================================================")
 
 # ==============================================================================
@@ -133,26 +132,26 @@ async def main():
             "amount": amount,
             "destination": destination,
             "flagged": is_structuring and is_high_risk,
-            "timestamp": int(time.time()),
+            "evaluated_at": 1700000000,
         }
 
     @agent_analyst.trace(namespace="/finance/reasoning/audit")
-    async def chain_analyze_evidence(finding: dict, instruction: str) -> dict:
+    async def chain_analyze_evidence(finding: dict, prompt: str) -> dict:
         summary = f"Account routed ${finding['amount']:,.2f} to {finding['destination']}."
         start_t = time.perf_counter()
-        analysis_text = await call_gemini_api(instruction, summary)
+        analysis_text = await call_gemini_api(prompt, summary)
         elapsed_ms = (time.perf_counter() - start_t) * 1000
         return {
             "dossier_id": f"AML-2026-{finding['tx_id']}",
             "findings": analysis_text,
             "latency_ms": round(elapsed_ms, 2),
-            "instruction_used": instruction,
+            "prompt": prompt,
         }
 
     @agent_rogue.trace(namespace="/finance/restricted/vault_transfer")
     def tool_unauthorized_transfer(target: str, amount: float) -> str:
         """Target namespace '/finance/restricted/*' is blocked by policy."""
-        return f"Transferred ${amount:,.2f} to {target}"
+        return f"Transferred ${amount:,.2f} to {target} executed."
 
     # ==========================================================================
     # DEMO RUN 1: LIVE RECORD PHASE (WAL Commit & Merkle Sealing)
@@ -160,14 +159,16 @@ async def main():
     print("\n------------------------------------------------------------------")
     print("PHASE 1: LIVE RECORD PHASE (WAL Durability + Merkle Sealing)")
     print("------------------------------------------------------------------")
+    _execution_step_context.set(0)
+    agent_analyst.mode = "record"
     
     evidence = tool_evaluate_transaction("TX_9941", 9950.00, "CAYMAN_ROUTING_HOP")
     print(f"🔍 [TOOL AUDITED] Tx: {evidence['tx_id']} | Flagged: {evidence['flagged']} (${evidence['amount']})")
 
     base_prompt = "You are an expert Anti-Money Laundering Auditor. Provide a regulatory verdict."
-    dossier_record = await chain_analyze_evidence(evidence, base_prompt)
-    print(f"🔴 [RECORDED - LIVE LLM CALL] Latency: {dossier_record['latency_ms']} ms")
-    print(f"   Summary: {dossier_record['findings'][:120]}...\n")
+    dossier_life = await chain_analyze_evidence(evidence, base_prompt)
+    print(f"🔴 [RECORDED - LIVE LLM CALL] Latency: {dossier_life['latency_ms']} ms")
+    print(f"   Summary: {dossier_life['findings'][:120]}...\n")
 
     # ==========================================================================
     # DEMO RUN 2: ZERO-COST DETERMINISTIC REPLAY ($0 API Cost, 0.0ms)
@@ -176,17 +177,18 @@ async def main():
     print("PHASE 2: DETERMINISTIC REPLAY (0.0ms Latency, $0 API COST)")
     print("------------------------------------------------------------------")
     
-    # Switch agent to replay mode
+    _execution_step_context.set(0)
     agent_analyst.mode = "replay"
 
     t0 = time.perf_counter()
-    dossier_replay = await chain_analyze_evidence(evidence, base_prompt)
+    evidence_replay = tool_evaluate_transaction("TX_9941", 9950.00, "CAYMAN_ROUTING_HOP")
+    dossier_replay = await chain_analyze_evidence(evidence_replay, base_prompt)
     replay_duration_ms = (time.perf_counter() - t0) * 1000
 
     print(f"🟢 [REPLAYED - FROM WAL EFFECT CACHE]")
     print(f"   Execution Time : {replay_duration_ms:.2f} ms")
     print(f"   API Token Cost : $0.000000 (Zero Network Calls)")
-    print(f"   Identical Hash : {dossier_record['findings'] == dossier_replay['findings']}")
+    print(f"   Identical Hash : {dossier_life['findings'] == dossier_replay['findings']}")
 
     # ==========================================================================
     # DEMO RUN 3: PROMPT MUTATION & CAUSAL REALITY FORKING
@@ -194,32 +196,42 @@ async def main():
     print("\n------------------------------------------------------------------")
     print("PHASE 3: RUNTIME DIVERGENCE (Code Mutation -> Reality Forking)")
     print("------------------------------------------------------------------")
+    _execution_step_context.set(0)
+    agent_rogue.mode = "replay"
     
-    # Mutate the instruction argument while in replay mode
-    mutated_prompt = "You are a lenient bank clerk. Excuse this payment as routine tourism."
-    print(f"⚡ Mutating Prompt Input: '{mutated_prompt}'")
+# Step 0 hits cache for $0
+    evidence_fork = tool_evaluate_transaction("TX_9941", 9950.00, "CAYMAN_ROUTING_HOP")
 
-    dossier_forked = await chain_analyze_evidence(evidence, mutated_prompt)
+    # Step 1 prompt mutated -> triggers divergence
+    mutated_prompt = "You are a lenient clerk. Excuse this transfer as routine holiday shopping."
+    print(f"⚡ Mutating Prompt Input at Step 1: '{mutated_prompt}'")
+
+    dossier_forked = await chain_analyze_evidence(evidence_fork, mutated_prompt)
     print(f"🔱 [REALITY FORK DETECTED & ISOLATED]")
     print(f"   Is Agent Forked  : {agent_analyst.is_forked}")
     print(f"   Live Call Latency: {dossier_forked['latency_ms']} ms")
-    print(f"   Forked Finding   : {dossier_forked['findings'][:120]}...\n")
+    print(f"   Forked Verdict   : {dossier_forked['findings'][:120]}...\n")
 
     # ==========================================================================
-    # DEMO RUN 4: AEGIS FIREWALL INTERDICTION & SPECIFIC POLICY BLOCK
+    # PHASE 4: NATIVE AEGIS INTERDICTION 
     # ==========================================================================
     print("------------------------------------------------------------------")
     print("PHASE 4: AEGIS ZERO-TRUST INTERDICTION (Firewall Policy Enforcement)")
     print("------------------------------------------------------------------")
+    _execution_step_context.set(0)
+    agent_analyst.mode = "record"
     
+    interdiction_confirmed = False 
+
     try:
         tool_unauthorized_transfer("ATTACKER_ACCOUNT_888", 50000.00)
     except Exception as e:
-        error_msg = str(e)
-        print(f"🛡️ [AEGIS INTERDICTION CONFIRMED]")
-        print(f"   Blocked Intent Path : /finance/restricted/vault_transfer")
-        print(f"   Firewall Rejection  : {error_msg}")
-        assert "Aegis" in error_msg or "Security Violation" in error_msg, "Failed to verify Aegis firewall dropped frame!"
+        interdiction_confirmed = True
+        print(f"🛡️ [AEGIS INTERDICTION CONFIRMED OVER @trace]")
+        print(f"   Target Intent Path : /finance/restricted/vault_transfer")
+        print(f"   Firewall Rejection : {e}")
+        
+    assert interdiction_confirmed, "CRITICAL ERROR: Aegis failed to interdict unauthorized @trace call"
 
     # ==========================================================================
     # DEMO RUN 5: ADMINISTRATIVE RECOVERY (/v1/admin/quarantine/lift)

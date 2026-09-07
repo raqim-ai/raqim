@@ -1600,7 +1600,7 @@ pub async fn record_effect_handler(
             // Broadcast to semantic firehose
             let _ = state.ui_tx.send(UiEvent::ThoughtCommitted {
                 agent_hex: payload.agent_hex.clone(),
-                intent_path: original_ns,
+                intent_path: original_ns.clone(),
                 tx_id: tx_id_hex,
                 text: format!(
                     "[STEP {} EFFECT] Ordinal: {} | Hash: {}...",
