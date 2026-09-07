@@ -179,7 +179,7 @@ async def main():
     
     _execution_step_context.set(0)
     agent_analyst.mode = "replay"
-
+    
     t0 = time.perf_counter()
     evidence_replay = tool_evaluate_transaction("TX_9941", 9950.00, "CAYMAN_ROUTING_HOP")
     dossier_replay = await chain_analyze_evidence(evidence_replay, base_prompt)
