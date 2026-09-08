@@ -6,6 +6,7 @@ use crate::axon::AxonGateKeeper;
 use crate::state::SwarmStateRegistry;
 use crate::{A2AEnvelope, OpLog, SystemEvent};
 use rkyv::{to_bytes, Archive};
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::Sender;
 use tokio::sync::mpsc;
 use zenoh::Session;
@@ -21,7 +22,8 @@ pub struct GlobalNetworkBridge {
     egress_tx: mpsc::Sender<Vec<u8>>,
 }
 
-struct QuarantineWireEnvelope {
+#[derive(Clone, Debug, Serialize, Deserialize, rkyv::Archive, rkyv::Serialize)]
+pub struct QuarantineWireEnvelope {
     pub origin_node_id: String,
     pub record: QuarantineRecord,
 }
@@ -190,7 +192,7 @@ impl GlobalNetworkBridge {
     pub async fn broadcast_quarantine_sync(&self, record: QuarantineRecord) {
         let key_expr = format!("{}/system/quarantine", self.workspace_prefix);
         let wire_msg = QuarantineWireEnvelope {
-            origin_node_id: self.os_node_id,
+            origin_node_id: self.os_node_id.clone(),
             record,
         };
 
@@ -207,6 +209,7 @@ impl GlobalNetworkBridge {
     pub async fn listen_for_global_quarantine(&self, aegis: Arc<AegisGateKeeper>) {
         let key_exp = format!("{}/system/quarantine", self.workspace_prefix);
         let session_clone = self.session.clone();
+        let node_clone = self.os_node_id.clone();
 
         println!(
             "[NETWORK CORE] Aegis Global Quarantine subscriber active on: {} ",
@@ -231,7 +234,7 @@ impl GlobalNetworkBridge {
                 // Deserialize incoming quarantine record
                 if let Ok(wire_msg) = postcard::from_bytes::<QuarantineWireEnvelope>(&payload_bytes)
                 {
-                    if wire_msg.origin_node_id == self.os_node_id {
+                    if wire_msg.origin_node_id == node_clone {
                         continue;
                     }
 
