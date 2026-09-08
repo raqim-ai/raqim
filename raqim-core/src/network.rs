@@ -5,13 +5,13 @@ use std::{eprintln, format, println};
 use crate::axon::AxonGateKeeper;
 use crate::state::SwarmStateRegistry;
 use crate::{A2AEnvelope, OpLog, SystemEvent};
-use rkyv::{Archive, to_bytes};
+use rkyv::{to_bytes, Archive};
 use tokio::sync::broadcast::Sender;
 use tokio::sync::mpsc;
 use zenoh::Session;
 
 use crate::aegis::{AegisGateKeeper, QuarantineRecord};
-use tokio::time::{Duration, timeout};
+use tokio::time::{timeout, Duration};
 
 pub struct GlobalNetworkBridge {
     session: Arc<Session>,
@@ -19,6 +19,11 @@ pub struct GlobalNetworkBridge {
     aegis: Arc<AegisGateKeeper>,
     pub os_node_id: String,
     egress_tx: mpsc::Sender<Vec<u8>>,
+}
+
+struct QuarantineWireEnvelope {
+    pub origin_node_id: String,
+    pub record: QuarantineRecord,
 }
 
 impl GlobalNetworkBridge {
@@ -184,7 +189,12 @@ impl GlobalNetworkBridge {
     /// Broadcasts local quarantine to the global swarm over Zenoh
     pub async fn broadcast_quarantine_sync(&self, record: QuarantineRecord) {
         let key_expr = format!("{}/system/quarantine", self.workspace_prefix);
-        let bytes = postcard::to_allocvec(&record).unwrap();
+        let wire_msg = QuarantineWireEnvelope {
+            origin_node_id: self.os_node_id,
+            record,
+        };
+
+        let bytes = postcard::to_allocvec(&wire_msg).unwrap();
         if let Err(e) = self.session.put(key_expr, bytes).await {
             eprintln!(
                 "[NETWORK WARN] Failed to broadcast quarantine record: {} ",
@@ -219,9 +229,20 @@ impl GlobalNetworkBridge {
                 let payload_bytes = sample.payload().to_bytes();
 
                 // Deserialize incoming quarantine record
-                if let Ok(record) = postcard::from_bytes::<QuarantineRecord>(&payload_bytes) {
+                if let Ok(wire_msg) = postcard::from_bytes::<QuarantineWireEnvelope>(&payload_bytes)
+                {
+                    if wire_msg.origin_node_id == self.os_node_id {
+                        continue;
+                    }
+
+                    // Assimilate genuine foreign quarantines from peer nodes
+                    println!(
+                        "[AEGIS MESH INTERDICTION] Foreign quarantine assimilated from peer node: {} for agent: {}",
+                        wire_msg.origin_node_id, wire_msg.record.agent_hex
+                    );
+
                     // Assimilate directly into local aegis blocklist
-                    aegis.assimilate_remote_quarantine(record);
+                    aegis.assimilate_remote_quarantine(wire_msg.record);
                 } else {
                     eprintln!(
                         "[NETWORK WARN] Received malformed QuarantineRecord on system channel "
