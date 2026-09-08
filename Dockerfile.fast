@@ -10,24 +10,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root unprivileged service user
-RUN groupadd -g 10001 raqim && \
-    useradd -u 10001 -g raqim -d /var/lib/raqim -m -s /sbin/nologin raqim
+RUN groupadd -g 1000 raqim && \
+    useradd -u 1000 -g raqim -d /var/lib/raqim -m -s /sbin/nologin raqim
 
 WORKDIR /var/lib/raqim
-RUN mkdir -p /var/lib/raqim/data /var/lib/raqim/ca-keys /var/lib/raqim/vault && \
-    chown -R raqim:raqim /var/lib/raqim
+RUN mkdir -p /var/lib/raqim/data /var/lib/raqim/ca-keys /var/lib/raqim/vault /var/lib/raqim/.cache && \
+    chown -R 1000:1000 /var/lib/raqim
 
 # COPY DIRECTLY FROM YOUR WSL2 HOST TARGET DIRECTORY
 COPY target/release/raqim-core /usr/local/bin/raqim-core
+COPY target/release/raqim-cli /usr/local/bin/raqim-cli
+COPY target/release/raqim-mcp /usr/local/bin/raqim-mcp
 
-VOLUME ["/var/lib/raqim/data", "/var/lib/raqim/ca-keys", "/var/lib/raqim/vault"]
+# VOLUME ["/var/lib/raqim/data", "/var/lib/raqim/ca-keys", "/var/lib/raqim/vault"]
 
 EXPOSE 8080 7447 8081
 
-USER raqim:raqim
+USER 1000:1000
 
 ENV RUST_LOG=info
 ENV RAQIM_WAL_PATH=/var/lib/raqim/data/production.wal
 ENV RAQIM_LANCE_PATH=/var/lib/raqim/data/production_semantic.lancedb
+ENV HOME=/var/lib/raqim
+ENV FASTEMBED_CACHE_PATH=/var/lib/raqim/data/.cache
 
 ENTRYPOINT ["/usr/local/bin/raqim-core"]

@@ -1,9 +1,10 @@
 [daemon]
-topic = "seige_swarm_mesh"
-wal_path = "production.wal"
-manifest_path = "compaction.manifest.json"
-witness_path = "./vault/witnesses"
-aegis_path = "aegis.toml"
+topic = "raqim_default"
+wal_path = "/var/lib/raqim/data/production.wal"
+manifest_path = "/var/lib/raqim/data/compactor.manifest.json"
+lance_path = "/var/lib/raqim/data/production_semantic.lancedb"
+witness_path = "/var/lib/raqim/vault"
+aegis_path = "/var/lib/raqim/aegis.toml"
 
 [storage]
 lance_path = "./production_semantic.lancedb"

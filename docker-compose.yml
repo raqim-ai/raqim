@@ -3,6 +3,7 @@ services:
     build: 
       context: .
       dockerfile: Dockerfile.fast
+    user: "1000:1000"
     image: raqim/core:v0.1.0
     container_name: raqim-core-daemon
     restart: unless-stopped
@@ -15,6 +16,7 @@ services:
       - ./ca-keys:/var/lib/raqim/ca-keys
       - ./vault:/var/lib/raqim/vault
       - ./aegis.toml:/var/lib/raqim/aegis.toml
+      - ./raqim.toml:/var/lib/raqim/raqim.toml
     environment: 
     - RUST_LOG=info
     - RAQIM_PORT=8080
