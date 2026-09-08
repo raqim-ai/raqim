@@ -1,6 +1,6 @@
 use crate::{
-    OpLog,
     witness::{AnchoredRootWitness, WormWitnessEngine},
+    OpLog,
 };
 use blake3::Hasher;
 use dashmap::DashMap;
@@ -9,7 +9,7 @@ use rkyv::Archived;
 use serde::{Deserialize, Serialize};
 use std::{
     eprintln, format, println,
-    sync::{Arc, atomic::Ordering::SeqCst},
+    sync::{atomic::Ordering::SeqCst, Arc},
 };
 
 /// A completed cryptographic audit checkpoint batch ready for ledger immutability
@@ -94,7 +94,7 @@ impl AxonGateKeeper {
 
         (log, batch)
     }
-    
+
     /// Internal Engine loop: Condenses an arbitrary array of leaf hashes into a single Markle Root
     pub fn compute_markle_root(leaves: &[[u8; 32]]) -> [u8; 32] {
         if leaves.is_empty() {

@@ -199,7 +199,7 @@ async def main():
     _execution_step_context.set(0)
     agent_rogue.mode = "replay"
     
-# Step 0 hits cache for $0
+    # Step 0 hits cache for $0
     evidence_fork = tool_evaluate_transaction("TX_9941", 9950.00, "CAYMAN_ROUTING_HOP")
 
     # Step 1 prompt mutated -> triggers divergence

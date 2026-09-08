@@ -355,13 +355,7 @@ impl AegisGateKeeper {
 
         // Clean phantom prefix to prevent security policy evasion
         let clean_intent = if intent_path.starts_with("phantom_") {
-            let stripped = intent_path.trim_start_matches("phantom_");
-
-            if let Some(slash_idx) = stripped.find("/") {
-                &stripped[slash_idx..]
-            } else {
-                stripped
-            }
+            intent_path.trim_start_matches("phantom_")
         } else {
             intent_path
         };
