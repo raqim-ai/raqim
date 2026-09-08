@@ -20,7 +20,6 @@ RUN mkdir -p /var/lib/raqim/data /var/lib/raqim/ca-keys /var/lib/raqim/vault && 
 # COPY DIRECTLY FROM YOUR WSL2 HOST TARGET DIRECTORY
 COPY target/release/raqim-core /usr/local/bin/raqim-core
 
-
 VOLUME ["/var/lib/raqim/data", "/var/lib/raqim/ca-keys", "/var/lib/raqim/vault"]
 
 EXPOSE 8080 7447 8081

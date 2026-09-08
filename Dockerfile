@@ -37,7 +37,8 @@ RUN strip /usr/src/raqim/target/release/raqim-core && \
 # =================================================================
 # STAGE 2: Production Runtime (Minimal Attack Surface)
 # ==================================================================
-FROM debian:bookworm-slim AS runtime
+FROM gcr.io/distroless/cc-debian12 AS runtime
+
 
 # Install runtime dynamic libraries & TLS CA root certificates
 RUN apt-get update && apt-get install -y --no-install-recommends \
