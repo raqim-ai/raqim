@@ -276,6 +276,8 @@ async def main():
                 proof_dict=proof_dict
             )
             
+            print(proof_dict)
+            
             print(f"📜 Merkle Inclusion Proof Resolved:")
             print(f"   Batch ID            : {proof_dict.get('batch_id')}")
             print(f"   Merkle Root (Hex)   : {proof_dict.get('merkle_root_hex')[:24]}...")
