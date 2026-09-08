@@ -38,6 +38,7 @@ impl HealthMonitor {
                 if health_tx.receiver_count() > 0 {
                     sys.refresh_cpu();
                     sys.refresh_memory();
+                    sys.refresh_process(pid);
                     components.refresh_list();
 
                     let cpu_load = sys.global_cpu_info().cpu_usage();
@@ -48,7 +49,7 @@ impl HealthMonitor {
                     let process_mem = sys
                         .process(pid)
                         .map(|p| p.memory() as f32 / (1024.0 * 1024.0))
-                        .unwrap_or(45.0);
+                        .unwrap_or(0.0);
 
                     // Grab the first available CPU temperature sensor
                     let core_temp = components

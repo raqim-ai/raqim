@@ -65,3 +65,8 @@
 
 
 raqim-core = {path = "../raqim-core", default-features = false, features = ["mock-embedding"]}
+
+
+Okay, how can it be accessed now? 
+
+Are we to tell the developers 

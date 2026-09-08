@@ -1,7 +1,7 @@
 # ==============================================================================
 # LEAN PRODUCTION RUNTIME (Copies Pre-Compiled Host Binaries)
 # ==============================================================================
-FROM gcr.io/distroless/cc-debian12 AS runtime
+FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
