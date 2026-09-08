@@ -29,7 +29,7 @@ services:
   raqim-console: 
     build: 
       context: ./raqim-console
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.fast
     image: raqim/console:v0.1.0
     container_name: raqim-console-ui
     restart: unless-stopped
