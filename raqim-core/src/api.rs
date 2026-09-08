@@ -987,14 +987,26 @@ async fn lift_qurantine_and_resurrect(
             )),
 
             Err(e) => {
-                eprintln!(
-                    "[TIME MACHINE FATAL] Failed to resurrect WASM state for {}: {} ",
-                    &payload.agent_hex, e
-                );
-                Err(ApiError::InternalServerError(format!(
-                    "Resurrection failed: {}",
-                    e
-                )))
+                let err_str = e.to_string();
+                if err_str.contains("no immutable memory on disk") {
+                    println!(
+                        "[TIME MACHINE] Agent {} has no prior WAL history; active at Genesis state.", payload.agent_hex
+                    );
+
+                    Ok(Json(json!({
+                        "success": true,
+                        "message": "Quarantine lifted (Genesis state; zero historical commits)"
+                    })))
+                } else {
+                    eprintln!(
+                        "[TIME MACHINE FATAL] Failed to resurrect WASM state for {}: {} ",
+                        &payload.agent_hex, e
+                    );
+                    Err(ApiError::InternalServerError(format!(
+                        "Resurrection failed: {}",
+                        e
+                    )))
+                }
             }
         }
     } else {

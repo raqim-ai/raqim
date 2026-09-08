@@ -371,15 +371,20 @@ class RaqimClient:
         async with httpx.AsyncClient(timeout=5.0) as http:
             resp = await http.post(f"{self.http_url}/v1/effect/record", json=payload)
             
-            if resp.status_code == 403 or resp.status_code == 401:
-                error_detail = resp.json().get("message", resp.text)
-                raise PermissionError(f"[AEGIS INTERDICTION]: {error_detail}")
+            # Intercept Aegis Security Interdiction and raise to caller
+            if resp.status_code in (401, 403):
+                try:
+                    error_msg = resp.json().get("message", resp.text)
+                except Exception:
+                    error_msg = resp.text
+                raise PermissionError(f"[AEGIS INTERDICTION]: {error_msg}")
                 
             if resp.status_code != 200:
-                raise RuntimeError(f"[RAQIM RECORD ERROR] Daemon rejected effect (HTTP {resp.status_code}): {resp.text}")
-
+                raise RuntimeError(f"Daemon rejected effect (HTTP {resp.status_code}): {resp.text}") 
+            
             if self.is_forked:
                 print(f"[RAQIM EFFECT RECORD] Step {step_ordinal} recorded to branch: {namespace}")
+    
     # Internal Effect Engine Helpers
     async def _fetch_recorded_effect(self, step_ordinal: int, call_sig_hex  : str) -> Optional[Any]:
         """Fetches recorded effect from daemon. Returns None if signature diverged."""
