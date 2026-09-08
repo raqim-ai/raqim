@@ -18,10 +18,11 @@ services:
       - ./vault:/var/lib/raqim/vault
       - ./aegis.toml:/var/lib/raqim/aegis.toml
     environment: 
-    - RUST_LOG=info 
+    - RUST_LOG=info
     - RAQIM_PORT=8080
+
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8080/v1/dashboard/cards || exit 1"] 
+      test: ["CMD-SHELL", "curl -f http://localhost:8081/v1/dashboard/cards || exit 1"] 
       interval: 10s
       timeout: 5s
       retries: 3
@@ -37,7 +38,8 @@ services:
       ports: 
       - "3000:3000"
       environment: 
-        - NEXT_PUBLIC_RAQIM_DAEMON_URL=http://localhost:8081
+      - NEXT_PUBLIC_RAQIM_DAEMON_URL=http://localhost:8081
+      - RAQIM_INTERNAL_DAEMON_URL=http://raqim-daemon:8081
       depends_on: 
         raqim-daemon: 
           condition: service_healthy

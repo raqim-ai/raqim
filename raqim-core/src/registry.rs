@@ -9,7 +9,7 @@ pub struct AgentProcess {
     pub alias: String,
     pub namespace: String,
     pub last_seen_ts: u64,
-    pub status: String, // e.g "Idle", "Reasoning", "Quarantined"
+    pub status: String,
 }
 
 pub struct SwarmRegistry {
@@ -43,7 +43,8 @@ impl SwarmRegistry {
         );
     }
 
-    /// Flags an agent as quarantined instantly across the UI
+    /// Flags an agent as quarantined instantly acros
+    /// s the UI
     pub fn quarantine_agent(&self, agent_hex: &str) {
         if let Some(mut process) = self.active_agents.get_mut(agent_hex) {
             process.status = "Quarantined".to_string();
