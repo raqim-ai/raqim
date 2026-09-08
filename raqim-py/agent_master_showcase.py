@@ -219,7 +219,7 @@ async def main():
     print("PHASE 4: AEGIS ZERO-TRUST INTERDICTION (Firewall Policy Enforcement)")
     print("------------------------------------------------------------------")
     _execution_step_context.set(0)
-    agent_analyst.mode = "record"
+    agent_rogue.mode = "record"
     
     interdiction_confirmed = False 
 

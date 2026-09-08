@@ -26,6 +26,7 @@ pub struct MarkleBatch {
 
 /// A verifiable inclusion path mapping a specific transaction leaf to the root
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InclusionProof {
     pub tx_id_hex: String,
     pub leaf_index: usize,
