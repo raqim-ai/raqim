@@ -218,6 +218,7 @@ impl AegisGateKeeper {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
+
         let record = QuarantineRecord {
             agent_hex: agent_hex.to_string(),
             violation_type: v_type.to_string(),
