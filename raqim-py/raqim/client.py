@@ -124,6 +124,8 @@ class RaqimClient:
         self.mode = mode
         self.on_divergence = on_divergence
         self.is_forked = False
+        self.last_tx_id: Optional[str] = None
+        self.recorded_tx_ids: Dict[int, str] = {}
 
         # THE ASYNC MULTIPLEXER (Python's equivalent to DashMap + oneshot)
         self._pending_requests: Dict[str, asyncio.Future] = {}
@@ -382,6 +384,12 @@ class RaqimClient:
             if resp.status_code != 200:
                 raise RuntimeError(f"Daemon rejected effect (HTTP {resp.status_code}): {resp.text}") 
             
+            resp_data = resp.json()
+            tx_id = resp_data.get("tx_id_hex")
+            if tx_id:
+                self.last_tx_id = tx_id
+                self.recorded_tx_ids[step_ordinal] = tx_id
+
             if self.is_forked:
                 print(f"[RAQIM EFFECT RECORD] Step {step_ordinal} recorded to branch: {namespace}")
     

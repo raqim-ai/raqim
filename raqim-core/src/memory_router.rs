@@ -653,17 +653,16 @@ impl MemoryRouter {
 
         self.effect_index.insert(effect_key, record.clone());
 
+        let payload_str = String::from_utf8(output_payload.clone())
+            .unwrap_or_else(|_| format!("[RAW_BYTES: {}]", output_payload.len()));
+
         let state = AgentState {
             agent_id: Some(agent_id),
             transaction_id,
             timestamp,
             namespace: namespace.to_string(),
             status: AgentStatus::ToolExecution,
-            text: format!(
-                "[EFFECT_RECORD] Step: {} | Len: {} bytes ",
-                step_ordinal,
-                output_payload.len()
-            ),
+            text: payload_str,
         };
 
         let delta = self

@@ -17,15 +17,19 @@ services:
       - ./vault:/var/lib/raqim/vault
       - ./aegis.toml:/var/lib/raqim/aegis.toml
       - ./raqim.toml:/var/lib/raqim/raqim.toml
+      - ~/.cache/fastembed:/var/lib/raqim/data/.cache/fastembed
     environment: 
     - RUST_LOG=info
     - RAQIM_PORT=8080
+    - HOME=/var/lib/raqim
+    - FASTEMBED_CACHE_PATH=/var/lib/raqim/data/.cache
 
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8081/v1/dashboard/cards || exit 1"] 
       interval: 10s
       timeout: 5s
-      retries: 3
+      retries: 5
+      start_period: 15s
 
     # The Frontend
   raqim-console: 

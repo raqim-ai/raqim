@@ -76,7 +76,7 @@ impl AxonGateKeeper {
 
         // Compute the discrete leaf cryptographic hash using domain separation
         let mut leaf_hasher = Hasher::new_derive_key("raqim.axon.v1.leaf");
-        leaf_hasher.update(&log.delta);
+        leaf_hasher.update(log.state.text.as_bytes());
         leaf_hasher.update(&log.agent_id);
         let leaf_hash: [u8; 32] = leaf_hasher.finalize().into();
 
@@ -324,7 +324,7 @@ impl AxonGateKeeper {
     pub fn verify_foreign_thoughts(&self, log: &Archived<OpLog>) -> bool {
         let mut hasher = Hasher::new_derive_key("raqim.axon.v1.leaf");
 
-        hasher.update(log.delta.as_slice());
+        hasher.update(log.state.text.as_bytes());
         hasher.update(log.agent_id.as_slice());
 
         let expected_hash: [u8; 32] = hasher.finalize().into();
