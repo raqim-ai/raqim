@@ -43,7 +43,7 @@ jobs:
       - name: Install Protobuf Compiler (Cross-Platform)
         uses: arduino/setup-protoc&v3 
         with: 
-          repo-token: ${{ secret.GITHUB_TOKEN }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Linux Build Dependencies
         if: matrix.os == 'ubuntu-latest'

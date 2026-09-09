@@ -163,6 +163,7 @@ async def main():
     agent_analyst.mode = "record"
     
     evidence = tool_evaluate_transaction("TX_9941", 9950.00, "CAYMAN_ROUTING_HOP")
+    await asyncio.sleep(0.1)
     print(f"🔍 [TOOL AUDITED] Tx: {evidence['tx_id']} | Flagged: {evidence['flagged']} (${evidence['amount']})")
 
     base_prompt = "You are an expert Anti-Money Laundering Auditor. Provide a regulatory verdict."
@@ -258,17 +259,26 @@ async def main():
     print("PHASE 6: OFFLINE CRYPTOGRAPHIC ATTESTATION (Zero-Knowledge Verifier)")
     print("------------------------------------------------------------------")
     async with httpx.AsyncClient(timeout=5.0) as http:
-        info_resp = await http.get(f"{DAEMON_HTTP}/v1/admin/cluster/info")
-        info = info_resp.json()
-        latest_tx_hex = info.get("highest_tx_id", "0x00").replace("0x", "")
+        # Resolve target transaction for the tool execution evidence (Step 0)
+        target_tx_hex = agent_analyst.recorded_tx_ids.get(0)
+        if not target_tx_hex:
+            # Fallback: query recent thoughts from daemon to find the screening tool transaction
+            thoughts_resp = await http.get(f"{DAEMON_HTTP}/v1/system/thoughts/recent")
+            if thoughts_resp.status_code == 200:
+                for t in reversed(thoughts_resp.json()):
+                    if t.get("intent_path") == "/finance/tools/screening":
+                        target_tx_hex = t.get("tx_id", "").replace("0x", "")
+                        break
+        if not target_tx_hex:
+            info_resp = await http.get(f"{DAEMON_HTTP}/v1/admin/cluster/info")
+            info = info_resp.json()
+            target_tx_hex = info.get("highest_tx_id", "0x00").replace("0x", "")
         
-        proof_resp = await http.get(f"{DAEMON_HTTP}/v1/state/proof/{latest_tx_hex}")
+        proof_resp = await http.get(f"{DAEMON_HTTP}/v1/state/proof/{target_tx_hex}")
         if proof_resp.status_code == 200:
             raw_data = proof_resp.json()
             # Extract the nested proof dictionary from the API wrapper
             proof_dict = raw_data.get("proof", raw_data)
-
-            print(proof_dict)
             
             batch_id = proof_dict.get("batchId", proof_dict.get("batch_id", 0))
             merkle_root = proof_dict.get("merkleRootHex", proof_dict.get("merkle_root_hex", ""))
@@ -276,20 +286,21 @@ async def main():
             is_active = proof_dict.get("isActiveBuffer", proof_dict.get("is_active_buffer", False))
 
             print(f"📜 Merkle Inclusion Proof Resolved:")
-            print(f"   Target TxID       : 0x{proof_dict.get('txIdHex', latest_tx_hex)}")
+            print(f"   Target TxID       : 0x{proof_dict.get('txIdHex', target_tx_hex)}")
             print(f"   Batch ID          : {batch_id} (Active Buffer: {is_active})")
             print(f"   Leaf Index        : {leaf_idx}")
             print(f"   Merkle Root (Hex) : {merkle_root[:24]}...")
             
-            # Recompute Merkle root using offline verifier
-            test_payload = json.dumps(evidence).encode("utf-8")
+            # Recompute Merkle root using RFC 8785 canonical JSON offline verifier
+            canonical_payload_bytes = CanonicalSerializer.canonical_json(evidence).encode("utf-8")
             is_valid = verify_state_proof_offline(
-                payload_bytes=test_payload,
+                payload_bytes=canonical_payload_bytes,
                 agent_id_str=agent_analyst.agent_hex,
                 proof_dict=proof_dict
             )
 
             print(f"   Offline Verified  : {is_valid}")
+            assert is_valid, "Cryptographic Attestation failed: Offline Merkle Root does not match proof!"
             print("   Mathematical Attestation: Leaf is provably bound to Root DAG.")
         else:
             print(f"ℹ️ Transaction active in hot buffer; proof generates upon crystallization.")
