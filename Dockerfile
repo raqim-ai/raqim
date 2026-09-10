@@ -50,10 +50,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN groupadd -g 10001 raqim && \
     useradd -u 10001 -g raqim -d /var/lib/raqim -m -s /sbin/nologin raqim
 
-# Establish persistent storage diirectories with non-root ownership 
+# Establish persistent storage directories with non-root ownership 
 WORKDIR /var/lib/raqim 
-chown -R raqim:raqim /var/lib/raqim
 RUN mkdir -p /var/lib/raqim/data /var/lib/raqim/ca-keys /var/lib/raqim/vault && \
+    chown -R raqim:raqim /var/lib/raqim
 
 # Copy stripped binaries from Stage 1
 COPY --from=builder /usr/src/raqim/target/release/raqim-core /usr/local/bin/raqim-core
