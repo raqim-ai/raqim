@@ -1,8 +1,7 @@
 use crate::{
     AgentStatus, OpLog, RecentThought,
-    api::{TimelineNode, VaultSearchResult},
+    api::TimelineNode,
 };
-use aho_corasick::AhoCorasick;
 use memmap2::MmapOptions;
 use rkyv::to_bytes;
 
@@ -378,79 +377,6 @@ impl WalEngine {
             .send(log)
             .await
             .map_err(|e| WalError::IngressQueueFull(e.to_string()))
-    }
-
-    /// Extremely fast binary scan of the active WAL for a specific substring
-    pub fn lexical_scan(
-        &self,
-        query: &str,
-        namespace_filter: Option<&str>,
-        limit: usize,
-        wal_path: &str,
-    ) -> Result<Vec<VaultSearchResult>, anyhow::Error> {
-        let file = File::open(wal_path)?;
-        let mmap = unsafe { MmapOptions::new().map(&file)? };
-
-        let ac = AhoCorasick::builder()
-            .ascii_case_insensitive(true)
-            .build(vec![query])
-            .map_err(|e| anyhow::anyhow!("Failed to build automaton: {}", e))?;
-
-        let mut results = Vec::new();
-        let mut cursor = 0;
-
-        while cursor + 8 <= mmap.len() && results.len() < limit {
-            let len = u32::from_le_bytes(mmap[cursor..cursor + 4].try_into().unwrap()) as usize;
-            let expected_crc = u32::from_le_bytes(mmap[cursor + 4..cursor + 8].try_into().unwrap());
-            cursor += 8; // FIXED: Advance past [4B Length] + [4B CRC32]
-
-            if cursor + len > mmap.len() {
-                break;
-            }
-            let payload = &mmap[cursor..cursor + len];
-            cursor += len;
-
-            if crc32fast::hash(payload) != expected_crc {
-                continue;
-            }
-
-            // TRUE ZERO-COPY: Inspects Vec<OpLog> pointer directly in kernel mmap page
-            if let Ok(archived_batch) = rkyv::access::<
-                <Vec<OpLog> as rkyv::Archive>::Archived,
-                rkyv::rancor::Error,
-            >(payload)
-            {
-                for archived_log in archived_batch.as_slice() {
-                    let text = archived_log.state.text.as_str();
-                    let ns = archived_log.state.namespace.as_str();
-
-                    if let Some(filter) = namespace_filter {
-                        if !filter.is_empty() && filter != ns {
-                            continue;
-                        }
-                    }
-
-                    if ac.is_match(text) {
-                        results.push(VaultSearchResult {
-                            agent_hex: hex::encode(archived_log.agent_id.as_slice()),
-                            tx_id: archived_log.state.transaction_id.to_native(),
-                            namespace: ns.to_string(),
-                            payload: text.to_string(),
-                            timestamp: archived_log.state.timestamp.to_string(),
-                            source: "HOT_WAL".to_string(),
-                            similarity_score: 1.0,
-                        });
-
-                        if results.len() >= limit {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        results.reverse();
-        Ok(results)
     }
 
     pub fn fetch_hot_timeline(

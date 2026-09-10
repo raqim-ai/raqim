@@ -69,7 +69,8 @@ impl SwarmState {
         let record_entry = LoroMap::new();
 
         // Populate the historical frame leaf fields safely
-        let _ = record_entry.insert("tx_id", state.transaction_id as i64);
+        let hex_tx = format!("{:032x}", state.transaction_id);
+        let _ = record_entry.insert("tx_id", hex_tx.as_str());
         let _ = record_entry.insert("ts", state.timestamp);
         let _ = record_entry.insert("payload", state.text.clone());
 

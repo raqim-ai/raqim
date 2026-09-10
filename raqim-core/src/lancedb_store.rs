@@ -1,4 +1,4 @@
-use crate::api::{TimelineNode, VaultSearchResult};
+use crate::api::TimelineNode;
 use crate::embedding::EmbeddingProvider;
 use crate::{OpLog, SystemEvent};
 use arrow_array::types::Float32Type;
@@ -138,8 +138,13 @@ impl LanceEngine {
                 .downcast_ref::<Int64Array>()
                 .unwrap();
 
+            let dist_col = batch
+                .column_by_name("_distance")
+                .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
+
             for i in 0..tx_col.len() {
                 let parsed_tx = u128::from_str_radix(tx_col.value(i), 16).unwrap_or(0);
+                let distance = dist_col.map(|col| col.value(i)).unwrap_or(0.0);
                 results.push(ColdSearchResult {
                     tx_id: parsed_tx,
                     agent_hex: agent_id_col.value(i).to_string(),
@@ -148,91 +153,7 @@ impl LanceEngine {
                     text: text_col.value(i).to_string(),
                     timestamp: timestamp_col.value(i),
 
-                    distance: 0.0,
-                });
-            }
-        }
-
-        Ok(results)
-    }
-
-    /// The Semantic Retriever. Now returns a structured UI data, not a raw string.
-    pub async fn semantic_search(
-        &self,
-        query: &str,
-        namespace_filter: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<VaultSearchResult>, anyhow::Error> {
-        // Math translation via the polymorphic embedder
-        let query_vector = self.embedder.embed(query).await?;
-
-        let table = self.db.open_table(&self.history_table).execute().await?;
-
-        // Build the query dynamically based on namespace constraints
-        let mut query_builder = table.query().nearest_to(query_vector)?;
-        if let Some(ns) = namespace_filter {
-            if !ns.is_empty() {
-                query_builder = query_builder.only_if(format!("namespace = '{}'", ns));
-            }
-        }
-
-        let mut stream = query_builder.limit(limit).execute().await?;
-        let mut results = Vec::new();
-
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result?;
-
-            // We must exttract the hidden "_distance" column that LanceDB generates during `nearest_to` searches
-            let text_col = batch
-                .column_by_name("text")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap();
-            let agent_id_col = batch
-                .column_by_name("agent_id")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap();
-            let ns_col = batch
-                .column_by_name("namespace")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap();
-            let timestamp_col = batch
-                .column_by_name("timestamp")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .unwrap();
-            let tx_id_col = batch
-                .column_by_name("tx_id")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap();
-            let dist_col = batch
-                .column_by_name("_distance")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .unwrap();
-
-            for i in 0..text_col.len() {
-                // Cosing distance to Similarity mapping (1.0 - distance)
-                let similatiry = 1.0 - dist_col.value(i);
-
-                results.push(VaultSearchResult {
-                    tx_id: u128::from_str_radix(&tx_id_col.value(i).to_string().as_str(), 16)
-                        .unwrap_or(0),
-                    agent_hex: agent_id_col.value(i).to_string(),
-                    namespace: ns_col.value(i).to_string(),
-                    source: "LANCEDB".to_string(),
-                    similarity_score: similatiry,
-                    payload: text_col.value(i).to_string(),
-                    timestamp: timestamp_col.value(i).to_string(),
+                    distance,
                 });
             }
         }

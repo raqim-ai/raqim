@@ -29,6 +29,7 @@ use crate::EffectRecord;
 use crate::{
     config::RaqimConfig, lancedb_store::LanceEngine, nucleus::WalEngine, OpLog, SystemEvent,
 };
+use serde::Serialize;
 
 pub enum RebuildMode {
     Resurrection,
@@ -45,6 +46,7 @@ pub struct MemoryRouter {
     effect_index: DashMap<EffectKey, EffectRecord>,
 }
 
+#[derive(Clone, Debug, Serialize)]
 pub struct UnifiedSearchResult {
     pub tx_id: u128,
     pub agent_hex: String,
@@ -523,25 +525,32 @@ impl MemoryRouter {
         Ok(())
     }
 
-    /// Unified hybrid search engine: Scatters query to Cold LanceDB and Hot RAM Vector Buffer concurrently performs Receprpcal Rank Fusion (RRF) and Time-Decay Scoring, and formats context strings.
+    /// Unified hybrid search engine: Scatters query to Cold LanceDB and Hot RAM Vector Buffer concurrently,
+    /// performs Reciprocal Rank Fusion (RRF) and Time-Decay Scoring, and returns structured results.
     pub async fn query_hybrid_memory(
         &self,
         query: &str,
         namespace: Option<&str>,
         limit: usize,
+        include_hot_wal: bool,
         hot_buffer: &HotVectorBuffer,
-    ) -> Result<Vec<String>, anyhow::Error> {
+    ) -> Result<Vec<UnifiedSearchResult>, anyhow::Error> {
         // Embed query once
         let query_vector = self.lance_engine.embedder.embed(query).await?;
 
-        // PARALLEL SCATTER-GATHER (Cold LanceDB + Hot RAM)
+        // PARALLEL SCATTER-GATHER (Cold LanceDB + optional Hot RAM)
         let cold_future = self
             .lance_engine
             .search_cold_vector(&query_vector, namespace, limit * 2);
 
-        let hot_result = hot_buffer.search_hot(&query_vector, namespace, limit * 2);
-
-        let cold_result = cold_future.await.unwrap_or_default();
+        let (cold_result, hot_result) = if include_hot_wal {
+            let hot_res = hot_buffer.search_hot(&query_vector, namespace, limit * 2);
+            let cold_res = cold_future.await.unwrap_or_default();
+            (cold_res, hot_res)
+        } else {
+            let cold_res = cold_future.await.unwrap_or_default();
+            (cold_res, vec![])
+        };
 
         // RECIPROCAL RANK FUSION (RRF) & DEDUPLICATION BY UUIDv7 tx_id
         let mut fused_map: HashMap<u128, UnifiedSearchResult> = HashMap::new();
@@ -558,7 +567,8 @@ impl MemoryRouter {
             // Time decay multiplier: e^(-lambda * delta_t_hours)
             let age_hours = ((current_ts - cold.timestamp).max(0) as f32) / 3600.0;
             let time_decay = (-0.05 * age_hours).exp();
-            let final_score = rrf_score * time_decay;
+            let sim_score = (1.0 - cold.distance).clamp(0.0, 1.0);
+            let final_score = ((rrf_score + sim_score) * time_decay).min(1.0);
 
             fused_map.insert(
                 cold.tx_id,
@@ -579,14 +589,14 @@ impl MemoryRouter {
             let rrf_score = 1.0 / (k + (rank + 1) as f32);
             let age_hours = ((current_ts - hot.timestamp).max(0) as f32) / 3600.0;
             let time_decay = (-0.01 * age_hours).exp(); // Slower decay for hot memory
-            let final_score = (rrf_score + sim_score) * time_decay * 1.25; // 25% Hot Recency Boost
+            let final_score = ((rrf_score + sim_score) * time_decay * 1.25).min(1.0); // 25% Hot Recency Boost
 
             fused_map
                 .entry(hot.tx_id)
                 .and_modify(|existing| {
                     if final_score > existing.score {
                         existing.score = final_score;
-                        existing.source = "HOT_RAM_BUFFER";
+                        existing.source = "HOT_WAL";
                     }
                 })
                 .or_insert(UnifiedSearchResult {
@@ -596,7 +606,7 @@ impl MemoryRouter {
                     text: hot.text,
                     timestamp: hot.timestamp,
                     score: final_score,
-                    source: "HOT_RAM_BUFFER",
+                    source: "HOT_WAL",
                 });
         }
 
@@ -609,12 +619,26 @@ impl MemoryRouter {
         });
         final_list.truncate(limit);
 
-        // Format Hyper-Rich Context String For LLM Prompt Window
-        let formatted_memories: Vec<String> = final_list
+        Ok(final_list)
+    }
+
+    /// Formats the hybrid search results into rich context strings for RAG / LLM prompt window
+    pub async fn query_hybrid_context_strings(
+        &self,
+        query: &str,
+        namespace: Option<&str>,
+        limit: usize,
+        hot_buffer: &HotVectorBuffer,
+    ) -> Result<Vec<String>, anyhow::Error> {
+        let results = self
+            .query_hybrid_memory(query, namespace, limit, true, hot_buffer)
+            .await?;
+
+        let formatted_memories: Vec<String> = results
             .into_iter()
             .map(|res| {
                 format!(
-                    "[Time: {}] [TxID: {:032x}] [Source: {}] Namespace: '{}' -> {} ",
+                    "[Time: {}] [TxID: {:032x}] [Source: {}] Namespace: '{}' -> {}",
                     res.timestamp, res.tx_id, res.source, res.namespace, res.text
                 )
             })

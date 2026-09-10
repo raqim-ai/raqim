@@ -42,7 +42,7 @@ use crate::nucleus::WalEngine;
 use crate::registry::SwarmRegistry;
 use crate::state::SwarmStateRegistry;
 use crate::{
-    aegis::AegisGateKeeper, config::RaqimConfig, memory_router::MemoryRouter,
+    aegis::AegisGateKeeper, config::RaqimConfig, memory_router::{MemoryRouter, UnifiedSearchResult},
     network::GlobalNetworkBridge, A2AEnvelope,
 };
 use crate::{execute_raqim_cascade, AgentState, IngressEnvelope, RecentThought, SystemEvent};
@@ -789,6 +789,7 @@ pub struct UnifiedSearchQuery {
     pub query: String,
     pub namespace: Option<String>,
     pub include_wal: Option<bool>,
+    pub limit: Option<usize>,
 }
 
 pub async fn unified_vault_search(
@@ -796,45 +797,34 @@ pub async fn unified_vault_search(
     State(state): State<ApiState>,
     Query(params): Query<UnifiedSearchQuery>,
 ) -> Result<Json<Vec<VaultSearchResult>>, ApiError> {
-    // The Scatter: Launch both searches concurrently on different OS threads
-    let lance_future = state
-        .lance
-        .semantic_search(&params.query, params.namespace.as_deref(), 50);
+    let include_wal = params.include_wal.unwrap_or(true);
+    let limit = params.limit.unwrap_or(50);
 
-    let wal_future = async {
-        // Only hit the disk if the user explicitely requested the WAL inclusion
-        if params.include_wal.unwrap_or(true) {
-            state.wal.lexical_scan(
-                &params.query,
-                params.namespace.as_deref(),
-                50,
-                &state.config.wal_path,
-            )
-        } else {
-            Ok(vec![])
-        }
+    let ns_filter = match params.namespace.as_deref() {
+        Some(ns) if ns.is_empty() || ns == "ALL" => None,
+        Some(ns) => Some(ns),
+        None => None,
     };
 
-    let (lance_res, wal_res) = tokio::join!(lance_future, wal_future);
+    let results = state
+        .mem_router
+        .query_hybrid_memory(
+            &params.query,
+            ns_filter,
+            limit,
+            include_wal,
+            &state.hot_buffer,
+        )
+        .await
+        .map_err(|e| {
+            eprintln!("[Vault Search ERROR] {}", e);
+            ApiError::InternalServerError(format!("Vault search failed: {}", e))
+        })?;
 
-    // THE GATHER: Starting with the hot wal reasult
-    let mut unified_results = wal_res.unwrap_or_default();
+    let vault_results: Vec<VaultSearchResult> =
+        results.into_iter().map(VaultSearchResult::from).collect();
 
-    if let Ok(mut cold_results) = lance_res {
-        unified_results.append(&mut cold_results)
-    }
-
-    // Sort the unified results purely semantic score (Highest first)
-    unified_results.sort_by(|a, b| {
-        b.similarity_score
-            .partial_cmp(&a.similarity_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    // Cap at top 100 for UI performance
-    unified_results.truncate(100);
-
-    Ok(Json(unified_results))
+    Ok(Json(vault_results))
 }
 
 // 2. THE RAG SEMANTIC SEARCH ENDPOINT
@@ -852,11 +842,17 @@ pub async fn semantic_search_endpoint(
 ) -> Result<Json<Vec<String>>, ApiError> {
     let limit = params.limit.unwrap_or(5);
 
+    let ns_filter = if params.namespace.is_empty() || params.namespace == "ALL" {
+        None
+    } else {
+        Some(params.namespace.as_str())
+    };
+
     match state
         .mem_router
-        .query_hybrid_memory(
+        .query_hybrid_context_strings(
             &params.query,
-            Some(&params.namespace),
+            ns_filter,
             limit,
             &state.hot_buffer,
         )
@@ -875,12 +871,32 @@ pub async fn semantic_search_endpoint(
 #[derive(Serialize, Clone, Debug)]
 pub struct VaultSearchResult {
     pub tx_id: u128,
+    pub tx_id_hex: String,
     pub agent_hex: String,
     pub namespace: String,
     pub payload: String,
+    pub text: String,
     pub timestamp: String,
     pub source: String,
     pub similarity_score: f32,
+    pub score: f32,
+}
+
+impl From<UnifiedSearchResult> for VaultSearchResult {
+    fn from(res: UnifiedSearchResult) -> Self {
+        Self {
+            tx_id: res.tx_id,
+            tx_id_hex: format!("{:032x}", res.tx_id),
+            agent_hex: res.agent_hex,
+            namespace: res.namespace,
+            payload: res.text.clone(),
+            text: res.text,
+            timestamp: res.timestamp.to_string(),
+            source: res.source.to_string(),
+            similarity_score: res.score,
+            score: res.score,
+        }
+    }
 }
 
 #[derive(Serialize, Clone, Debug)]
