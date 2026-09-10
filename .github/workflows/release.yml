@@ -107,7 +107,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}/core
-          tags: |Microsoft.QuickAction.WiFi
+          tags: Microsoft.QuickAction.WiFi
             type=semver,pattern={{version}}
             type=raw,value=latest
 
