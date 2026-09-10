@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
-from raqim.client import RaqimClient, verify_state_proof_offline, _execution_step_context
+from raqim.client import RaqimClient, CanonicalSerializer, verify_state_proof_offline, _execution_step_context
 
 import blake3
 
