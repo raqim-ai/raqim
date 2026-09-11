@@ -457,6 +457,24 @@ synapse/
 
 ---
 
+---
+
+## Early Access Reality & Honest Disclaimers (v0.1.0)
+
+Raqim is infrastructure-grade software under active development. While the cryptographic primitives (BLAKE3 Merkle DAG, Ed25519 PKI, and WAL group-commit persistence) have been empirically verified under heavy siege, v0.1.0 contains operational rough edges:
+
+- **Next.js Console Hydration:** Under sustained high-velocity ingestion (>10,000 TPS), the browser SSE consumer in `raqim-console` may experience UI frame drops or buffer backpressure. Real-time metric cards poll every 2 seconds.
+
+- **Cold Storage Compaction Timing:** The 2-Phase Commit (2PC) compactor runs as a background task. If you query LanceDB immediately following an uncompacted WAL burst, recent records resolve from the in-memory hot vector buffer rather than on-disk Parquet tables until compaction completes.
+
+- **Single-Node Focus:** v0.1.0 optimizes local-first single-node deployments (Docker / bare-metal daemon). The Zenoh mesh bridge handles out-of-band quarantine distribution, but multi-cluster consensus is slated for v0.2.0.
+
+If you encounter unexpected panics, serialization inconsistencies, or UI anomalies, please open a GitHub Issue or reach out directly to the maintainer:
+
+- **Maintainer Contact:** Muhammad (`dprimemuhammad@gmail.com`)
+
+- **Bug Reports:** [github.com/raqim-ai/raqim/issues](https://github.com/raqim-ai/raqim/issues)
+
 ## License
 
 Raqim Core is open-source software licensed under the **Apache License 2.0**. See the [LICENSE](LICENSE) file for details.

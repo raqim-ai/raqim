@@ -42,8 +42,11 @@ use crate::nucleus::WalEngine;
 use crate::registry::SwarmRegistry;
 use crate::state::SwarmStateRegistry;
 use crate::{
-    aegis::AegisGateKeeper, config::RaqimConfig, memory_router::{MemoryRouter, UnifiedSearchResult},
-    network::GlobalNetworkBridge, A2AEnvelope,
+    aegis::AegisGateKeeper,
+    config::RaqimConfig,
+    memory_router::{MemoryRouter, UnifiedSearchResult},
+    network::GlobalNetworkBridge,
+    A2AEnvelope,
 };
 use crate::{execute_raqim_cascade, AgentState, IngressEnvelope, RecentThought, SystemEvent};
 
@@ -850,12 +853,7 @@ pub async fn semantic_search_endpoint(
 
     match state
         .mem_router
-        .query_hybrid_context_strings(
-            &params.query,
-            ns_filter,
-            limit,
-            &state.hot_buffer,
-        )
+        .query_hybrid_context_strings(&params.query, ns_filter, limit, &state.hot_buffer)
         .await
     {
         Ok(memories) => Ok(Json(memories)),
