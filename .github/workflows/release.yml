@@ -63,7 +63,9 @@ jobs:
 
       - name: Compile Release Binaries
         run: |
-          cargo build --release --target ${{ matrix.target }} --bin raqim-core --bin raqim-cli --bin raqim-mcp
+          cargo build --release --target ${{ matrix.target }} --bin raqim-core
+          cargo build --release --target ${{ matrix.target }} --bin raqim-cli
+          cargo build --release --target ${{ matrix.target }} --bin raqim-mcp
 
       - name: Package Binaries (Unix)
         if: matrix.os != 'windows-latest'
@@ -98,6 +100,13 @@ jobs:
     name: Build & Push OCI Image to GHCR
     runs-on: ubuntu-latest
     steps:
+      - name: Free Disk Space (Ubuntu)
+        run: |
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+
       - name: Checkout Source Code
         uses: actions/checkout@v4
 
@@ -138,11 +147,20 @@ jobs:
     name: Build & Publish raqim-py (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Protobuf Compiler (Cross-Platform)
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -155,6 +173,12 @@ jobs:
           args: --release --out dist --manifest-path raqim-py/Cargo.toml
           sccache: 'true'
           manylinux: auto
+          before-script-linux: |
+            if command -v apt-get >/dev/null 2>&1; then
+              apt-get update && apt-get install -y protobuf-compiler libssl-dev pkg-config
+            elif command -v yum >/dev/null 2>&1; then
+              yum install -y protobuf-compiler openssl-devel pkgconfig
+            fi
 
       - name: Upload Wheels to Artifacts
         uses: actions/upload-artifact@v4

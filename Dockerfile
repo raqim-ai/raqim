@@ -25,9 +25,11 @@ COPY raqim-mcp ./raqim-mcp
 COPY raqim-siege ./raqim-siege
 COPY raqim-py ./raqim-py
 
-# Compile optimizeed binaries with stripped debug symbols
+# Compile optimized binaries sequentially to prevent linker OOM
 ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
-RUN cargo build --release --bin raqim-core --bin raqim-cli --bin raqim-mcp
+RUN cargo build --release --bin raqim-core && \
+    cargo build --release --bin raqim-cli && \
+    cargo build --release --bin raqim-mcp
 
 # Strip binary symbols for minimal size
 RUN strip /usr/src/raqim/target/release/raqim-core && \
