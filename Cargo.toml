@@ -9,3 +9,11 @@ members = [
 # This must be the full path to the repository
 chrono = { git = "https://github.com/chronotope/chrono", tag = "v0.4.38" }
 
+[profile.release]
+opt-level = 3
+debug = 0
+strip = true
+
+[profile.dev]
+debug = 1
+
