@@ -207,31 +207,19 @@ impl LanceEngine {
 
     /// Appends an event to the immutable forensic ledger.
     pub async fn log_system_events(&self, event: &SystemEvent) {
+        // High-frequency thoughts are already securely archived in the primary WAL and agent_history.
+        // Bypassing them here prevents O(N^2) LanceDB manifest explosion on high-throughput runs.
+        if matches!(event, SystemEvent::ThoughtCommitted { .. }) {
+            return;
+        }
+
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as i64;
 
         let (e_type, agent_id, meta) = match event {
-            SystemEvent::ThoughtCommitted {
-                agent_id,
-                tx_id,
-                namespace,
-                text,
-            } => {
-                // Sanitize the text to prevent JSON parsing panics in the meta column
-                let safe_text = text
-                    .replace("\"", "\\\"")
-                    .chars()
-                    .take(100)
-                    .collect::<String>();
-                let m = format!(
-                    "{{\"tx_id\": \"{}\", \"namespace\": \"{}\", \"text_preview\": \"{}...\"}}",
-                    tx_id, namespace, safe_text
-                );
-
-                ("ThoughtCommited", agent_id.clone(), m)
-            }
+            SystemEvent::ThoughtCommitted { .. } => return,
 
             SystemEvent::AegisInterdiction {
                 agent_id,

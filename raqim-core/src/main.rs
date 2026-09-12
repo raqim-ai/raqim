@@ -496,7 +496,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("[SYSTEM] Audit Valult Telemetry Sinker Active.");
 
         while let Ok(event) = valut_rx.recv().await {
-            lance_vault_clone.log_system_events(&event).await;
+            if !matches!(event, SystemEvent::ThoughtCommitted { .. }) {
+                lance_vault_clone.log_system_events(&event).await;
+            }
 
             match event {
                 SystemEvent::GlobalQuarantineSync { record } => {
