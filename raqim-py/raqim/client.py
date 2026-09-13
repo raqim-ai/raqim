@@ -241,7 +241,7 @@ class RaqimClient:
             status = int.from_bytes(ack_bytes[0:4], "little")
             if status != 0:
                 raise PermissionError(f"[AEGIS REJECTION] Ingress dropped (Status: {status})")
-            raise int.from_bytes(ack_bytes[4:20], "little")
+            return int.from_bytes(ack_bytes[4:20], "little")
         
         try:
             yield send 
