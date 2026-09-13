@@ -842,7 +842,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let hot_buf = task_hot_buffer.clone();
                             let embedder = task_embedder.clone();
                             let text_bg = text.clone();
-                            let ns_bg = path_intent.clone();
+                            let ns_bg = path_intent.to_string();
                             let agent_bg = agent_hex.clone();
                             let ts_bg: i64 = archived_state.timestamp.into();
 
