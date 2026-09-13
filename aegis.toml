@@ -19,7 +19,7 @@ max_tps = 10
 burst_capacity = 5
 
 [groups.analyst_group]
-allowed_namespaces = ["/system/*", "/finance/tools/*", "/finance/reasoning/*"]
+allowed_namespaces = ["/system/*", "/rqm_finance/*", "/finance/*",  "/audit/*"]
 blocked_namespaces = ["/finance/restricted/*", "/admin/*"]
-max_tps = 100
-burst_capacity = 200
+max_tps = 50_000 
+burst_capacity = 100_000 

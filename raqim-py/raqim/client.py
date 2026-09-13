@@ -6,6 +6,7 @@ import inspect
 import json
 import time
 import uuid
+import contextlib
 from typing import (
     Any,
     AsyncGenerator,
@@ -182,15 +183,50 @@ class RaqimClient:
             print(f"[OS ERROR] Failed to process control overrides: {e} ", e)
 
 # LOW-LEVEL DATA PLANE & RAG QUERIES
-    async def commit_thought(self, agent_hex: str, intent_path: str, text: str) -> None:
+    async def commit_thought(self, intent_path: str, text: str, agent_hex: Optional[str] = None) -> None:
         """Shoots signed zero-copy rkyv bytes over raw TCP to Raqim's WAL Engine"""
+        
+        target_agent = agent_hex or self.agent_hex
+        
         # The Rust PyO3 extension handles the blazing-fast serialization and signing
-        raw_payload = self.crypto_core.generate_tcp_payload(agent_hex, intent_path, text)
+        raw_payload = self.crypto_core.generate_tcp_payload(target_agent, intent_path, text)
         
         reader, writer = await asyncio.open_connection(*self.tcp_addr)
         try: 
             writer.write(raw_payload)
             await writer.drain()
+            
+            # Closed-loop server ACK
+            ack_bytes = await reader.readexactly(20)
+            status = int.from_bytes(ack_bytes[0:4], "little")
+            
+            if status != 0: 
+                raise PermissionError(f"[AEGIS REJECTION]   Frame rejected by kernel (Status: {status})")
+            
+            tx_id = int.from_bytes(ack_bytes[4:20], "little")
+            return tx_id
+        finally:
+            writer.close()
+            await writer.wait_closed()
+    
+    @contextlib.asynccontextmanager
+    async def open_stream(self): 
+        """Maintains a single persistent TCP connection for high-throughput batch streaming. """
+        reader, writer = await asyncio.open_connection(*self.tcp_addr)
+        
+        async def send(intent_path: str, text: str) -> int: 
+            raw_payload = self.crypto_core.generate_tcp_payload(self.agent_hex, intent_path, text)
+            writer.write(raw_payload)
+            await writer.drain()
+            
+            ack_bytes = await reader.readexactly(20 )
+            status = int.from_bytes(ack_bytes[0:4], "little")
+            if status != 0:
+                raise PermissionError(f"[AEGIS REJECTION] Ingress dropped (Status: {status})")
+            raise int.from_bytes(ack_bytes[4:20], "little")
+        
+        try:
+            yield send 
         finally:
             writer.close()
             await writer.wait_closed()
