@@ -25,8 +25,9 @@ COPY raqim-mcp ./raqim-mcp
 COPY raqim-siege ./raqim-siege
 COPY raqim-py ./raqim-py
 
-# Compile optimized binaries sequentially to prevent linker OOM
+# Compile optimized binaries sequentially with capped concurrency to prevent linker OOM
 ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
+ENV CARGO_BUILD_JOBS=1
 RUN cargo build --release --bin raqim-core && \
     cargo build --release --bin raqim-cli && \
     cargo build --release --bin raqim-mcp
