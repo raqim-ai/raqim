@@ -103,13 +103,15 @@ async def main():
     # Give the background OS thread a moment to complete Parquet indexing
     print("  ⏳ Waiting 5s for LanceDB background indexing & vector crystallization...")
     await asyncio.sleep(5)
-    
+
     # Step 3: Ingest Batch 2 (Remains in Hot Vector Buffer)
     print("\n[STEP 3] Ingesting Batch 2: Real-time In-Flight Threat Thoughts...")
     async with agent.open_stream() as stream:
         for alert in HOT_ACTIVE_MEMORIES:
             tx_id = await stream(intent_path="/rqm_finance/realtime", text=alert)
             print(f"  🔥 Hot frame committed -> TxID: 0x{tx_id:032x}")
+            
+    await asyncio.sleep(1)
 
     # Step 4: Execute Hybrid Semantic Retrieval
     search_query = "Apex Clearing offshore transactions and BSA structuring evade limits"

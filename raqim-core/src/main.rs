@@ -629,7 +629,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let task_brain = brain_shard.clone();
                     let task_mem_router = mem_router.clone();
                     let task_pause_rx = pause_rx.clone();
-
+                    let task_hot_buffer = hot_buffer.clone();
+                    let task_embedder = embedder.clone();
 
                 // Spawn into the joinset
             tcp_workers.spawn(async move {
@@ -834,8 +835,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 agent_hex: agent_hex.clone(),
                                 intent_path: path_intent.to_string(),
                                 tx_id: format!("{:032x}", tx_id),
-                                text,
+                                text: text.clone(),
                             });
+
+                            // Async hot-memory insersion
+                            let hot_buf = task_hot_buffer.clone();
+                            let embedder = task_embedder.clone();
+                            let text_bg = text.clone();
+                            let ns_bg = path_intent.clone();
+                            let agent_bg = agent_hex.clone();
+                            let ts_bg: i64 = archived_state.timestamp.into();
+
+                            tokio::spawn(async move{
+
+                             if let Ok(vector) = embedder.embed(&text_bg).await {
+                                let entry = HotVectorEntry {
+                                    tx_id,
+                                    agent_hex: agent_bg,
+                                    namespace: ns_bg.to_string(),
+                                    text: text_bg,
+                                    timestamp: ts_bg,
+                                    vector
+
+                                };
+
+                                    hot_buf.push(entry);
+                                }
+                            });
+
                      }
                      Err(e) => {
                         eprintln!("[TCP INGRESS REJECTED] Hardware Backpressure: {} ", e);
