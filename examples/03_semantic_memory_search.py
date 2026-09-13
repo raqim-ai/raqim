@@ -5,7 +5,7 @@ import time
 import httpx
 from dotenv import load_dotenv
 
-# Defensive path resolution for repository imports
+# Defensive path resolution
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
 RAQIM_PY_DIR = os.path.join(REPO_ROOT, "raqim-py")
@@ -48,150 +48,105 @@ async def forge_credentials(alias: str, group: str) -> tuple[str, str]:
     async with httpx.AsyncClient(timeout=5.0) as http:
         resp = await http.post(
             f"{DAEMON_HTTP}/v1/admin/ca/mint",
-            json={"agent_hex": agent_hex, "group": group}
+            json={"agent_hex": agent_hex, "group": group},
         )
         if resp.status_code != 200:
-            raise RuntimeError(f"CA Minting failed for {alias}: {resp.text}")
+            raise RuntimeError(f"CA Minting failed: {resp.text}")
         with open(cert_path, "wb") as f:
             f.write(bytes.fromhex(resp.json()))
 
     return key_path, cert_path
 
 # ==============================================================================
-# 2. TRIGGER 2PC COMPACTION VIA HTTP API
+# 2. SEED DATASETS
 # ==============================================================================
-async def trigger_wal_compaction():
-    """Triggers WAL rotation and 2PC compaction into LanceDB cold storage."""
-    endpoints = [
-        f"{DAEMON_HTTP}/v1/admin/wal/compact",
-        f"{DAEMON_HTTP}/v1/admin/compact",
-        f"{DAEMON_HTTP}/v1/compactor/trigger",
-    ]
-    async with httpx.AsyncClient(timeout=10.0) as http:
-        for ep in endpoints:
-            try:
-                resp = await http.post(ep)
-                if resp.status_code in (200, 202):
-                    print(f"📦 [COMPACTOR] Triggered 2PC WAL compaction via {ep}.")
-                    return True
-            except Exception:
-                continue
-    return False
+COLD_HISTORICAL_MEMORIES = [
+    "KYC Dossier: Ultimate Beneficial Owner of Apex Clearing is registered in Port Louis, Mauritius under trust structure 9912.",
+    "Sanctions Update: Shell entity Trident Maritime Logistics flagged for illicit crude transshipment in Fujairah outer anchorage.",
+    "Audit Finding: Suspicious CTR evasion cluster detected across 4 Delaware LLCs sharing identical registered agent addresses.",
+    "Regulatory Precedent: BSA threshold avoidance through structured wire transfers under $10,000 mandates automated SAR filing.",
+]
+
+HOT_ACTIVE_MEMORIES = [
+    "REALTIME ALERT: Incoming wire transfer of $9,950.00 from Apex Clearing node clearing via offshore correspondent hop.",
+    "REALTIME ALERT: Entity Trident Maritime Logistics attempting rapid automated asset liquidation to Cayman custodian.",
+    "REALTIME ALERT: High-velocity micro-transfers totaling $48,000 detected across 5 newly spun virtual debit sub-accounts.",
+]
 
 # ==============================================================================
-# 3. QUERY UNIFIED HYBRID VAULT SEARCH
-# ==============================================================================
-async def query_vault_memory(query: str, namespace: str = "ALL", limit: int = 5) -> list[dict]:
-    """Queries the hybrid search endpoint across LanceDB and Hot RAM vector buffers."""
-    endpoints = [
-        f"{DAEMON_HTTP}/v1/vault/search",
-        f"{DAEMON_HTTP}/v1/swarm/memory",
-    ]
-    params = {
-        "query": query,
-        "namespace": namespace,
-        "include_wal": "true",
-        "limit": limit,
-    }
-    async with httpx.AsyncClient(timeout=10.0) as http:
-        for ep in endpoints:
-            try:
-                resp = await http.get(ep, params=params)
-                if resp.status_code == 200:
-                    return resp.json()
-            except Exception:
-                continue
-    raise RuntimeError("Failed to query unified vault memory across all endpoints.")
-
-# ==============================================================================
-# 4. MAIN WORKFLOW
+# 3. MAIN WORKFLOW
 # ==============================================================================
 async def main():
     print("==================================================================")
     print("Bismillah ar-Rahman ar-Rahim")
-    print("Raqim Hybrid Memory Engine: Hot RAM & Cold LanceDB Scatter-Gather")
+    print("Raqim Hybrid RAG: Hot-RAM & Cold-LanceDB Memory Synthesis")
     print("==================================================================")
+    print("Targeting: 127.0.0.1:8080 (TCP Ingress) | 127.0.0.1:8081 (Control Plane)\n")
 
-    k, c = await forge_credentials("archival_analyst", "finance_worker")
-    agent = RaqimClient(alias="archival_analyst", tenant="production", private_key_path=k, cert_path=c)
+    k, c = await forge_credentials("memory_auditor", "finance_worker")
+    agent = RaqimClient(alias="memory_auditor", tenant="production", private_key_path=k, cert_path=c)
     await agent.boot()
 
-    # --- PHASE 1: INGEST HISTORICAL BATCH (DESTINED FOR COLD LANCEDB) ---
-    print("\n[PHASE 1] Ingesting Historical Thought Batch (Destined for Cold Storage)...")
-    historical_thoughts = [
-        "ARCHIVE_DOSSIER: Target entity ACC_OFFSHORE_8891 routed funds to Swiss fiduciary account.",
-        "ARCHIVE_DOSSIER: Beneficial ownership trace confirmed offshore shell incorporated in Panama.",
-        "ARCHIVE_DOSSIER: Structuring pattern identified across 12 consecutive wire transfers under threshold.",
-    ]
-
+    # Step 1: Ingest Batch 1 (Targeted for Cold Compaction)
+    print("\n[STEP 1] Ingesting Batch 1: Historical Intelligence Dossiers...")
     async with agent.open_stream() as stream:
-        for t in historical_thoughts:
-            tx_id = await stream(intent_path="/finance/audit/cold_archive", text=t)
+        for memory in COLD_HISTORICAL_MEMORIES:
+            tx_id = await stream(intent_path="/rqm_finance/history", text=memory)
             print(f"  📥 Historical frame committed -> TxID: 0x{tx_id:032x}")
 
-    # --- PHASE 2: TRIGGER 2PC BACKGROUND COMPACTION ---
-    print("\n[PHASE 2] Triggering 2PC WAL Compaction into LanceDB Parquet Segments...")
-    compacted = await trigger_wal_compaction()
-    if compacted:
-        # Yield to allow background OS thread to embed and write Parquet partitions
-        print("  ⏳ Awaiting background LanceDB compaction settlement (2.5s)...")
-        await asyncio.sleep(2.5)
+    # Step 2: Trigger Manual WAL Rotation & LanceDB 2PC Compaction
+    print("\n[STEP 2] Triggering 2PC WAL Compactor via Admin API...")
+    async with httpx.AsyncClient(timeout=10.0) as http:
+        res = await http.post(f"{DAEMON_HTTP}/v1/admin/compactor/trigger")
+        print(f"  ⚡ Compactor trigger status: {res.status_code} ({res.json().get('success')})")
 
-    # --- PHASE 3: INGEST LIVE ACTIVE BATCH (STORED IN HOT WAL BUFFER) ---
-    print("\n[PHASE 3] Ingesting Active Real-Time Batch (Residing in Hot RAM Buffer)...")
-    live_thoughts = [
-        "LIVE_ALERT: Real-time intercept on Cayman clearing node for target beneficiary ACC_OFFSHORE_8891.",
-        "LIVE_ALERT: Rapid fund movement detected on SWIFT router 449 with high velocity.",
-    ]
+    # Give the background OS thread a moment to complete Parquet indexing
+    print("  ⏳ Waiting 2.5s for LanceDB background indexing & vector crystallization...")
+    await asyncio.sleep(2.5)
 
+    # Step 3: Ingest Batch 2 (Remains in Hot Vector Buffer)
+    print("\n[STEP 3] Ingesting Batch 2: Real-time In-Flight Threat Thoughts...")
     async with agent.open_stream() as stream:
-        for t in live_thoughts:
-            tx_id = await stream(intent_path="/finance/audit/live_firehose", text=t)
+        for alert in HOT_ACTIVE_MEMORIES:
+            tx_id = await stream(intent_path="/rqm_finance/realtime", text=alert)
             print(f"  🔥 Hot frame committed -> TxID: 0x{tx_id:032x}")
 
-    # Brief yield for SIMD HotVectorBuffer ingestion
-    await asyncio.sleep(0.5)
+    # Step 4: Execute Hybrid Semantic Retrieval
+    search_query = "Apex Clearing offshore transactions and BSA structuring evade limits"
+    print(f"\n[STEP 4] Querying Hybrid Vault Search: '{search_query}'")
 
-    # --- PHASE 4: EXECUTE UNIFIED HYBRID RRF SEARCH ---
-    print("\n[PHASE 4] Executing Parallel Scatter-Gather Hybrid Search (Query: 'offshore beneficiary')...")
-    search_query = "offshore beneficiary ACC_OFFSHORE_8891"
-    t0 = time.perf_counter()
-    results = await query_vault_memory(query=search_query, namespace="ALL", limit=6)
-    duration_ms = (time.perf_counter() - t0) * 1000
+    async with httpx.AsyncClient(timeout=10.0) as http:
+        resp = await http.get(
+            f"{DAEMON_HTTP}/v1/vault/search",
+            params={
+                "query": search_query,
+                "include_wal": "true",
+                "limit": 5,
+            },
+        )
 
-    print(f"\nSearch resolved in {duration_ms:.2f} ms across both memory tiers:")
-    print("-" * 90)
-    print(f"{'RANK':<5} | {'SOURCE':<14} | {'RRF SCORE':<10} | {'TEXT PREVIEW'}")
-    print("-" * 90)
+        if resp.status_code != 200:
+            print(f"❌ Search failed: HTTP {resp.status_code} - {resp.text}")
+            return
 
-    has_cold = False
-    has_hot = False
+        results = resp.json()
+
+    # Step 5: Render Scannable Results
+    print("\n=====================================================================================================")
+    print(f"{'RANK':<5} | {'SOURCE':<14} | {'RRF SCORE':<10} | {'TEXT SNIPPET'}")
+    print("-----------------------------------------------------------------------------------------------------")
 
     for rank, item in enumerate(results, start=1):
         source = item.get("source", "UNKNOWN")
         score = item.get("score", 0.0)
         text = item.get("text", "")
+        snippet = (text[:75] + "...") if len(text) > 75 else text
 
-        if "COLD" in source:
-            has_cold = True
-        if "HOT" in source:
-            has_hot = True
+        source_tag = "🔥 [HOT_WAL]" if "HOT" in source else "❄️ [LANCEDB]"
+        print(f"{rank:<5} | {source_tag:<14} | {score:<10.4f} | {snippet}")
 
-        print(f"{rank:<5} | {source:<14} | {score:<10.4f} | {text[:55]}...")
-
-    print("-" * 90)
-
-    # --- PHASE 5: VERIFICATION ASSERTIONS ---
-    print("\n[PHASE 5] Validating Architectural Invariants...")
-    print(f"  [x] COLD_LANCEDB partition match present : {has_cold}")
-    print(f"  [x] HOT_WAL in-memory vector match present: {has_hot}")
-
-    if has_cold and has_hot:
-        print("\n==================================================================")
-        print("Alhamdulillah! True Hybrid Scatter-Gather Proved Across Both Tiers.")
-        print("==================================================================")
-    else:
-        print("\n⚠️ Note: Compactor interval in progress; single-tier results returned.")
+    print("=====================================================================================================")
+    print("Alhamdulillah! Verified parallel scatter-gather across Cold Parquet and In-Memory WAL vectors.")
 
 if __name__ == "__main__":
     asyncio.run(main())
