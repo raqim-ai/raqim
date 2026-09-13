@@ -786,6 +786,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             });
 
+                            // Emits 20-byte Hadshake Ack
+                            let mut ack_buf = [0u8; 20];
+                            ack_buf[0..4].copy_from_slice(&0u32.to_le_bytes());
+                            ack_buf[4..20].copy_from_slice(&0u128.to_le_bytes());
+                            if let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut write_half, &ack_buf).await {
+                                eprintln!("[TCP EDGE] Failed to deliver handshake ACK: {} ", e);
+                                break;
+                            }
+
                             continue;
                         }
                     } else {
@@ -811,7 +820,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         Ok(tx_id) => {
 
-                                // Emit 20 byte server ack frame [4 bytes: Status] + [16 bytes: Little-Endian u128 TxID]
+                             // Emit 20 byte server ack frame [4 bytes: Status] + [16 bytes: Little-Endian u128 TxID]
                             let mut ack_buf = [0u8; 20];
                             ack_buf[0..4].copy_from_slice(&0u32.to_le_bytes());
                             ack_buf[4..20].copy_from_slice(&tx_id.to_le_bytes());

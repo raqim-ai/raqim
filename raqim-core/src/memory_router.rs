@@ -265,6 +265,14 @@ impl MemoryRouter {
             .await
             .unwrap_or((0, 0, Vec::new()));
 
+        if actual_target_transaction == 0 {
+            println!(
+                "[TIME MACHINE] Agent {} active at Genesis state (Zero prior transactions). ",
+                agent_hex
+            );
+            return Ok((memory_blob, Vec::new(), 0, snapshot_timestamp));
+        }
+
         // Determine if we need deep discovery (LanceDB) or Hot Recoverey (WAL)
         let oldest_wal_tx = {
             let idx = wal_engine.index.read().await;
@@ -283,6 +291,21 @@ impl MemoryRouter {
         let next_txid = snapshot_txid;
 
         if actual_target_transaction < oldest_wal_tx {
+            let table_names = self
+                .lance_engine
+                .db
+                .table_names()
+                .execute()
+                .await
+                .unwrap_or_default();
+            if !table_names.contains(&self.lance_engine.history_table) {
+                println!(
+                    "[TIME MACHINE] Cold table '{}' not yet initialized. Agent is at Genesis.",
+                    self.lance_engine.history_table
+                );
+                return Ok((memory_blob, Vec::new(), 0, snapshot_timestamp));
+            }
+
             // DEEP TIME TRAVEL: The WAL has been compacted. We must read from LanceDB.
             println!(
                 "[TIME MACHINE] Target is deep in history. Engaging LanceDB Deep Discovery... "
