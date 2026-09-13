@@ -19,7 +19,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy the workspace manifest and source tree
 COPY Cargo.toml Cargo.lock ./
-COPY .cargo ./.cargo
 COPY raqim-core ./raqim-core
 COPY raqim-cli ./raqim-cli
 COPY raqim-mcp ./raqim-mcp
@@ -29,8 +28,6 @@ COPY raqim-py ./raqim-py
 # Compile optimized binaries sequentially with capped concurrency to prevent linker OOM
 ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
 ENV CARGO_BUILD_JOBS=1
-ENV RUSTC_BOOTSTRAP=1
-ENV RUSTFLAGS="-Z crate-attr=recursion_limit=\"512\""
 
 RUN cargo fetch && \
     find /usr/local/cargo/registry/src -path "*/lance-*/src/lib.rs" -exec sed -i '1s/^/#![recursion_limit = "512"]\n/' {} + 2>/dev/null || true

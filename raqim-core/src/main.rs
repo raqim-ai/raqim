@@ -28,6 +28,7 @@ use std::sync::Arc;
 use std::{eprintln, fs, println};
 
 use tokio::net::TcpListener;
+#[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::broadcast;
 use tokio::task::JoinSet;
@@ -47,12 +48,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ct_clone = cancel_token.clone();
 
     tokio::spawn(async move {
-        let mut sigterm = signal(SignalKind::terminate()).expect("Failed to bind SIGTERM");
-        let mut sigint = signal(SignalKind::interrupt()).expect("Failed to bind SIGINT");
+        #[cfg(unix)]
+        {
+            let mut sigterm = signal(SignalKind::terminate()).expect("Failed to bind SIGTERM");
+            let mut sigint = signal(SignalKind::interrupt()).expect("Failed to bind SIGINT");
 
-        tokio::select! {
-            _ = sigterm.recv() => println!("\n[OS] Received SIGTERM from Kubernetes"),
-            _ = sigint.recv() => println!("\n[OS] Received SIGINT (Ctrl+C) ")
+            tokio::select! {
+                _ = sigterm.recv() => println!("\n[OS] Received SIGTERM from Kubernetes"),
+                _ = sigint.recv() => println!("\n[OS] Received SIGINT (Ctrl+C) ")
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+            println!("\n[OS] Received Ctrl+C");
         }
 
         println!("[SYSTEM] Initiating Sovereign Shutdown Sequence...");
