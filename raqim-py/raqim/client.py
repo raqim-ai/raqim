@@ -157,7 +157,7 @@ class RaqimClient:
             self._zenoh_session.declare_subscriber(control_topic, self._handle_os_control_override)
         except Exception as e: 
             print(f"[BOOT WARN] Zenoh control plane unavailable: {e}. Running in local-only mode.")
-
+    
     def register_eviction_hook(self, callback: Callable[[str], None]): 
         """
             Registers the developer callback for Aegis FORCE_CONTEXT_EVICTION events.
@@ -182,32 +182,50 @@ class RaqimClient:
         except Exception as e: 
             print(f"[OS ERROR] Failed to process control overrides: {e} ", e)
 
-# LOW-LEVEL DATA PLANE & RAG QUERIES
-    async def commit_thought(self, intent_path: str, text: str, agent_hex: Optional[str] = None) -> None:
-        """Shoots signed zero-copy rkyv bytes over raw TCP to Raqim's WAL Engine"""
-        
+    # LOW-LEVEL DATA PLANE & RAG QUERIES
+    async def commit_thought(self, *args, **kwargs) -> int:
+        """
+        Shoots signed zero-copy rkyv bytes over raw TCP and awaits 
+        a closed-loop 20-byte server ACK containing the 128-bit TxID.
+        Supports:
+          commit_thought(intent_path, text)
+          commit_thought(agent_hex, intent_path, text)
+          commit_thought(agent_hex=..., intent_path=..., text=...)
+        """
+        agent_hex = kwargs.get("agent_hex")
+        intent_path = kwargs.get("intent_path")
+        text = kwargs.get("text")
+
+        if len(args) == 3:
+            agent_hex, intent_path, text = args
+        elif len(args) == 2:
+            intent_path, text = args
+        elif len(args) == 1:
+            intent_path = args[0]
+
         target_agent = agent_hex or self.agent_hex
-        
-        # The Rust PyO3 extension handles the blazing-fast serialization and signing
+        if not intent_path or text is None:
+            raise ValueError("Both 'intent_path' and 'text' are required for commit_thought.")
+
         raw_payload = self.crypto_core.generate_tcp_payload(target_agent, intent_path, text)
-        
+
         reader, writer = await asyncio.open_connection(*self.tcp_addr)
-        try: 
+        try:
             writer.write(raw_payload)
             await writer.drain()
-            
-            # Closed-loop server ACK
+
+            # Closed-loop server ACK: [4B Status] + [16B TxID Little-Endian]
             ack_bytes = await reader.readexactly(20)
             status = int.from_bytes(ack_bytes[0:4], "little")
-            
+
             if status != 0:
-                raise PermissionError(f"[AEGIS REJECTION]   Frame rejected by kernel (Status: {status})")
-            
-            tx_id = int.from_bytes(ack_bytes[4:20], "little")
-            return tx_id
+                raise PermissionError(f"[AEGIS REJECTION] Frame rejected by kernel (Status: {status})")
+
+            return int.from_bytes(ack_bytes[4:20], "little")
         finally:
             writer.close()
             await writer.wait_closed()
+    
     
     @contextlib.asynccontextmanager
     async def open_stream(self): 
