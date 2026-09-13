@@ -1276,6 +1276,7 @@ pub async fn dashboard_cards_endpoint(
         active_agents: active_count,
         vault_capacity: cold_count as usize,
         hot_thoughts_count: hot_batches,
+        hot_thoughts_count: hot_count,
         cold_thoughts_count: cold_count,
         latest_tx_hex: latest_tx_hex,
         embedder_dims: state.lance.dims,
