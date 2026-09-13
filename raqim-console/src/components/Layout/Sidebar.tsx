@@ -3,254 +3,26 @@
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import styled, { keyframes } from 'styled-components';
 import { motion } from 'framer-motion';
 import { useSwarmStore } from '../../lib/store/useSwarmStore';
 import { fetchClusterDiagnostics } from '../../actions/admin';
-import { History, LayoutDashboard, Network, Shield, Vault } from 'lucide-react';
-
-const blinkHeartbeat = keyframes`
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.3; transform: scale(0.85); }
-`;
-
-const SidebarContainer = styled.aside`
-  width: 256px;
-  height: 100%;
-  border-right: 1px solid #1f1f23;
-  background-color: #09090b;
-  display: flex;
-  flex-direction: column;
-  box-sizing: border-box;
-  flex-shrink: 0;
-  z-index: 40;
-`;
-
-const LogoSection = styled.div`
-  padding: 24px 20px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  border-bottom: 1px solid #1f1f23;
-  background-color: #020202;
-  box-sizing: border-box;
-`;
-
-const LogoWrapper = styled.div`
-  width: 32px;
-  height: 32px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-`;
-
-const BrandName = styled.div`
-  display: flex;
-  flex-direction: column;
-`;
-
-const BrandTitle = styled.span`
-  font-size: 15px;
-  font-weight: 900;
-  letter-spacing: 0.2em;
-  color: #ffffff;
-  font-family: monospace;
-`;
-
-const BrandSubtitle = styled.span`
-  font-size: 9px;
-  color: #00f3ff;
-  letter-spacing: 0.15em;
-  text-transform: uppercase;
-  font-family: monospace;
-`;
-
-const ProfileSection = styled.div`
-  padding: 16px 20px;
-  border-bottom: 1px solid #1f1f23;
-  background-color: #0c0c0e;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  box-sizing: border-box;
-`;
-
-const ProfileHeader = styled.div`
-  font-size: 9px;
-  color: #71717a;
-  text-transform: uppercase;
-  letter-spacing: 0.18em;
-  font-weight: bold;
-`;
-
-const OperatorDetails = styled.div`
-  display: flex;
-  align-items: center;
-  gap: 12px;
-`;
-
-const TerminalAvatar = styled.div<{ $isActive: boolean }>`
-  width: 32px;
-  height: 32px;
-  border: 1px solid ${props => (props.$isActive ? '#00f3ff' : '#ff003c')};
-  background-color: #09090b;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  position: relative;
-  box-shadow: ${props =>
-    props.$isActive
-      ? '0 0 10px rgba(0, 243, 255, 0.2)'
-      : '0 0 8px rgba(255, 0, 60, 0.15)'};
-
-  &::after {
-    content: '';
-    position: absolute;
-    inset: -3px;
-    border: 1px dashed
-      ${props =>
-        props.$isActive ? 'rgba(0, 243, 255, 0.3)' : 'rgba(255, 0, 60, 0.2)'};
-  }
-`;
-
-const AvatarText = styled.span<{ $isActive: boolean }>`
-  font-size: 11px;
-  color: ${props => (props.$isActive ? '#00f3ff' : '#ff003c')};
-  font-weight: bold;
-`;
-
-const OperatorMeta = styled.div`
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  overflow: hidden;
-`;
-
-const OperatorId = styled.span`
-  font-size: 11px;
-  font-weight: bold;
-  color: #ffffff;
-  text-overflow: ellipsis;
-  overflow: hidden;
-  white-space: nowrap;
-`;
-
-const OperatorStatus = styled.div`
-  display: flex;
-  align-items: center;
-  gap: 6px;
-`;
-
-const HeartbeatDot = styled.span<{ $isActive: boolean }>`
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background-color: ${props => (props.$isActive ? '#10b981' : '#ff003c')};
-  box-shadow: 0 0 6px ${props => (props.$isActive ? '#10b981' : '#ff003c')};
-  animation: ${blinkHeartbeat} 1.5s infinite;
-`;
-
-const StatusText = styled.span<{ $isActive: boolean }>`
-  font-size: 9px;
-  color: ${props => (props.$isActive ? '#a1a1aa' : '#ff003c')};
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  font-weight: bold;
-`;
-
-const NavList = styled.nav`
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 16px;
-  flex: 1;
-  overflow-y: auto;
-  box-sizing: border-box;
-
-  &::-webkit-scrollbar {
-    width: 4px;
-  }
-  &::-webkit-scrollbar-track {
-    background: transparent;
-  }
-  &::-webkit-scrollbar-thumb {
-    background: #1f1f23;
-  }
-`;
-
-const NavLink = styled(Link)<{ $isActive: boolean }>`
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 14px;
-  color: ${props => (props.$isActive ? '#ffffff' : '#71717a')};
-  text-decoration: none;
-  font-size: 11px;
-  font-weight: ${props => (props.$isActive ? 'bold' : 'normal')};
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  transition: color 0.2s;
-  box-sizing: border-box;
-
-  &:hover {
-    color: #ffffff;
-  }
-`;
-
-const ActiveLine = styled(motion.div)`
-  position: absolute;
-  left: 0;
-  top: 12%;
-  height: 76%;
-  width: 2px;
-  background-color: #00f3ff;
-  box-shadow: 0 0 8px #00f3ff;
-`;
-
-const BottomSection = styled.div`
-  padding: 16px 20px;
-  border-top: 1px solid #1f1f23;
-  background-color: #020202;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  box-sizing: border-box;
-`;
-
-const DiagnosticGroup = styled.div`
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-`;
-
-const DiagnosticRow = styled.div`
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 9px;
-  font-family: monospace;
-`;
-
-const DiagnosticLabel = styled.span`
-  color: #52525b;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-`;
-
-const DiagnosticValue = styled.span<{ $alert?: boolean; $accent?: boolean }>`
-  color: ${props =>
-    props.$alert ? '#ef4444' : props.$accent ? '#00f3ff' : '#a1a1aa'};
-  font-weight: bold;
-`;
+import {
+  History,
+  LayoutDashboard,
+  Network,
+  Shield,
+  Vault,
+  Server,
+  Copy,
+  Check,
+} from 'lucide-react';
 
 export function Sidebar() {
   const pathname = usePathname();
-  const daemonOnline = useSwarmStore(state => state.daemonOnline);
-  const currentTps = useSwarmStore(state => state.currentTps);
-  const quarantinedAgents = useSwarmStore(state => state.quarantinedAgents);
-  const activeTopology = useSwarmStore(state => state.activeTopology);
+  const daemonOnline = useSwarmStore((state) => state.daemonOnline);
+  const currentTps = useSwarmStore((state) => state.currentTps);
+  const quarantinedAgents = useSwarmStore((state) => state.quarantinedAgents);
+  const activeTopology = useSwarmStore((state) => state.activeTopology);
 
   const [clusterInfo, setClusterInfo] = useState<{
     node_id: string;
@@ -258,13 +30,32 @@ export function Sidebar() {
     buffer_load: number;
   } | null>(null);
 
+  const [copied, setCopied] = useState(false);
+
   useEffect(() => {
-    fetchClusterDiagnostics().then(data => {
+    fetchClusterDiagnostics().then((data) => {
       if (data) {
         setClusterInfo(data);
       }
     });
   }, [daemonOnline]);
+
+  const rawNodeId = clusterInfo?.node_id || 'node_01_alpha';
+  const displayNodeId =
+    rawNodeId.length > 18
+      ? `${rawNodeId.slice(0, 8)}...${rawNodeId.slice(-4)}`
+      : rawNodeId;
+
+  const handleCopyNodeId = async () => {
+    if (!rawNodeId) return;
+    try {
+      await navigator.clipboard.writeText(rawNodeId);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Ignore clipboard write failure
+    }
+  };
 
   const navLinks = [
     { href: '/', label: 'Dashboard', icon: LayoutDashboard },
@@ -275,69 +66,218 @@ export function Sidebar() {
   ];
 
   return (
-    <SidebarContainer>
-      <LogoSection>
-        <LogoWrapper>
+    <aside className="w-64 h-full border-r border-zinc-800/80 bg-zinc-950 flex flex-col shrink-0 z-40 select-none">
+      {/* ── Brand & Cryptographic Monogram Emblem ── */}
+      <div className="p-4 border-b border-zinc-800/80 bg-zinc-950 flex items-center gap-3 shrink-0">
+        <div className="relative w-10 h-10 shrink-0 rounded-lg bg-zinc-900/90 border border-zinc-700/60 p-1 flex items-center justify-center shadow-[0_0_15px_rgba(34,211,238,0.12)] ring-1 ring-white/5">
           <svg
-            width="44"
-            height="44"
-            viewBox="0 0 100 100"
+            viewBox="0 0 40 40"
             fill="none"
+            className="w-full h-full"
             xmlns="http://www.w3.org/2000/svg"
           >
-            <rect
-              x="5"
-              y="5"
-              width="90"
-              height="90"
-              stroke="#00f3ff"
-              strokeWidth="2"
-              fill="#09090b"
+            <defs>
+              <linearGradient id="raqimStroke" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stopColor="#22d3ee" />
+                <stop offset="50%" stopColor="#38bdf8" />
+                <stop offset="100%" stopColor="#10b981" />
+              </linearGradient>
+              <linearGradient id="hexBorder" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stopColor="#38bdf8" stopOpacity="0.7" />
+                <stop offset="100%" stopColor="#059669" stopOpacity="0.4" />
+              </linearGradient>
+              <linearGradient
+                id="facetTop"
+                x1="20"
+                y1="3"
+                x2="20"
+                y2="20"
+                gradientUnits="userSpaceOnUse"
+              >
+                <stop offset="0%" stopColor="#1e293b" stopOpacity="0.9" />
+                <stop offset="100%" stopColor="#0f172a" stopOpacity="0.6" />
+              </linearGradient>
+              <linearGradient
+                id="facetLeft"
+                x1="5"
+                y1="20"
+                x2="20"
+                y2="20"
+                gradientUnits="userSpaceOnUse"
+              >
+                <stop offset="0%" stopColor="#090d14" stopOpacity="0.8" />
+                <stop offset="100%" stopColor="#020617" stopOpacity="0.9" />
+              </linearGradient>
+              <linearGradient
+                id="facetRight"
+                x1="20"
+                y1="20"
+                x2="35"
+                y2="20"
+                gradientUnits="userSpaceOnUse"
+              >
+                <stop offset="0%" stopColor="#0f172a" stopOpacity="0.8" />
+                <stop offset="100%" stopColor="#020617" stopOpacity="0.95" />
+              </linearGradient>
+              <radialGradient id="coreGlow" cx="50%" cy="50%" r="50%">
+                <stop offset="0%" stopColor="#22d3ee" stopOpacity="0.25" />
+                <stop offset="100%" stopColor="#22d3ee" stopOpacity="0" />
+              </radialGradient>
+            </defs>
+
+            {/* Core Ambient Glow */}
+            <circle cx="20" cy="20" r="14" fill="url(#coreGlow)" />
+
+            {/* Outer Isometric Inscribed Tablet / Merkle Shield */}
+            <path
+              d="M20 3.5L35 11.5V28.5L20 36.5L5 28.5V11.5Z"
+              stroke="url(#hexBorder)"
+              strokeWidth="1.2"
+              strokeLinejoin="round"
             />
             <path
-              d="M25 75V25H55C66.0457 25 75 33.9543 75 45C75 56.0457 66.0457 65 55 65H25"
-              stroke="#ffffff"
-              strokeWidth="6"
-              strokeLinecap="square"
+              d="M20 3.5L35 11.5L20 20L5 11.5Z"
+              fill="url(#facetTop)"
+              stroke="#334155"
+              strokeWidth="0.5"
             />
             <path
-              d="M50 65L75 75"
-              stroke="#00f3ff"
-              strokeWidth="6"
-              strokeLinecap="square"
+              d="M5 11.5L20 20V36.5L5 28.5Z"
+              fill="url(#facetLeft)"
+              stroke="#334155"
+              strokeWidth="0.5"
             />
-            <circle cx="50" cy="45" r="4" fill="#00f3ff" />
+            <path
+              d="M35 11.5L20 20V36.5L35 28.5Z"
+              fill="url(#facetRight)"
+              stroke="#334155"
+              strokeWidth="0.5"
+            />
+
+            {/* Inscribed Merkle Monogram 'R' */}
+            {/* Vertical Spine */}
+            <path
+              d="M13 10.5V29.5"
+              stroke="url(#raqimStroke)"
+              strokeWidth="2.2"
+              strokeLinecap="round"
+            />
+            {/* Upper Vault Loop */}
+            <path
+              d="M13 10.5H21C24.5 10.5 26.5 12.5 26.5 15.5C26.5 18.5 24.5 20.5 21 20.5H13"
+              stroke="url(#raqimStroke)"
+              strokeWidth="2.2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+            {/* Lower Merkle DAG Branch Kick */}
+            <path
+              d="M18 20.5L26.5 29.5"
+              stroke="url(#raqimStroke)"
+              strokeWidth="2.2"
+              strokeLinecap="round"
+            />
+
+            {/* Cryptographic Verification Nodes */}
+            <circle cx="13" cy="10.5" r="1.6" fill="#22d3ee" />
+            <circle cx="26.5" cy="15.5" r="1.6" fill="#38bdf8" />
+            <circle cx="13" cy="20.5" r="1.6" fill="#22d3ee" />
+            <circle cx="13" cy="29.5" r="1.6" fill="#10b981" />
+            <circle cx="26.5" cy="29.5" r="1.6" fill="#34d399" />
+
+            {/* Inscribed Core Seed Glyph */}
+            <polygon points="19,14 21,15.5 19,17 17,15.5" fill="#38bdf8" />
           </svg>
-        </LogoWrapper>
-        <BrandName>
-          <BrandTitle>RAQIM</BrandTitle>
-          <BrandSubtitle>Console // Core</BrandSubtitle>
-        </BrandName>
-      </LogoSection>
+        </div>
 
-      <ProfileSection>
-        <ProfileHeader>Local Control Plane</ProfileHeader>
-        <OperatorDetails>
-          <TerminalAvatar $isActive={daemonOnline}>
-            <AvatarText $isActive={daemonOnline}>
-              {daemonOnline ? 'OK' : 'OFF'}
-            </AvatarText>
-          </TerminalAvatar>
-          <OperatorMeta>
-            <OperatorId>
-              {clusterInfo?.node_id ? `NODE: ${clusterInfo.node_id.slice(0, 10)}` : 'DEV_ENGINE_01'}
-            </OperatorId>
-            <OperatorStatus>
-              <HeartbeatDot $isActive={daemonOnline} />
-              <StatusText $isActive={daemonOnline}>
-                {daemonOnline ? 'LIVE DAEMON' : 'DISCONNECTED'}
-              </StatusText>
-            </OperatorStatus>
-          </OperatorMeta>
-        </OperatorDetails>
-      </ProfileSection>
+        {/* Brand Typography */}
+        <div className="flex flex-col min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="font-headline font-black text-sm tracking-[0.22em] text-white uppercase leading-none">
+              RAQIM
+            </span>
+            <span className="font-mono text-[9px] font-bold tracking-widest px-1.5 py-0.5 rounded bg-cyan-500/10 text-cyan-400 border border-cyan-500/25 leading-none">
+              CORE
+            </span>
+          </div>
+          <span className="font-mono text-[9px] tracking-[0.16em] text-zinc-500 uppercase mt-1 leading-none">
+            SOVEREIGN DATA PLANE
+          </span>
+        </div>
+      </div>
 
-      <NavList>
+      {/* ── Refined Control Plane / Node Status Card ── */}
+      <div className="p-3 border-b border-zinc-800/80 bg-zinc-900/30 shrink-0">
+        <div className="p-2.5 rounded-lg bg-zinc-900/80 border border-zinc-800/80 shadow-sm transition-all hover:border-zinc-700/60">
+          {/* Header Row: Label + Live Status Badge */}
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <div className="flex items-center gap-1.5">
+              <Server className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
+              <span className="font-mono text-[9px] font-semibold text-zinc-400 uppercase tracking-widest">
+                CONTROL PLANE
+              </span>
+            </div>
+
+            {/* Live Status Badge */}
+            <div
+              className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border text-[9px] font-mono font-bold tracking-wider ${
+                daemonOnline
+                  ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+                  : 'bg-rose-500/10 border-rose-500/30 text-rose-400'
+              }`}
+            >
+              <span className="relative flex h-1.5 w-1.5">
+                {daemonOnline && (
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                )}
+                <span
+                  className={`relative inline-flex rounded-full h-1.5 w-1.5 ${
+                    daemonOnline ? 'bg-emerald-400' : 'bg-rose-400'
+                  }`}
+                />
+              </span>
+              <span>{daemonOnline ? 'ONLINE' : 'OFFLINE'}</span>
+            </div>
+          </div>
+
+          {/* Node ID Row with One-Click Copy */}
+          <div className="flex items-center justify-between gap-1.5 bg-zinc-950/70 rounded px-2 py-1.5 border border-zinc-800/60">
+            <div className="flex flex-col min-w-0">
+              <span className="font-mono text-[8px] text-zinc-500 uppercase tracking-wider leading-none mb-1">
+                ACTIVE NODE
+              </span>
+              <span
+                className="font-mono text-[11px] font-semibold text-zinc-200 truncate leading-none"
+                title={rawNodeId}
+              >
+                {displayNodeId}
+              </span>
+            </div>
+            <button
+              onClick={handleCopyNodeId}
+              className="shrink-0 p-1 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60 rounded transition-colors"
+              title="Copy Node ID"
+            >
+              {copied ? (
+                <Check className="w-3 h-3 text-emerald-400" />
+              ) : (
+                <Copy className="w-3 h-3" />
+              )}
+            </button>
+          </div>
+
+          {/* Transport Details Footer */}
+          <div className="flex items-center justify-between mt-2 pt-2 border-t border-zinc-800/50 font-mono text-[9px] text-zinc-500">
+            <span className="tracking-wider">127.0.0.1:8081</span>
+            <span className="text-[8px] font-semibold px-1 py-0.5 rounded bg-zinc-800 text-zinc-400 tracking-wider">
+              ZERO-TRUST
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Navigation Links (Preserved Motion & Look) ── */}
+      <nav className="flex flex-col gap-1 p-3 flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-zinc-800 scrollbar-track-transparent">
         {navLinks.map((link) => {
           const isActive =
             pathname === link.href ||
@@ -347,44 +287,70 @@ export function Sidebar() {
           const Icon = link.icon;
 
           return (
-            <NavLink key={link.href} href={link.href} $isActive={isActive}>
+            <Link
+              key={link.href}
+              href={link.href}
+              className={`relative flex items-center gap-3 px-3 py-2.5 rounded-md font-mono text-xs uppercase tracking-wider transition-all duration-150 ${
+                isActive
+                  ? 'text-white font-semibold bg-zinc-900/60'
+                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/30 font-normal'
+              }`}
+            >
               {isActive && (
-                <ActiveLine
+                <motion.div
                   layoutId="activeNavLine"
                   transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+                  className="absolute left-0 top-1.5 bottom-1.5 w-0.5 bg-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.8)] rounded-r"
                 />
               )}
-              <Icon className={`w-4 h-4 ${isActive ? 'text-cyan-400' : 'text-zinc-500'}`} />
-              <span>{link.label}</span>
-            </NavLink>
+              <Icon
+                className={`w-4 h-4 shrink-0 transition-colors ${
+                  isActive ? 'text-cyan-400' : 'text-zinc-500 group-hover:text-zinc-300'
+                }`}
+              />
+              <span className="truncate">{link.label}</span>
+            </Link>
           );
         })}
-      </NavList>
+      </nav>
 
-      <BottomSection>
-        <DiagnosticGroup>
-          <DiagnosticRow>
-            <DiagnosticLabel>DAEMON</DiagnosticLabel>
-            <DiagnosticValue $accent={daemonOnline} $alert={!daemonOnline}>
+      {/* ── Diagnostics Footer ── */}
+      <div className="p-4 border-t border-zinc-800/80 bg-zinc-950 shrink-0">
+        <div className="flex flex-col gap-2">
+          <div className="flex justify-between items-center font-mono text-[9px]">
+            <span className="text-zinc-500 uppercase tracking-widest">DAEMON</span>
+            <span
+              className={`font-semibold tracking-wider ${
+                daemonOnline ? 'text-emerald-400' : 'text-rose-500'
+              }`}
+            >
               {daemonOnline ? 'CONNECTED' : 'DISCONNECTED'}
-            </DiagnosticValue>
-          </DiagnosticRow>
-          <DiagnosticRow>
-            <DiagnosticLabel>THROUGHPUT</DiagnosticLabel>
-            <DiagnosticValue>{currentTps} TPS</DiagnosticValue>
-          </DiagnosticRow>
-          <DiagnosticRow>
-            <DiagnosticLabel>SHARDS</DiagnosticLabel>
-            <DiagnosticValue>{activeTopology.length} ACTIVE</DiagnosticValue>
-          </DiagnosticRow>
-          <DiagnosticRow>
-            <DiagnosticLabel>QUARANTINE</DiagnosticLabel>
-            <DiagnosticValue $alert={quarantinedAgents.length > 0}>
+            </span>
+          </div>
+          <div className="flex justify-between items-center font-mono text-[9px]">
+            <span className="text-zinc-500 uppercase tracking-widest">THROUGHPUT</span>
+            <span className="font-semibold text-zinc-300 tracking-wider">
+              {currentTps} TPS
+            </span>
+          </div>
+          <div className="flex justify-between items-center font-mono text-[9px]">
+            <span className="text-zinc-500 uppercase tracking-widest">SHARDS</span>
+            <span className="font-semibold text-zinc-300 tracking-wider">
+              {activeTopology.length} ACTIVE
+            </span>
+          </div>
+          <div className="flex justify-between items-center font-mono text-[9px]">
+            <span className="text-zinc-500 uppercase tracking-widest">QUARANTINE</span>
+            <span
+              className={`font-semibold tracking-wider ${
+                quarantinedAgents.length > 0 ? 'text-rose-500' : 'text-zinc-300'
+              }`}
+            >
               {quarantinedAgents.length} BLOCKED
-            </DiagnosticValue>
-          </DiagnosticRow>
-        </DiagnosticGroup>
-      </BottomSection>
-    </SidebarContainer>
+            </span>
+          </div>
+        </div>
+      </div>
+    </aside>
   );
 }

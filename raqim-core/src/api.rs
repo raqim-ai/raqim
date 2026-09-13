@@ -1262,7 +1262,7 @@ pub async fn dashboard_cards_endpoint(
         .count();
 
     let cold_count = state.lance.get_total_vector_count().await.unwrap_or(0) as u64;
-    let hot_batches = state.wal.get_pending_count().await as u64;
+    let _hot_batches = state.wal.get_pending_count().await as u64;
 
     // Hot buffer leaves + cold storage
     let hot_count = state.axon.get_total_leaves() as u64;
@@ -1275,7 +1275,6 @@ pub async fn dashboard_cards_endpoint(
         global_transactions: total_lifetime_txn,
         active_agents: active_count,
         vault_capacity: cold_count as usize,
-        hot_thoughts_count: hot_batches,
         hot_thoughts_count: hot_count,
         cold_thoughts_count: cold_count,
         latest_tx_hex: latest_tx_hex,
