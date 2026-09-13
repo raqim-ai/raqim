@@ -93,7 +93,7 @@ async def main():
         for memory in COLD_HISTORICAL_MEMORIES:
             tx_id = await stream(intent_path="/rqm_finance/history", text=memory)
             print(f"  📥 Historical frame committed -> TxID: 0x{tx_id:032x}")
-
+      
     # Step 2: Trigger Manual WAL Rotation & LanceDB 2PC Compaction
     print("\n[STEP 2] Triggering 2PC WAL Compactor via Admin API...")
     async with httpx.AsyncClient(timeout=10.0) as http:
@@ -101,9 +101,9 @@ async def main():
         print(f"  ⚡ Compactor trigger status: {res.status_code} ({res.json().get('success')})")
 
     # Give the background OS thread a moment to complete Parquet indexing
-    print("  ⏳ Waiting 2.5s for LanceDB background indexing & vector crystallization...")
-    await asyncio.sleep(2.5)
-
+    print("  ⏳ Waiting 5s for LanceDB background indexing & vector crystallization...")
+    await asyncio.sleep(5)
+    
     # Step 3: Ingest Batch 2 (Remains in Hot Vector Buffer)
     print("\n[STEP 3] Ingesting Batch 2: Real-time In-Flight Threat Thoughts...")
     async with agent.open_stream() as stream:
