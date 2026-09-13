@@ -200,7 +200,7 @@ class RaqimClient:
             ack_bytes = await reader.readexactly(20)
             status = int.from_bytes(ack_bytes[0:4], "little")
             
-            if status != 0: 
+            if status != 0:
                 raise PermissionError(f"[AEGIS REJECTION]   Frame rejected by kernel (Status: {status})")
             
             tx_id = int.from_bytes(ack_bytes[4:20], "little")

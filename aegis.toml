@@ -7,19 +7,19 @@ max_tps = 1_000_000
 burst_capacity = 500_000
 
 [groups.finance_worker]
-allowed_namespaces = ["/rqm_finance/*", "/audit/*"]
-blocked_namespaces = ["/admin/*", "/system/*"]
-max_tps = 1000
-burst_capacity = 100
-
-[groups.untrusted_agent]
-allowed_namespaces = ["/sandbox/temp/*", "/system/*"]
-blocked_namespaces = ["*"]
-max_tps = 10
-burst_capacity = 5
+allowed_namespaces = ["/system/*", "/rqm_finance/*", "/finance/*",  "/audit/*"]
+blocked_namespaces = ["/finance/restricted/*", "/admin/*"]
+max_tps = 50_000 
+burst_capacity = 100_000 
 
 [groups.analyst_group]
 allowed_namespaces = ["/system/*", "/rqm_finance/*", "/finance/*",  "/audit/*"]
 blocked_namespaces = ["/finance/restricted/*", "/admin/*"]
 max_tps = 50_000 
 burst_capacity = 100_000 
+
+[groups.untrusted_agent]
+allowed_namespaces = ["/sandbox/temp/*", "/system/*"]
+blocked_namespaces = ["*"]
+max_tps = 10
+burst_capacity = 5
