@@ -11,6 +11,10 @@
 
 ---
 
+![Raqim Hero Split-Terminal Demo](assets/demo.gif)
+
+---
+
 ## What Raqim Is
 
 When autonomous AI agents make tool calls, execute financial transactions, mutate databases, and stream reasoning in production, they cannot be governed by disposable logs or passive HTTP tracing. If an agent hallucinates, loops infinitely, leaks sensitive records, or attempts unauthorized operations, standard observability tools merely record the disaster after it occurs.
