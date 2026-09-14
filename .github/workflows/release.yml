@@ -11,6 +11,10 @@ permissions:
   packages: write
   id-token: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # =========================================================================
   # JOB 1: Cross-Platform Native Binaries (raqim-core, raqim-cli, raqim-mcp)
