@@ -11,9 +11,6 @@ permissions:
   packages: write
   id-token: write
 
-env:
-  ACTIONS_RUNNER_FORCE_ACTIONS_NODE_VERSION: node20
-
 jobs:
   # =========================================================================
   # JOB 1: Cross-Platform Native Binaries (raqim-core, raqim-cli, raqim-mcp)
@@ -58,6 +55,16 @@ jobs:
 
       - name: Checkout Source Code
         uses: actions/checkout@v4
+
+      - name: Configure Strawberry Perl (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          if [ -d "/c/Strawberry/perl/bin" ]; then
+            echo "/c/Strawberry/perl/bin" >> $GITHUB_PATH
+          elif [ -d "C:/Strawberry/perl/bin" ]; then
+            echo "C:/Strawberry/perl/bin" >> $GITHUB_PATH
+          fi
 
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -281,11 +288,19 @@ jobs:
           sccache: 'true'
           manylinux: off
 
+      - name: Repair Linux Wheel with Auditwheel
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          pip install auditwheel
+          auditwheel repair dist/*linux_x86_64.whl -w dist/
+          rm -f dist/*linux_x86_64.whl
+
       - name: Upload Wheels to Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.os }}
-          path: dist
+          path: dist/*.whl
 
   release-pypi:
     name: Publish Wheels to PyPI
@@ -300,9 +315,8 @@ jobs:
           path: dist
 
       - name: Publish Package to PyPI
-        uses: PyO3/maturin-action@v1
-        env:
-          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          command: upload
-          args: --skip-existing dist/*
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: dist/
+          skip-existing: true
