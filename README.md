@@ -115,18 +115,23 @@ Throughput figures reflect **Synchronous Closed-Loop Acknowledgment (ACK)**: eve
 * **Workload:** 500,000 thoughts distributed across 50 partitioned agent namespaces
 * **Concurrency:** 50 simultaneous non-blocking TCP socket streams
 
-### Latency Distribution & Throughput Audit
-| Metric | Production Result | Verification Standard |
+### Latency Distribution & Resource Footprint Audit
+| Metric | Production Result | Technical Verification Standard |
 | :--- | :--- | :--- |
 | **Sustained Throughput** | **23,355.21 TPS** | Closed-loop 20-byte server ACK confirmation |
-| **Minimum Latency** | **132 µs (0.132 ms)** | Socket transport + memory validation |
-| **P50 Latency (Median)** | **1,853 µs (1.853 ms)** | Aligned to the 2ms physical NVMe group commit interval |
-| **P90 Latency** | **3,411 µs (3.411 ms)** | Tail distribution under 50-worker concurrent saturation |
-| **P99 Latency (Tail)** | **5,935 µs (5.935 ms)** | Sub-6ms tail latency under continuous load |
-| **P99.9 Latency** | **11,820 µs (11.82 ms)** | Extreme tail under compaction pressure |
-| **Deterministic Replay** | **< 1.0 ms / $0.00 Cost** | In-memory BLAKE3 signature lookup |
-| **Idle Memory (RSS)** | **45 MB** | Memory footprint post-rehydration |
-| **Peak Memory (500k Ops)** | **1,571 MB** | Resident memory ceiling across 500,000 active operations |
+| **Minimum Latency** | **132 µs (0.132 ms)** | Raw TCP socket transport + in-memory validation |
+| **P50 Latency (Median)** | **1,853 µs (1.853 ms)** | Physically synchronized to 2ms NVMe group-commit interval |
+| **P90 Latency** | **3,411 µs (3.411 ms)** | Tail distribution under 50-worker concurrent socket saturation |
+| **P99 Latency (Tail)** | **5,935 µs (5.935 ms)** | Sub-6ms tail latency under continuous high-velocity ingestion |
+| **P99.9 Latency** | **11,820 µs (11.82 ms)** | Extreme tail during background 2PC LanceDB compaction |
+| **Deterministic Replay** | **< 1.0 ms / $0.00 Cost** | In-memory BLAKE3 signature lookup from WAL effect cache |
+| **Idle Memory (Default / Native BGE)** | **~520 MB – 580 MB** | Built-in local `BGE-base-en-v1.5` ONNX neural model loaded into RAM |
+| **Idle Memory (Bare Microkernel)** | **~45 MB – 60 MB** | Core WAL + Aegis + Merkle DAG (using remote or mock embeddings) |
+| **Peak Memory (500k Ops Siege)** | **~1,570 MB – 1,750 MB** | Resident ceiling during active 500k siege (CRDT shards + vector buffers) |
+| **`raqim-core` Daemon Binary** | **~130 MB** | Self-contained with LanceDB, DataFusion, ONNX Runtime, and OpenSSL |
+| **`raqim-cli` Admin Binary** | **~7.3 MB** | Lightweight operational CLI, key forge, and quarantine management |
+| **`raqim-mcp` Gateway Binary** | **~32 MB** | Standalone Model Context Protocol bridge with WebSocket / SSE |
+| **Production Container Image** | **~260 MB** | Hardened Debian Bookworm slim runtime with all binaries & CA roots |
 
 ---
 
@@ -461,19 +466,32 @@ synapse/
 
 ## Early Access Reality & Honest Disclaimers (v0.1.0)
 
-Raqim is infrastructure-grade software under active development. While the cryptographic primitives (BLAKE3 Merkle DAG, Ed25519 PKI, and WAL group-commit persistence) have been empirically verified under heavy siege, v0.1.0 contains operational rough edges:
+> **"If it can break, it will break — and we want to know about it."**
 
-- **Next.js Console Hydration:** Under sustained high-velocity ingestion (>10,000 TPS), the browser SSE consumer in `raqim-console` may experience UI frame drops or buffer backpressure. Real-time metric cards poll every 2 seconds.
+Raqim is sovereign infrastructure-grade software under active, relentless development. While the core cryptographic primitives (BLAKE3 domain-separated Merkle trees, Ed25519 asymmetric PKI, crash-safe NVMe Write-Ahead Logging, and Loro CRDT convergence) have been empirically verified under heavy automated siege, **v0.1.0 is an Early Access Developer Preview**. 
 
-- **Cold Storage Compaction Timing:** The 2-Phase Commit (2PC) compactor runs as a background task. If you query LanceDB immediately following an uncompacted WAL burst, recent records resolve from the in-memory hot vector buffer rather than on-disk Parquet tables until compaction completes.
+We hold our engineering to senior enterprise standards, which means total honesty about current operational realities and edge cases:
 
-- **Single-Node Focus:** v0.1.0 optimizes local-first single-node deployments (Docker / bare-metal daemon). The Zenoh mesh bridge handles out-of-band quarantine distribution, but multi-cluster consensus is slated for v0.2.0.
+### 1. Memory Expectations (~520 MB vs ~45 MB)
+- **The Default Reality:** When booted with default settings, `raqim-core` initializes the native `BGE-base-en-v1.5` neural embedding engine. Because ONNX Runtime memory-maps the 768-dimensional transformer weights, tokenizers, and matrix buffers directly into resident memory for sub-millisecond local dense retrieval, **the daemon idles at ~520 MB – 580 MB RSS**.
+- **Constrained / Microkernel Deployments:** If you are deploying on memory-constrained hardware (e.g., 512MB or 1GB RAM cloud instances), do **not** run the default native embedding engine. Instead, compile with `--no-default-features --features mock-embedding` or configure remote embedding endpoints (OpenAI, Voyage, or local Ollama) in `raqim.toml`. In this microkernel mode, Raqim idles at **~45 MB – 60 MB**.
 
-If you encounter unexpected panics, serialization inconsistencies, or UI anomalies, please open a GitHub Issue or reach out directly to the maintainer:
+### 2. Recommended Hardware Requirements
+- **Development / Pilot:** Dual-core x86_64 or ARM64 CPU with AVX/NEON SIMD support, **minimum 2 GB RAM (4 GB recommended)**, and SSD storage.
+- **Production High-Throughput (>10,000 TPS):** 4+ CPU cores, 8 GB+ RAM, and dedicated NVMe PCIe 3.0/4.0 SSD for optimal 2ms physical group-commit throughput.
 
-- **Maintainer Contact:** Muhammad (`dprimemuhammad@gmail.com`)
+### 3. Early Access Rough Edges & Things That Might Break
+- **Next.js Console SSE Backpressure:** Under sustained high-velocity throughput (>10,000 TPS), browser-side Server-Sent Events (SSE) in `raqim-console` may experience event lag or UI frame drops. The console polls snapshot metrics every 2 seconds to alleviate connection strain.
+- **2PC Compaction Lag:** Historical WAL frames are compacted into LanceDB Parquet tables by an asynchronous background worker. If you query LanceDB immediately following an uncompacted burst, queries are served from the in-memory hot vector buffer until the 2-Phase Commit finishes.
+- **Evolving Wire & Storage Formats:** Between `v0.1.x` and `v1.0.0`, minor breaking changes to `IngressEnvelope` serialization layouts or internal WAL headers may occur. When upgrades require migration, migration utilities will be documented in release notes.
+- **Single-Node Focus:** v0.1.0 is designed for rock-solid single-node or containerized deployments. Out-of-band quarantine is distributed via Zenoh, but multi-master distributed Byzantine consensus across nodes is planned for v0.2.0+.
 
-- **Bug Reports:** [github.com/raqim-ai/raqim/issues](https://github.com/raqim-ai/raqim/issues)
+### 4. Found a Bug? Report It to Us
+If you encounter unexpected panics, serialization inconsistencies, memory anomalies, or UI rendering bugs, **please tell us immediately**. We treat all bug reports with urgent priority:
+
+- **GitHub Issues:** [github.com/raqim-ai/raqim/issues](https://github.com/raqim-ai/raqim/issues) (Please include daemon terminal logs, your OS architecture, and reproduction steps).
+- **GitHub Discussions:** [github.com/raqim-ai/raqim/discussions](https://github.com/raqim-ai/raqim/discussions) (For architecture questions, feature requests, and early feedback).
+- **Direct Maintainer Contact:** Muhammad (`dprimemuhammad@gmail.com`)
 
 ## License
 
