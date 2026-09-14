@@ -1,39 +1,40 @@
 # ==============================================================================
-# Raqim Hero Terminal Tape (Split-Pane)
+# Raqim Hero Split-Terminal Recording
 # ==============================================================================
 Output assets/demo.gif
 
 Set Shell "bash"
-Set FontSize 14
-Set Width 1400
-Set Height 750
+Set FontSize 13
+Set Width 1500
+Set Height 800
 Set Theme "Catppuccin Mocha"
-Set Padding 10
-Set TypingSpeed 25ms
+Set Padding 12
+Set TypingSpeed 30ms
 
-# Step 1: Initialize tmux and create vertical split
-Type "tmux -u new-session -d -s raqim_demo" Enter
-Sleep 500ms
-Type "tmux split-window -h -t raqim_demo" Enter
-Sleep 500ms
+# 1. Kill any existing tmux server & launch a fresh, split session
+Type "tmux kill-server 2>/dev/null; tmux new-session -s demo \; split-window -h \; select-pane -t 0" Enter
+Sleep 1s
 
-# Step 2: Launch Daemon in Pane 0 (Left)
-Type "tmux select-pane -t raqim_demo:0.0" Enter
-Type "tmux send-keys -t raqim_demo:0.0 'cargo run --release --bin raqim-core' C-m" Enter
-
-# Step 3: Attach view to tmux session
-Type "tmux -u attach-session -t raqim_demo" Enter
+# 2. Left Pane (Pane 0): Start the pre-compiled Raqim microkernel
+Type "target/release/raqim-core" Enter
+# Wait 4s for WAL recovery, FastEmbed model load, and Axum port binding
 Sleep 4s
 
-# Step 4: Focus Pane 1 (Right) and run the showcase
+# 3. Switch active focus to Right Pane (Pane 1)
+Type "tmux select-pane -t 1" Enter
+Sleep 500ms
+
+# 4. Right Pane: Execute the 6-Phase Showcase Harness
 Type "python raqim-py/agent_master_showcase.py"
 Sleep 1s
 Enter
 
-# Step 5: Allow full 6-phase test to complete
+# 5. Allow full 6-phase test to complete on screen
 Sleep 18s
 
-# Step 6: Hold final frame and exit cleanly
-Sleep 3s
+# 6. Clean exit from both panes to finalize recording
+Type "exit" Enter
+Sleep 500ms
 Ctrl+C
 Type "exit" Enter
+Sleep 1s
