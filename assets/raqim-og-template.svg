@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640">
+  <defs>
+    <!-- Background Gradients -->
+    <radialGradient id="glow-left" cx="20%" cy="30%" r="60%">
+      <stop offset="0%" stop-color="#059669" stop-opacity="0.22" />
+      <stop offset="100%" stop-color="#080C14" stop-opacity="0" />
+    </radialGradient>
+    <radialGradient id="glow-right" cx="80%" cy="70%" r="50%">
+      <stop offset="0%" stop-color="#0284C7" stop-opacity="0.18" />
+      <stop offset="100%" stop-color="#080C14" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- Card Background Gradient -->
+    <linearGradient id="card-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1E293B" stop-opacity="0.75" />
+      <stop offset="100%" stop-color="#0F172A" stop-opacity="0.90" />
+    </linearGradient>
+
+    <!-- Border Gradient -->
+    <linearGradient id="card-border" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#34D399" stop-opacity="0.5" />
+      <stop offset="100%" stop-color="#38BDF8" stop-opacity="0.1" />
+    </linearGradient>
+
+    <!-- Grid Pattern -->
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1E293B" stroke-width="0.75" stroke-opacity="0.55" />
+    </pattern>
+  </defs>
+
+  <!-- Base Dark Canvas -->
+  <rect width="1280" height="640" fill="#080C14" />
+  
+  <!-- Subtle Grid Overlay -->
+  <rect width="1280" height="640" fill="url(#grid)" />
+
+  <!-- Ambient Glows -->
+  <rect width="1280" height="640" fill="url(#glow-left)" />
+  <rect width="1280" height="640" fill="url(#glow-right)" />
+
+  <!-- Top Release Badge -->
+  <g transform="translate(80, 75)">
+    <rect width="280" height="34" rx="17" fill="#0F172A" stroke="#334155" stroke-width="1" />
+    <circle cx="18" cy="17" r="5" fill="#10B981" />
+    <text x="32" y="22" fill="#E2E8F0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace" font-size="13" font-weight="600" letter-spacing="1">
+      RUST MICROKERNEL • v0.1.0
+    </text>
+  </g>
+
+  <!-- Title & Arabic Calligraphic Moniker -->
+  <g transform="translate(80, 185)">
+    <text x="0" y="0" fill="#F8FAFC" font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif" font-size="74" font-weight="800" letter-spacing="-1.5">
+      Raqim
+    </text>
+    <text x="245" y="-5" fill="#34D399" font-family="'Amiri', 'Noto Naskh Arabic', serif" font-size="58" font-weight="400">
+      رَقِيم
+    </text>
+  </g>
+
+  <!-- Subtitle / Tagline -->
+  <text x="80" y="235" fill="#94A3B8" font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif" font-size="22" font-weight="400" letter-spacing="-0.2">
+    Deterministic Cryptographic Flight Recorder &amp; Zero-Trust Perimeter for AI Agents
+  </text>
+
+  <!-- 4 Performance Metric Cards -->
+  <g transform="translate(80, 310)">
+    <!-- Metric 1: TPS -->
+    <g transform="translate(0, 0)">
+      <rect width="255" height="150" rx="14" fill="url(#card-grad)" stroke="url(#card-border)" stroke-width="1.2" />
+      <text x="24" y="52" fill="#34D399" font-family="monospace" font-size="34" font-weight="800">23,355</text>
+      <text x="145" y="44" fill="#6EE7B7" font-family="monospace" font-size="14" font-weight="600">TPS</text>
+      <text x="24" y="86" fill="#F1F5F9" font-family="-apple-system, sans-serif" font-size="15" font-weight="600">Closed-Loop ACK</text>
+      <text x="24" y="112" fill="#64748B" font-family="-apple-system, sans-serif" font-size="12">Hardware NVMe group commit</text>
+    </g>
+
+    <!-- Metric 2: Deterministic Replay -->
+    <g transform="translate(285, 0)">
+      <rect width="255" height="150" rx="14" fill="url(#card-grad)" stroke="#334155" stroke-width="1" />
+      <text x="24" y="52" fill="#38BDF8" font-family="monospace" font-size="34" font-weight="800">$0.00</text>
+      <text x="125" y="44" fill="#7DD3FC" font-family="monospace" font-size="14" font-weight="600">&lt;1ms</text>
+      <text x="24" y="86" fill="#F1F5F9" font-family="-apple-system, sans-serif" font-size="15" font-weight="600">Deterministic Replay</text>
+      <text x="24" y="112" fill="#64748B" font-family="-apple-system, sans-serif" font-size="12">BLAKE3 WAL effect caching</text>
+    </g>
+
+    <!-- Metric 3: Merkle DAG -->
+    <g transform="translate(570, 0)">
+      <rect width="255" height="150" rx="14" fill="url(#card-grad)" stroke="#334155" stroke-width="1" />
+      <text x="24" y="52" fill="#A78BFA" font-family="monospace" font-size="30" font-weight="800">Axon DAG</text>
+      <text x="24" y="86" fill="#F1F5F9" font-family="-apple-system, sans-serif" font-size="15" font-weight="600">Offline Proofs</text>
+      <text x="24" y="112" fill="#64748B" font-family="-apple-system, sans-serif" font-size="12">Zero-knowledge inclusion proofs</text>
+    </g>
+
+    <!-- Metric 4: Aegis Firewall -->
+    <g transform="translate(855, 0)">
+      <rect width="255" height="150" rx="14" fill="url(#card-grad)" stroke="#334155" stroke-width="1" />
+      <text x="24" y="52" fill="#F43F5E" font-family="monospace" font-size="30" font-weight="800">Aegis Core</text>
+      <text x="24" y="86" fill="#F1F5F9" font-family="-apple-system, sans-serif" font-size="15" font-weight="600">Zero-Trust ACL</text>
+      <text x="24" y="112" fill="#64748B" font-family="-apple-system, sans-serif" font-size="12">CAS token bucket &amp; quarantine</text>
+    </g>
+  </g>
+
+  <!-- Footer Info Bar -->
+  <g transform="translate(80, 565)">
+    <!-- Terminal prompt aesthetic -->
+    <text x="0" y="0" fill="#10B981" font-family="monospace" font-size="15" font-weight="700">&gt;</text>
+    <text x="20" y="0" fill="#CBD5E1" font-family="monospace" font-size="14" font-weight="500">docker compose up -d</text>
+    <text x="230" y="0" fill="#475569" font-family="monospace" font-size="14">|</text>
+    <text x="250" y="0" fill="#CBD5E1" font-family="monospace" font-size="14" font-weight="500">pip install raqim</text>
+    
+    <!-- GitHub Link on right -->
+    <text x="1120" y="0" text-anchor="end" fill="#64748B" font-family="monospace" font-size="14" font-weight="500">
+      github.com/raqim-ai/raqim
+    </text>
+  </g>
+</svg>
