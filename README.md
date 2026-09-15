@@ -7,7 +7,7 @@
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10+-3776AB.svg)](https://pypi.org/project/raqim/)
 [![Throughput](https://img.shields.io/badge/Closed--Loop_ACK-23%2C355_TPS-brightgreen)](#verified-performance-benchmarks)
 [![P50 Latency](https://img.shields.io/badge/P50_Latency-1.85_ms-blue)](#verified-performance-benchmarks)
-[![Replay Cost](https://img.shields.io/badge/Deterministic_Replay-%240.00_Cost-success)](#4-zero-cost-deterministic-replay--causal-reality-forking)
+[![Replay Cost](https://img.shields.io/badge/Deterministic_Replay-%240.00_Cost-success)](#verified-performance-benchmarks)
 
 ---
 
@@ -44,6 +44,14 @@ When autonomous AI agents make tool calls, execute financial transactions, mutat
 | **Multi-Agent Convergence** | ❌ Race conditions; last-write-wins | ❌ Partition ordering; manual conflict resolution | State machine transitions | ❌ Not applicable | **✅ In-Memory CRDT Shards (Loro)** (mathematically guaranteed conflict-free merges) |
 | **Closed-Loop ACK Throughput** | ~100 – 500 TPS (SaaS network & ingestion limits) | 50,000 – 100,000 TPS (unstructured raw bytes) | 15 – 500 TPS (global consensus bottleneck) | 20,000 – 50,000 TPS (HTTP proxying only) | **23,355.21 TPS** (Full NVMe group-commit sync + Ed25519 verify + Merkle batching) |
 | **P50 Commit Latency** | 50 – 250 ms (remote HTTPS API roundtrip) | 5 – 15 ms (disk flush dependent) | Seconds to minutes | 1 – 3 ms (proxy overhead) | **1.85 ms** (aligned to 2ms NVMe physical group commit) |
+
+> [!NOTE]
+> **Benchmarking Methodology & Contextual Baselines:**
+> - **Raqim Core**: Empirically benchmarked on PCIe 4.0 NVMe hardware using `raqim-siege` under full 50-worker concurrent load (measuring closed-loop server ACKs covering Ed25519 signature validation, Aegis ACL checks, BLAKE3 Merkle DAG batching, and physical 2ms `fdatasync` NVMe commits).
+> - **Traditional AI Observability (LangSmith, Arize Phoenix, AgentOps)**: Reflects typical public cloud WAN HTTPS roundtrip latency (50–250 ms) and standard API tier ingestion quotas (~100–500 TPS).
+> - **Message Queues (Kafka, Redis Streams)**: Reflects published single-node benchmarks for unauthenticated, unstructured raw byte streams without application-layer cryptographic proof or CRDT convergence overhead.
+> - **Distributed Ledgers (Ethereum, Hyperledger)**: Reflects documented mainnet Byzantine fault tolerance and consensus constraints (Ethereum L1 ~15–30 TPS with 12s block times; Hyperledger Fabric Raft ~200–500 TPS).
+> - **API Gateways (Envoy, Kong)**: Reflects standard Layer 7 HTTP reverse-proxy routing latency on local high-throughput networks.
 
 ### Why Existing Tools Fail for Autonomous Agent Swarms
 
@@ -432,6 +440,39 @@ The `raqim` binary provides operational control over keys, firewalls, and cluste
 
 ---
 
+## Model Context Protocol (MCP) Bridge (`raqim-mcp`)
+
+`raqim-mcp` is a native Rust bridge implementing Anthropic's [Model Context Protocol](https://modelcontextprotocol.io/) over standard I/O (`stdio`). It enables any AI IDE or assistant (**Claude Desktop**, **Cursor**, **Windsurf**, **Zed**) to directly query swarm memory, verify historical decisions, and commit immutable audit records into the Raqim ledger without custom code:
+
+### Exposed MCP Tools
+
+| Tool | Parameters | Function |
+| :--- | :--- | :--- |
+| `commit_thought` | `thought_text`, `status`, `intent_path` | Cryptographically signs and commits an LLM reasoning step or tool execution into the NVMe WAL and Merkle DAG. |
+| `query_memory` | `query`, `intent_path` | Performs hybrid semantic RAG search across Hot RAM and Cold LanceDB storage. |
+| `ask_swarm` | `target_capability`, `question` | Signs and dispatches an inter-agent query across the A2A Zenoh WebSocket mesh with a 15-second timeout. |
+
+### Configuration (Claude Desktop / Cursor)
+
+Add to your `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "raqim": {
+      "command": "raqim-mcp",
+      "env": {
+        "RQM_MCP_KEY_PATH": "/absolute/path/to/agent_keys/mcp_agent.pem",
+        "RQM_MCP_CERT_PATH": "/absolute/path/to/agent_keys/mcp_agent.cert",
+        "RQM_DEAMON_URL": "http://127.0.0.1:8081"
+      }
+    }
+  }
+}
+```
+
+---
+
 ## Daemon API & Control Plane Reference
 
 The Raqim Core Daemon exposes a high-throughput HTTP/WebSocket control plane (default port: `8081`):
@@ -510,8 +551,7 @@ We hold our engineering to senior enterprise standards, which means total honest
 If you encounter unexpected panics, serialization inconsistencies, memory anomalies, or UI rendering bugs, **please tell us immediately**. We treat all bug reports with urgent priority:
 
 - **GitHub Issues:** [github.com/raqim-ai/raqim/issues](https://github.com/raqim-ai/raqim/issues) (Please include daemon terminal logs, your OS architecture, and reproduction steps).
-- **GitHub Discussions:** [github.com/raqim-ai/raqim/discussions](https://github.com/raqim-ai/raqim/discussions) (For architecture questions, feature requests, and early feedback).
-- **Direct Maintainer Contact:** Muhammad (`dprimemuhammad@gmail.com`)
+- **Direct Maintainer Contact:** Muhammad (`dprimemuhammad@gmail.com`) for security disclosures, architecture inquiries, and enterprise pilot onboarding.
 
 ## License
 
