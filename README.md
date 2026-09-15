@@ -141,10 +141,26 @@ Throughput figures reflect **Synchronous Closed-Loop Acknowledgment (ACK)**: eve
 
 ## Production Quickstart
 
-### 1. Boot the Stack via Docker Compose
+### 1. Fast Installation
 
+#### A. Universal CLI & Microkernel (Linux & macOS)
+Downloads pre-compiled native binaries (`raqim-core`, `raqim-cli`, `raqim-mcp`) into `~/.raqim/bin`:
+```bash
+curl -fsSL https://raw.githubusercontent.com/raqim-ai/raqim/main/install.sh | bash
+```
+
+#### B. Windows (PowerShell)
+```powershell
+irm https://raw.githubusercontent.com/raqim-ai/raqim/main/install.ps1 | iex
+```
+
+#### C. Python SDK (PyPI)
+```bash
+pip install raqim
+```
+
+#### D. Container Stack (Docker Compose)
 Starts the Raqim Core Daemon (`raqim-core`), default policy manifest (`aegis.toml`), and Next.js Admin Console (`raqim-console`):
-
 ```bash
 docker compose up -d
 ```

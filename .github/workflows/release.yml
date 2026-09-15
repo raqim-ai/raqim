@@ -31,7 +31,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             artifact_name: raqim-linux-x86_64
           - os: macos-latest
@@ -44,7 +44,7 @@ jobs:
     steps:
 
       - name: Free Disk Space (Ubuntu)
-        if: matrix.os == 'ubuntu-latest'
+        if: contains(matrix.os, 'ubuntu')
         run: |
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /usr/share/dotnet
@@ -52,7 +52,7 @@ jobs:
           sudo rm -rf /usr/local/share/boost
 
       - name: Configure 10GB Swap Space (Ubuntu)
-        if: matrix.os == 'ubuntu-latest'
+        if: contains(matrix.os, 'ubuntu')
         run: |
           sudo swapoff -a || true
           sudo rm -f /swapfile /mnt/swapfile
