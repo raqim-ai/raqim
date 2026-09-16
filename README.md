@@ -167,20 +167,33 @@ irm https://raw.githubusercontent.com/raqim-ai/raqim/main/install.ps1 | iex
 pip install raqim
 ```
 
-#### D. Container Stack (Docker Compose)
-Starts the Raqim Core Daemon (`raqim-core`), default policy manifest (`aegis.toml`), and Next.js Admin Console (`raqim-console`):
+#### D. Container Stack (Docker)
+
+**Option 1: Instant Microkernel Container (GHCR)**
+Run the pre-built sovereign daemon directly from GitHub Container Registry:
 ```bash
+docker run -d \
+  -p 8080:8080 -p 8081:8081 -p 7447:7447 \
+  --name raqim-daemon \
+  ghcr.io/raqim-ai/raqim/core:latest
+```
+
+**Option 2: Full Production Stack (Daemon + 5-Chamber Mission Console)**
+Clone and spin up the complete cluster including `raqim-core`, `aegis.toml` policies, and the Next.js `raqim-console`:
+```bash
+git clone https://github.com/raqim-ai/raqim.git && cd raqim
 docker compose up -d
 ```
 
 Verify service health:
 ```bash
 curl -f http://localhost:8081/v1/dashboard/cards
+# Access the Next.js Mission Control Console: http://localhost:3000
 ```
 
 Or compile and run directly from source:
 ```bash
-cargo run --release --bin raqim-core
+cargo run --release -p raqim-core
 ```
 
 ### 2. Provision Agent Credentials (PKI)
@@ -190,7 +203,7 @@ Agents cannot connect with raw API keys. They require an Ed25519 private key and
 Using the administrative CLI:
 ```bash
 # Mint a single production credentials bundle in ./agent_keys
-cargo run --release --bin raqim -- keys forge \
+raqim-cli keys forge \
   --name financial_auditor \
   --group analyst_group \
   --count 1 \

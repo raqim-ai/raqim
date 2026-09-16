@@ -164,3 +164,4 @@ echo -e "  ${BOLD}raqim-core --help${RESET}"
 echo -e "  ${BOLD}raqim-cli forge --help${RESET}"
 echo -e "  ${BOLD}pip install raqim${RESET}  # Python SDK"
 echo "=================================================================="
+
