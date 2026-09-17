@@ -532,11 +532,11 @@ synapse/
 
 ---
 
-## Early Access Reality & Honest Disclaimers (v0.1.0)
+## Early Access Reality & Honest Disclaimers (v0.1.1)
 
 > **"If it can break, it will break — and we want to know about it."**
 
-Raqim is sovereign infrastructure-grade software under active, relentless development. While the core cryptographic primitives (BLAKE3 domain-separated Merkle trees, Ed25519 asymmetric PKI, crash-safe NVMe Write-Ahead Logging, and Loro CRDT convergence) have been empirically verified under heavy automated siege, **v0.1.0 is an Early Access Developer Preview**. 
+Raqim is sovereign infrastructure-grade software under active, relentless development. While the core cryptographic primitives (BLAKE3 domain-separated Merkle trees, Ed25519 asymmetric PKI, crash-safe NVMe Write-Ahead Logging, and Loro CRDT convergence) have been empirically verified under heavy automated siege, **v0.1.1 is an Early Access Developer Preview**. 
 
 We hold our engineering to senior enterprise standards, which means total honesty about current operational realities and edge cases:
 
@@ -552,7 +552,7 @@ We hold our engineering to senior enterprise standards, which means total honest
 - **Next.js Console SSE Backpressure:** Under sustained high-velocity throughput (>10,000 TPS), browser-side Server-Sent Events (SSE) in `raqim-console` may experience event lag or UI frame drops. The console polls snapshot metrics every 2 seconds to alleviate connection strain.
 - **2PC Compaction Lag:** Historical WAL frames are compacted into LanceDB Parquet tables by an asynchronous background worker. If you query LanceDB immediately following an uncompacted burst, queries are served from the in-memory hot vector buffer until the 2-Phase Commit finishes.
 - **Evolving Wire & Storage Formats:** Between `v0.1.x` and `v1.0.0`, minor breaking changes to `IngressEnvelope` serialization layouts or internal WAL headers may occur. When upgrades require migration, migration utilities will be documented in release notes.
-- **Single-Node Focus:** v0.1.0 is designed for rock-solid single-node or containerized deployments. Out-of-band quarantine is distributed via Zenoh, but multi-master distributed Byzantine consensus across nodes is planned for v0.2.0+.
+- **Single-Node Focus:** v0.1.1 is designed for rock-solid single-node or containerized deployments. Out-of-band quarantine is distributed via Zenoh, but multi-master distributed Byzantine consensus across nodes is planned for v0.2.0+.
 
 ### 4. Found a Bug? Report It to Us
 If you encounter unexpected panics, serialization inconsistencies, memory anomalies, or UI rendering bugs, **please tell us immediately**. We treat all bug reports with urgent priority:

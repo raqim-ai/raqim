@@ -170,9 +170,13 @@ async def main():
             "prompt": prompt,
         }
 
+    rogue_side_effect_occurred = False
+
     @agent_rogue.trace(namespace="/finance/restricted/vault_transfer")
     async def tool_unauthorized_transfer(target: str, amount: float) -> str:
         """Target namespace '/finance/restricted/*' is blocked by policy."""
+        nonlocal rogue_side_effect_occurred
+        rogue_side_effect_occurred = True
         return f"Transferred ${amount:,.2f} to {target} executed."
 
     # ==========================================================================
@@ -250,11 +254,13 @@ async def main():
         await tool_unauthorized_transfer("ATTACKER_ACCOUNT_888", 50000.00)
     except Exception as e:
         interdiction_confirmed = True
-        print(f"🛡️ [AEGIS INTERDICTION CONFIRMED OVER @trace]")
+        print(f"🛡️ [AEGIS PRE-FLIGHT INTERDICTION CONFIRMED]")
         print(f"   Target Intent Path : /finance/restricted/vault_transfer")
         print(f"   Firewall Rejection : {e}")
+        print(f"   Tool Body Executed : {rogue_side_effect_occurred} (Zero Side-Effects!)")
         
     assert interdiction_confirmed, "CRITICAL ERROR: Aegis failed to interdict unauthorized @trace call"
+    assert not rogue_side_effect_occurred, "CRITICAL ERROR: Tool body executed despite Aegis interdiction!"
 
     # ==========================================================================
     # PHASE 5: CONTROL PLANE RECOVERY (/v1/admin/quarantine/lift)

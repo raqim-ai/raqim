@@ -9,3 +9,6 @@ trash.txt
 .fastembed_cache
 archive
 /agent_keys
+*.so
+*.pyc
+__pycache__/

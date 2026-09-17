@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "raqim"
-version = "0.1.0"
+version = "0.1.1"
 description = "Sovereign Flight Recorder & Crytographic Governance Mesh for AI Agents"
 readme = "README.md"
 requires-python = ">=3.10"

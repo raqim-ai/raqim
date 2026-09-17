@@ -27,7 +27,7 @@ if (-not $Tag) {
         $Release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -Headers @{"User-Agent"="RaqimInstaller"}
         $Tag = $Release.tag_name
     } catch {
-        $Tag = "v0.1.0"
+        $Tag = "v0.1.1"
     }
 }
 

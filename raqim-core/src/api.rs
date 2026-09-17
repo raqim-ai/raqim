@@ -1577,6 +1577,93 @@ pub struct GetEffectResponse {
     pub timestamp: Option<i64>,
 }
 
+#[derive(Deserialize, Debug)]
+pub struct PreflightEffectRequest {
+    pub agent_hex: String,
+    pub step_ordinal: u64,
+    pub call_signature_hex: String,
+    pub namespace: String,
+
+    // Cryptographic perimeter
+    pub timestamp: i64,
+    pub public_key_hex: String,
+    pub capability_cert_hex: String,
+    pub signature_hex: String,
+}
+
+#[derive(Serialize)]
+pub struct PreflightEffectResponse {
+    pub allowed: bool,
+    pub agent_hex: String,
+    pub namespace: String,
+}
+
+/// Executes cryptographic zero-trust pre-flight audit before any tool or effect executes.
+pub async fn preflight_effect_handler(
+    State(state): State<ApiState>,
+    Json(payload): Json<PreflightEffectRequest>,
+) -> Result<Json<PreflightEffectResponse>, ApiError> {
+    let pub_key_bytes = hex::decode(&payload.public_key_hex)
+        .map_err(|_| ApiError::BadRequest("Invalid pub_key_hex format".to_string()))?;
+
+    let pub_key: [u8; 32] = pub_key_bytes
+        .try_into()
+        .map_err(|_| ApiError::BadRequest("pub_key must be exactly 32 bytes".to_string()))?;
+
+    let signature_bytes = hex::decode(&payload.signature_hex)
+        .map_err(|_| ApiError::BadRequest("Invalid signature format".to_string()))?;
+
+    let signature: [u8; 64] = signature_bytes
+        .try_into()
+        .map_err(|_| ApiError::BadRequest("signature must be exactly 64 bytes".to_string()))?;
+
+    let capability_cert = hex::decode(&payload.capability_cert_hex)
+        .map_err(|_| ApiError::BadRequest("Invalid capability_cert_hex format".to_string()))?;
+
+    // Aegis barrier 1: Lineage Verification
+    let (verified_agent_hex, group_name) = state
+        .aegis
+        .verify_session_lineage(&capability_cert, &pub_key)
+        .map_err(|e| ApiError::Unauthorized(format!("Aegis lineage rejection: {}", e)))?;
+
+    if verified_agent_hex != payload.agent_hex {
+        return Err(ApiError::Forbidden(
+            "Security violation: Certificate identity mismatch with caller".to_string(),
+        ));
+    }
+
+    if state.aegis.is_quarantined(&payload.agent_hex) {
+        return Err(ApiError::Forbidden(
+            "Agent is actively quarantined by Aegis firewall".to_string(),
+        ));
+    }
+
+    let canonical_attestation = format!(
+        "preflight:{}:{}:{}:{}",
+        payload.namespace, payload.step_ordinal, payload.call_signature_hex, payload.timestamp
+    );
+
+    // Aegis Barrier 2: Fast-path policy audit (anti-replay, signature, rate-limiting, and namespace ACL)
+    state
+        .aegis
+        .authorize_packet_fast(
+            &payload.agent_hex,
+            &group_name,
+            &pub_key,
+            canonical_attestation.as_bytes(),
+            &signature,
+            &payload.namespace,
+            payload.timestamp,
+        )
+        .map_err(|e| ApiError::Forbidden(format!("Aegis Interdiction: {}", e)))?;
+
+    Ok(Json(PreflightEffectResponse {
+        allowed: true,
+        agent_hex: payload.agent_hex,
+        namespace: payload.namespace,
+    }))
+}
+
 /// Records live side-effect into WAL + Markle DAG
 pub async fn record_effect_handler(
     State(state): State<ApiState>,
@@ -1840,6 +1927,7 @@ pub fn build_admin_router(state: ApiState) -> axum::Router {
     axum::Router::new()
         // State Proofs & Effect Recording
         .route("/v1/state/proof/:tx_id", get(get_state_proof_handler))
+        .route("/v1/effect/preflight", post(preflight_effect_handler))
         .route("/v1/effect/record", post(record_effect_handler))
         .route("/v1/effect/get", post(get_effect_handler))
         // Aegis Firewall & Governance

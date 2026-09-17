@@ -71,7 +71,7 @@ if [ -z "$TAG" ]; then
     echo -e "🔍 Discovering latest release from GitHub..."
     TAG=$(curl -sSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep -o '"tag_name": *"[^"]*"' | head -n 1 | cut -d '"' -f 4 || echo "")
     if [ -z "$TAG" ]; then
-        TAG="v0.1.0"
+        TAG="v0.1.1"
     fi
 fi
 

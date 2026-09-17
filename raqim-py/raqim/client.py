@@ -295,6 +295,9 @@ class RaqimClient:
                         self._handle_divergence(step, call_sig_hex, namespace)
                         target_ns = f"phantom_{namespace}_{self.agent_hex}_step{step}"
 
+                    # Pre-flight cryptographic audit before execution
+                    await self._preflight_effect(step, call_sig_hex, target_ns)
+
                     # Live Execution & accumulation
                     accumulated_chunks: List[Any] = []
                     async for item in fn(*args, **kwargs):
@@ -330,6 +333,9 @@ class RaqimClient:
                         self._handle_divergence(step, call_sig_hex, namespace)
                         target_ns = f"phantom_{namespace}_{self.agent_hex}_step{step}"
                     
+                    # Pre-flight cryptographic audit before execution
+                    await self._preflight_effect(step, call_sig_hex, target_ns)
+
                     # Live execution
                     result = await fn(*args, **kwargs) 
                     await self._persist_effect(step, call_sig_hex, result, target_ns)
@@ -368,6 +374,10 @@ class RaqimClient:
                             self._handle_divergence(step, call_sig_hex, namespace)
                             target_ns = f"phantom_{namespace}_{self.agent_hex}_step{step}"
                         
+                        # Pre-flight check before sync function runs inside async loop
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                            pool.submit(lambda: asyncio.run(self._preflight_effect(step, call_sig_hex, target_ns))).result()
+
                         result = fn(*args, **kwargs)
                         # Schedule persistence without blocking the running loop
                         asyncio.create_task(self._persist_effect(step, call_sig_hex, result, target_ns))
@@ -387,6 +397,9 @@ class RaqimClient:
                             self._handle_divergence(step, call_sig_hex, namespace)
                             target_ns = f"phantom_{namespace}_{self.agent_hex}_step{step}"
                         
+                        # Pre-flight check before sync function runs in sync context
+                        loop.run_until_complete(self._preflight_effect(step, call_sig_hex, target_ns))
+
                         result = fn(*args, **kwargs)
                         loop.run_until_complete(self._persist_effect(step, call_sig_hex, result, target_ns))
                         return result 
@@ -395,6 +408,40 @@ class RaqimClient:
 
         return decorator
         
+    async def _preflight_effect(self, step_ordinal: int, call_signature_hex: str, namespace: str) -> None:
+        """
+        Executes cryptographic zero-trust pre-flight audit before any tool executes.
+        Validates timestamp freshness (anti-replay), Ed25519 signature, CAS token bucket,
+        and wildcard namespace ACL against Aegis in-kernel firewall.
+        """
+        now_ts = int(time.time())
+        attestation_payload = f"preflight:{namespace}:{step_ordinal}:{call_signature_hex}:{now_ts}".encode("utf-8")
+        signature_bytes = bytes(self.crypto_core.sign_payload(attestation_payload))
+        pub_key_bytes = bytes(self.crypto_core.pub_key_bytes)
+
+        payload = {
+            "agent_hex": self.agent_hex,
+            "public_key_hex": pub_key_bytes.hex(),
+            "signature_hex": signature_bytes.hex(),
+            "capability_cert_hex": self.cert_hex,
+            "timestamp": now_ts,
+            "step_ordinal": step_ordinal,
+            "call_signature_hex": call_signature_hex,
+            "namespace": namespace,
+        }
+
+        async with httpx.AsyncClient(timeout=5.0) as http:
+            resp = await http.post(f"{self.http_url}/v1/effect/preflight", json=payload)
+            if resp.status_code in (401, 403):
+                try:
+                    error_msg = resp.json().get("message", resp.text)
+                except Exception:
+                    error_msg = resp.text
+                raise PermissionError(f"[AEGIS PRE-FLIGHT INTERDICTION]: {error_msg}")
+
+            if resp.status_code != 200:
+                raise RuntimeError(f"Daemon preflight check failed (HTTP {resp.status_code}): {resp.text}")
+
     async def _persist_effect(self, step_ordinal: int, call_signature_hex: str, result: Any, namespace: str) -> None: 
         """
         Crypptographically signs and persist live execution output into Raqim's WAL + Merkle DAG.
