@@ -2014,7 +2014,35 @@ pub struct OtelStatus {
 /// and map the timeline into an OTLP-compliant otel json trace trnasport
 pub async fn export_agent_timeline_otel(_auth: ValidatedIdentity, State(state): State<ApiState>, Path(agent_hex): Path<String>) -> Result<Json<OtelExportRequest>, ApiError> {
 
+    // Gather historical timeline nodes via the existing LanceDB + WAL scatter_engine
+    let lance_future = state.lance.fetch_historical_timeline(&agent_hex);
+    let wal_future = async {
+        state.wal.fetch_hot_timeline(&agent_hex, &state.config.wal_path)
+    };
+
+    let (lance_res, wal_res) = tokio::join!(lance_future, wal_future);
+
+    let mut nodes = wal_res.unwrap_or_default();
+    if let Ok(mut cold_res) = lance_res {
+        nodes.append(&mut cold_res);
+    };
+
+    // Sort Chronologically by TxID 
+    nodes.sort_by(|a, b| a.tx_id.cmp(&b.tx_id));
+
+    if nodes.is_empty() {
+        return Err(ApiError::NotFound( format!("No recorded timeline found for agent {}", agent_hex)));
+    }
+
+    // Deterministically derive a 16-byte Trace ID for this agent session. This groups all steps of this agent under a single unified trace in Datadog
+    let mut trace_hasher = blake3::Hasher::new_derive_key("raqim.otel.v1.trace_id");
+    trace_hasher.update(agent_hex.as_bytes());
+    trace_hasher.update(state.config.tenant_id.as_bytes());
+    let trace_id_bytes = trace_hasher.finalize();
+    let trace_id_hex = hex::encode(&trace_id_bytes.as_bytes()[..16]);
+
     
+
 
 }
 
