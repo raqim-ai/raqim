@@ -97,6 +97,106 @@ class CanonicalSerializer:
         
         return call_sig_hash.hex(), canonical_str
         
+class GenAiMetadataExtractor: 
+    """
+    Zero-overhead introspector that inspects arbitrary arguments and response payloads to extract standard openTelemetry GenAI Semantic conventions:
+    - gen_ai.system
+    - gen_ai.request.model 
+    - gen_ai.prompt
+    - gen_ai.completion
+    - gen_ai.usage.input_tokens 
+    - gen_ai.output_tokens 
+    """
+    
+    @staticmethod
+    def extract_prompt(args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> Optional[str]: 
+        """Extracts prompt or user query from input parameters."""
+        for key in ("prompt", "user_query", "query", "contents", "message", "text"): 
+            if key in kwargs and isinstance(kwargs[key], str): 
+                return kwargs[key]
+            
+        # Scan positional argument for the first non-empty string 
+        for arg in args: 
+            if isinstance(arg, str) and len(arg) > 0: 
+                return arg 
+            if isinstance(arg, dict):
+                for k in ("prompt", "user_query", "text"): 
+                    if k in arg and isinstance(arg[k], str): 
+                        return arg[k]
+        return None 
+
+    @staticmethod
+    def extract_completion_and_usage(result: Any) -> Dict[str, Any]: 
+        """
+        Parses return values across Gemini, OpenAI, Claude, Langchain, or raw dicts to extract output text and token usage metrics 
+        """
+        data: Dict[str, Any] = {
+            "completion": None, 
+            "input_tokens": None, 
+            "output_tokens": None, 
+            "system": "raqim_agent", 
+            "model": "unknown_model" 
+        }
+        
+        if result is None: 
+            return data 
+        
+        # Case 1: Raw string output 
+        if isinstance(result, str): 
+            data["completion"] = result
+            data["output_tokens"] = max(1, len(result) // 4 )
+            return data 
+
+        # Case 2: Dictionary responses
+        if isinstance(result, dict): 
+            # Extract completion text
+            for key in ("findings", "analysis", "content", "response", "text", "verdict"): 
+                if key in result and isinstance(result[key], str): 
+                    data["completion"] = result[key]
+                    break 
+
+            # Extract Gemini usage metadata 
+            if "usageMetadata" in result: 
+                meta = result["useageMetadata"]
+                data["input_tokens"] = meta.get("promptTokenCount")
+                data["output_tokens"] = meta.get("candidateTokenCount")
+                data["system"] = "gemini"
+            
+            # Extract openAI usage metadata 
+            if "usage" in result and isinstance(result["usage"], dict):
+                data["input_tokens"] = result["usage"].get("prompt_tokens")
+                data["output_tokens"] = result["usage"].get("completion_tokens")
+                data["system"] = "openai"
+                
+            return data 
+
+        # Case 3: Google GenAI Client response object (Gemini SDK)
+        if hasattr(result, "usage_metadata"): 
+            try: 
+                data["input_tokens"] = getattr(result.usage_metadata, "prompt_token_count", None)
+                data["output_tokens"] = getattr(result.usage_metadata, "candidates_token_count", None)
+                data["system"] = "gemini"
+            except Exception:
+                pass
+
+        if hasattr(result, "text"): 
+            try: 
+                data["completion"] = str(result.text)
+            except Exception: 
+                pass 
+        
+        # Case 4: OpenAI Chat Completion object 
+        if hasattr(result, "usage") and hasattr(result, "choices"): 
+            try: 
+                data["input_tokens"] = getattr(result.usage, "prompt_tokens", None) 
+                data["output_tokens"] = getattr(result.usage, "completion_token", None)
+                data["completion"] = result.choices[0].message.content 
+                data["system"] = "openai" 
+                data["model"] = getattr(result, "model", None) 
+            except Exception: 
+                pass 
+        
+        return data
 
 class RaqimClient:
     
@@ -225,7 +325,6 @@ class RaqimClient:
         finally:
             writer.close()
             await writer.wait_closed()
-    
     
     @contextlib.asynccontextmanager
     async def open_stream(self): 
