@@ -21,7 +21,7 @@ use futures_util::{stream::StreamExt, SinkExt};
 use serde_json::{json, Value};
 use std::convert::Infallible;
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::{eprintln, format, println};
+use std::{eprintln, format, println, vec};
 use tokio_stream::wrappers::BroadcastStream;
 
 use serde::{Deserialize, Serialize};
@@ -2065,73 +2065,139 @@ pub async fn export_agent_timeline_otel(
         let span_id_u64 = (node.tx_id & 0xFFFF_FFFF_FFFF_FFFF) as u64;
         let span_id_hex = format!("{:016x}", span_id_u64);
 
-        // Convert RFC3339 or millisecond timestamp into UNIX nanosec strings 
-        let start_time_nano = node.timestamp.parse::<i64>().map(|ms| (ms * 1_000_000).to_string() ).unwrap_or_else(|_| {
-            let now_ns = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+        // Convert RFC3339 or millisecond timestamp into UNIX nanosec strings
+        let start_time_nano = node
+            .timestamp
+            .parse::<i64>()
+            .map(|ms| (ms * 1_000_000).to_string())
+            .unwrap_or_else(|_| {
+                let now_ns = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos();
 
-            now_ns.to_string()
-        });
-        
+                now_ns.to_string()
+            });
+
         // Synthetic end time: start + 2ms hardware WAL sync duration
-        let end_time_nanos = (start_time_nano.parse::<u128>().unwrap_or(0) + 2_000_000 ).to_string();
+        let end_time_nanos = (start_time_nano.parse::<u128>().unwrap_or(0) + 2_000_000).to_string();
 
         // Construct Enriched Attributes: Stardard GenAI + Raqim Proofs
         let mut attributes = Vec::new();
 
         // Standard GenAI conventions
         attributes.push(OtelKeyValue {
-            key: "gen_ai.operations.name".to_string(), 
-            value: OtelAnyValue::StringValue( 
-                if node.payload_preview.contains("findings") || node.payload_preview.contains("prompt") {
-                        "chat".to_string()
+            key: "gen_ai.operations.name".to_string(),
+            value: OtelAnyValue::StringValue(
+                if node.payload_preview.contains("findings")
+                    || node.payload_preview.contains("prompt")
+                {
+                    "chat".to_string()
                 } else {
                     "execute_tool".to_string()
-                }
-             )
+                },
+            ),
         });
 
-        attributes.push(OtelKeyValue { key: "gen_ai.system".to_string(), value: OtelAnyValue::StringValue(
-            
-            if node.payload_preview.contains("GEMINI") {
-                "gemini".to_string(),
-            }  else {
+        attributes.push(OtelKeyValue {
+            key: "gen_ai.system".to_string(),
+            value: OtelAnyValue::StringValue(if node.payload_preview.contains("GEMINI") {
+                "gemini".to_string()
+            } else {
                 "raqim_autonomous".to_string()
-            }
-        )});
+            }),
+        });
 
-        attributes.push(OtelKeyValue { key: "gen_ai.completion".to_string(), value: OtelAnyValue::StringValue( node.payload_preview.clone()) });
+        attributes.push(OtelKeyValue {
+            key: "gen_ai.completion".to_string(),
+            value: OtelAnyValue::StringValue(node.payload_preview.clone()),
+        });
 
         // Raqim Cryptographic Integrity Attributes
-        attributes.push(OtelKeyValue { key: "raqim.agent_hex".to_string(), value: OtelAnyValue::StringValue(( agent_hex.clone()))});
-
-        attributes.push(OtelKeyValue { key: "raqim.tx_id".to_string(), value: OtelAnyValue::StringValue( format!("{:032x}", node.tx_id) ) });
-
-        attributes.push(OtelKeyValue { key: "raqim.step_ordinal".to_string(), value: OtelAnyValue::IntValue(ordinal as i64) });
-
-        attributes.push(OtelKeyValue { key: "raqim.merkle_root".to_string(), value: OtelAnyValue::StringValue( active_merkle_root.clone())});
-
-        attributes.push(OtelKeyValue { key: "raqim.agent_status".to_string(), value: OtelAnyValue::StringValue(node.agent_status.clone())});
-
-        attributes.push(OtelKeyValue { key: "raqim.aegis_verdict".to_string(), value: OtelAnyValue::StringValue("AUTHORIZED".to_string())});
-
-        spans.push(OtelSpan {
-            trace_id: trace_id_hex.clone(), 
-            span_id: span_id_hex.clone(), 
-            parent_span_id: prevoius_span_id.clone(), 
-            name: format!("Step {}:{}", ordinal, node.agent_status), 
-            kind: 1, 
-            start_time_unix_nano: start_time_nano, 
-            end_time_unix_nano: end_time_nanos, 
-            attributes, 
-            status: OtelStatus { code: if node.agent_status == "HALTED" {2} else {1}, message: None }
+        attributes.push(OtelKeyValue {
+            key: "raqim.agent_hex".to_string(),
+            value: OtelAnyValue::StringValue(agent_hex.clone()),
         });
 
-        // Establish the cuasal chain. 
+        attributes.push(OtelKeyValue {
+            key: "raqim.tx_id".to_string(),
+            value: OtelAnyValue::StringValue(format!("{:032x}", node.tx_id)),
+        });
+
+        attributes.push(OtelKeyValue {
+            key: "raqim.step_ordinal".to_string(),
+            value: OtelAnyValue::IntValue(ordinal as i64),
+        });
+
+        attributes.push(OtelKeyValue {
+            key: "raqim.merkle_root".to_string(),
+            value: OtelAnyValue::StringValue(active_merkle_root.clone()),
+        });
+
+        attributes.push(OtelKeyValue {
+            key: "raqim.agent_status".to_string(),
+            value: OtelAnyValue::StringValue(node.agent_status.clone()),
+        });
+
+        attributes.push(OtelKeyValue {
+            key: "raqim.aegis_verdict".to_string(),
+            value: OtelAnyValue::StringValue("AUTHORIZED".to_string()),
+        });
+
+        spans.push(OtelSpan {
+            trace_id: trace_id_hex.clone(),
+            span_id: span_id_hex.clone(),
+            parent_span_id: prevoius_span_id.clone(),
+            name: format!("Step {}:{}", ordinal, node.agent_status),
+            kind: 1,
+            start_time_unix_nano: start_time_nano,
+            end_time_unix_nano: end_time_nanos,
+            attributes,
+            status: OtelStatus {
+                code: if node.agent_status == "HALTED" { 2 } else { 1 },
+                message: None,
+            },
+        });
+
+        // Establish the causal chain.
         prevoius_span_id = Some(span_id_hex);
     }
 
     // Assemble the OTLP Resource Spans payload
+    let response = OtelExportRequest {
+        resource_spans: vec![OtelResourceSpans {
+            resource: OtelResource {
+                attributes: vec![
+                    OtelKeyValue {
+                        key: "service.name".to_string(),
+                        value: OtelAnyValue::StringValue("raqim-sovereign-agent".to_string()),
+                    },
+                    OtelKeyValue {
+                        key: "service.version".to_string(),
+                        value: OtelAnyValue::StringValue("0.1.2".to_string()),
+                    },
+                    OtelKeyValue {
+                        key: "raqim.tenant_id".to_string(),
+                        value: OtelAnyValue::StringValue(state.config.tenant_id.clone()),
+                    },
+                    OtelKeyValue {
+                        key: "raqim.node_id".to_string(),
+                        value: OtelAnyValue::StringValue(state.global_net.os_node_id.clone()),
+                    },
+                ],
+            },
 
+            scope_spans: vec![OtelScopeSpans {
+                scope: OtelScope {
+                    name: "raqim-core-kernel".to_string(),
+                    version: "0.1.2".to_string(),
+                },
+                spans,
+            }],
+        }],
+    };
+
+    Ok(Json(response))
 }
 
 // Route Builder
@@ -2180,6 +2246,10 @@ pub fn build_admin_router(state: ApiState) -> axum::Router {
         .route("/v1/swarm/memory", get(semantic_search_endpoint))
         .route("/v1/vault/search", get(unified_vault_search))
         .route("/v1/vault/telemetry", get(vault_telemetry_endpoint))
+        .route(
+            "/v1/session/timeline/:agent_hex/export/otel",
+            get(export_agent_timeline_otel),
+        )
         .layer(CatchPanicLayer::new())
         .with_state(state)
 }
