@@ -1928,13 +1928,61 @@ pub async fn trigger_compaction_endpoint(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OtelExportRequest {
-    pub resource_spans: Vec,
+    pub resource_spans: Vec<OtelResourceSpans>,
+}
+
+/// Binds resource-level attributes (the host env, tenant, and agent identity) to all spans generated within that resource scope. 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OtelResourceSpans {
+    pub resource: OtelResource, 
+    pub scope_spans: Vec<OtelScopeSpans>
+}
+
+#[derive(Debug, Clone, , Serialize, Deserialize)] 
+#[serde(rename_all = "camelCase")]
+pub struct OtelResource {
+    pub attributes: Vec<OtelKeyValue>
+}
+
+/// Identifies the instrumentation library producing the span (Raqim Core Kernel)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OtelScopeSpans {
+    pub scope: OtelScope,
+    pub spans: Vec<OtelSpan>
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OtelScope {
+
+    pub  name: String, 
+    pub version: String 
+
 }
 
 /// A discrete span representing a single step, tool call, or thought in agent's DAG.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct OtelSpan {}
+pub struct OtelSpan {
+
+    pub trace_id: String,
+    pub span_id: String, 
+    /// optional parent span for hierarchical DAG rendering
+    #[serde(skip_serialization_if = "Option::is_none")]
+    pub parent_span_id: Option<String>, 
+    pub name: String, 
+    /// SpanKind 1 = intrnal, 3 = Client
+    pub kind: u32, 
+    pub start_time_unix_nano: String, 
+    pub end_time_unix_nano: String, 
+
+    // Semantic convention (gen_ai.*) combined with Raqim attestation metadata (raqim.*)
+    pub attributes: Vec<OtelKeyValue>,
+    pub status: OtelStatus
+
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1960,6 +2008,14 @@ pub struct OtelStatus {
     pub code: u32,
     #[serde(skip_serialization_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+/// Reconstruct the agent's causal timeline from both the HOT wal and cold LanceDB, cross-reference active Merkle roots, 
+/// and map the timeline into an OTLP-compliant otel json trace trnasport
+pub async fn export_agent_timeline_otel(_auth: ValidatedIdentity, State(state): State<ApiState>, Path(agent_hex): Path<String>) -> Result<Json<OtelExportRequest>, ApiError> {
+
+    
+
 }
 
 // Route Builder
