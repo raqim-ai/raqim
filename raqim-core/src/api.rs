@@ -1922,6 +1922,46 @@ pub async fn trigger_compaction_endpoint(
     })))
 }
 
+// OTEL OLTLP v1/traces COMPLIANCE SPECIFICATION
+
+/// OTLP root envelope representing an ExportTraceServiceRequest: adheres to the CNCF OpenTelemetry Protococl specification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OtelExportRequest {
+    pub resource_spans: Vec,
+}
+
+/// A discrete span representing a single step, tool call, or thought in agent's DAG.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OtelSpan {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OtelKeyValue {
+    pub key: String,
+    pub value: OtelAnyValue,
+}
+
+/// Polymorphic attribute value conttainer complying with protoobuf AnyValue in JSON
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OtelAnyValue {
+    StringValue(String),
+    IntValue(i64),
+    DoubleValue(f64),
+    BoolValue(bool),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OtelStatus {
+    /// 1 = STATUS_CODE_OK, 2 = STATUS_CODE_ERROR
+    pub code: u32,
+    #[serde(skip_serialization_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
 // Route Builder
 pub fn build_admin_router(state: ApiState) -> axum::Router {
     axum::Router::new()
