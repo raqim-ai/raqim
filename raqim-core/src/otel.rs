@@ -94,7 +94,7 @@ pub struct OtelStatus {
 
 // Helper methods to help construct attr cleanly without repetitive boilerplate
 impl OtelKeyValue {
-    pub fn string(key: &str, value: impl Into<String>) -> Self {
+    pub fn string(key: &str, val: impl Into<String>) -> Self {
         // - coming ----------
 
         Self {
@@ -117,7 +117,7 @@ pub fn build_otlp_trace_from_timeline(
     tenant_id: &str,
     node_id: &str,
     active_merkle_root: &str,
-    node: &[TimelineNode],
+    nodes: &[TimelineNode],
 ) -> OtelExportRequest {
     // Derive deterministic 16 byte (32-hex) Trace ID for this agent session
     let mut trace_hasher = blake3::Hasher::new_derive_key("raqim.otel.v1.trace_id");
@@ -127,7 +127,7 @@ pub fn build_otlp_trace_from_timeline(
     let trace_id_hex = hex::encode(&trace_id_bytes.as_bytes()[..16]);
 
     let mut spans = Vec::with_capacity(nodes.len());
-    let mut prevoious_span_id: Optiton<String> = None;
+    let mut prevoious_span_id: Option<String> = None;
 
     for (ordinal, node) in nodes.iter().enumerate() {
         // Derive unique 8-byte span ID from the lower bits of the TxID

@@ -39,6 +39,7 @@ use crate::health::SystemHealth;
 use crate::hot_memory::HotVectorBuffer;
 use crate::lancedb_store::LanceEngine;
 use crate::nucleus::WalEngine;
+use crate::otel::{self, OtelExportRequest};
 use crate::registry::SwarmRegistry;
 use crate::state::SwarmStateRegistry;
 use crate::{
@@ -1922,98 +1923,12 @@ pub async fn trigger_compaction_endpoint(
     })))
 }
 
-// OTEL OLTLP v1/traces COMPLIANCE SPECIFICATION
-
-/// OTLP root envelope representing an ExportTraceServiceRequest: adheres to the CNCF OpenTelemetry Protococl specification.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OtelExportRequest {
-    pub resource_spans: Vec<OtelResourceSpans>,
-}
-
-/// Binds resource-level attributes (the host env, tenant, and agent identity) to all spans generated within that resource scope.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OtelResourceSpans {
-    pub resource: OtelResource,
-    pub scope_spans: Vec<OtelScopeSpans>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OtelResource {
-    pub attributes: Vec<OtelKeyValue>,
-}
-
-/// Identifies the instrumentation library producing the span (Raqim Core Kernel)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OtelScopeSpans {
-    pub scope: OtelScope,
-    pub spans: Vec<OtelSpan>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OtelScope {
-    pub name: String,
-    pub version: String,
-}
-
-/// A discrete span representing a single step, tool call, or thought in agent's DAG.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OtelSpan {
-    pub trace_id: String,
-    pub span_id: String,
-    /// optional parent span for hierarchical DAG rendering
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_span_id: Option<String>,
-    pub name: String,
-    /// SpanKind 1 = intrnal, 3 = Client
-    pub kind: u32,
-    pub start_time_unix_nano: String,
-    pub end_time_unix_nano: String,
-
-    // Semantic convention (gen_ai.*) combined with Raqim attestation metadata (raqim.*)
-    pub attributes: Vec<OtelKeyValue>,
-    pub status: OtelStatus,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OtelKeyValue {
-    pub key: String,
-    pub value: OtelAnyValue,
-}
-
-/// Polymorphic attribute value conttainer complying with protoobuf AnyValue in JSON
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum OtelAnyValue {
-    StringValue(String),
-    IntValue(i64),
-    DoubleValue(f64),
-    BoolValue(bool),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OtelStatus {
-    /// 1 = STATUS_CODE_OK, 2 = STATUS_CODE_ERROR
-    pub code: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-}
-
-/// Reconstruct the agent's causal timeline from both the HOT wal and cold LanceDB, cross-reference active Merkle roots,
-/// and map the timeline into an OTLP-compliant otel json trace trnasport
 pub async fn export_agent_timeline_otel(
     _auth: ValidatedIdentity,
     State(state): State<ApiState>,
     Path(agent_hex): Path<String>,
 ) -> Result<Json<OtelExportRequest>, ApiError> {
-    // Gather historical timeline nodes via the existing LanceDB + WAL scatter_engine
+    // Scatter-gather historical timeline from lanceDB and WAL
     let lance_future = state.lance.fetch_historical_timeline(&agent_hex);
     let wal_future = async {
         state
@@ -2026,27 +1941,17 @@ pub async fn export_agent_timeline_otel(
     let mut nodes = wal_res.unwrap_or_default();
     if let Ok(mut cold_res) = lance_res {
         nodes.append(&mut cold_res);
-    };
-
-    // Sort Chronologically by TxID
-    nodes.sort_by(|a, b| a.tx_id.cmp(&b.tx_id));
+    }
 
     if nodes.is_empty() {
         return Err(ApiError::NotFound(format!(
-            "No recorded timeline found for agent {}",
+            "No recorded timeline for agent {}",
             agent_hex
         )));
     }
 
-    // Deterministically derive a 16-byte Trace ID for this agent session. This groups all steps of this agent under a single unified trace in Datadog
-    let mut trace_hasher = blake3::Hasher::new_derive_key("raqim.otel.v1.trace_id");
-    trace_hasher.update(agent_hex.as_bytes());
-    trace_hasher.update(state.config.tenant_id.as_bytes());
-    let trace_id_bytes = trace_hasher.finalize();
-    let trace_id_hex = hex::encode(&trace_id_bytes.as_bytes()[..16]);
-
-    // Resolve current Merkle Root for cryptographic attestation
-    let active_merkle_root = state
+    // fetch active merkle root
+    let active_root = state
         .axon
         .batch_archive
         .iter()
@@ -2055,149 +1960,18 @@ pub async fn export_agent_timeline_otel(
         .unwrap_or_else(|| {
             "0000000000000000000000000000000000000000000000000000000000000000".to_string()
         });
+    // -- what happens if the agent never has a merkle root? Maybe  the buffer is still active and yeet to seal?
 
-    let mut spans = Vec::new();
-    let mut prevoius_span_id: Option<String> = None;
+    // Delegate transformation to the dedicated domain builder
+    let otlp_payload = otel::build_otlp_trace_from_timeline(
+        &agent_hex,
+        &state.config.tenant_id,
+        &state.global_net.os_node_id,
+        &active_root,
+        &nodes,
+    );
 
-    //  Map each causal node into a standard OpenTelemetry Span
-    for (ordinal, node) in nodes.iter().enumerate() {
-        // Derive a unique 8-byte span ID from the lower bits of the TxID
-        let span_id_u64 = (node.tx_id & 0xFFFF_FFFF_FFFF_FFFF) as u64;
-        let span_id_hex = format!("{:016x}", span_id_u64);
-
-        // Convert RFC3339 or millisecond timestamp into UNIX nanosec strings
-        let start_time_nano = node
-            .timestamp
-            .parse::<i64>()
-            .map(|ms| (ms * 1_000_000).to_string())
-            .unwrap_or_else(|_| {
-                let now_ns = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos();
-
-                now_ns.to_string()
-            });
-
-        // Synthetic end time: start + 2ms hardware WAL sync duration
-        let end_time_nanos = (start_time_nano.parse::<u128>().unwrap_or(0) + 2_000_000).to_string();
-
-        // Construct Enriched Attributes: Stardard GenAI + Raqim Proofs
-        let mut attributes = Vec::new();
-
-        // Standard GenAI conventions
-        attributes.push(OtelKeyValue {
-            key: "gen_ai.operations.name".to_string(),
-            value: OtelAnyValue::StringValue(
-                if node.payload_preview.contains("findings")
-                    || node.payload_preview.contains("prompt")
-                {
-                    "chat".to_string()
-                } else {
-                    "execute_tool".to_string()
-                },
-            ),
-        });
-
-        attributes.push(OtelKeyValue {
-            key: "gen_ai.system".to_string(),
-            value: OtelAnyValue::StringValue(if node.payload_preview.contains("GEMINI") {
-                "gemini".to_string()
-            } else {
-                "raqim_autonomous".to_string()
-            }),
-        });
-
-        attributes.push(OtelKeyValue {
-            key: "gen_ai.completion".to_string(),
-            value: OtelAnyValue::StringValue(node.payload_preview.clone()),
-        });
-
-        // Raqim Cryptographic Integrity Attributes
-        attributes.push(OtelKeyValue {
-            key: "raqim.agent_hex".to_string(),
-            value: OtelAnyValue::StringValue(agent_hex.clone()),
-        });
-
-        attributes.push(OtelKeyValue {
-            key: "raqim.tx_id".to_string(),
-            value: OtelAnyValue::StringValue(format!("{:032x}", node.tx_id)),
-        });
-
-        attributes.push(OtelKeyValue {
-            key: "raqim.step_ordinal".to_string(),
-            value: OtelAnyValue::IntValue(ordinal as i64),
-        });
-
-        attributes.push(OtelKeyValue {
-            key: "raqim.merkle_root".to_string(),
-            value: OtelAnyValue::StringValue(active_merkle_root.clone()),
-        });
-
-        attributes.push(OtelKeyValue {
-            key: "raqim.agent_status".to_string(),
-            value: OtelAnyValue::StringValue(node.agent_status.clone()),
-        });
-
-        attributes.push(OtelKeyValue {
-            key: "raqim.aegis_verdict".to_string(),
-            value: OtelAnyValue::StringValue("AUTHORIZED".to_string()),
-        });
-
-        spans.push(OtelSpan {
-            trace_id: trace_id_hex.clone(),
-            span_id: span_id_hex.clone(),
-            parent_span_id: prevoius_span_id.clone(),
-            name: format!("Step {}:{}", ordinal, node.agent_status),
-            kind: 1,
-            start_time_unix_nano: start_time_nano,
-            end_time_unix_nano: end_time_nanos,
-            attributes,
-            status: OtelStatus {
-                code: if node.agent_status == "HALTED" { 2 } else { 1 },
-                message: None,
-            },
-        });
-
-        // Establish the causal chain.
-        prevoius_span_id = Some(span_id_hex);
-    }
-
-    // Assemble the OTLP Resource Spans payload
-    let response = OtelExportRequest {
-        resource_spans: vec![OtelResourceSpans {
-            resource: OtelResource {
-                attributes: vec![
-                    OtelKeyValue {
-                        key: "service.name".to_string(),
-                        value: OtelAnyValue::StringValue("raqim-sovereign-agent".to_string()),
-                    },
-                    OtelKeyValue {
-                        key: "service.version".to_string(),
-                        value: OtelAnyValue::StringValue("0.1.2".to_string()),
-                    },
-                    OtelKeyValue {
-                        key: "raqim.tenant_id".to_string(),
-                        value: OtelAnyValue::StringValue(state.config.tenant_id.clone()),
-                    },
-                    OtelKeyValue {
-                        key: "raqim.node_id".to_string(),
-                        value: OtelAnyValue::StringValue(state.global_net.os_node_id.clone()),
-                    },
-                ],
-            },
-
-            scope_spans: vec![OtelScopeSpans {
-                scope: OtelScope {
-                    name: "raqim-core-kernel".to_string(),
-                    version: "0.1.2".to_string(),
-                },
-                spans,
-            }],
-        }],
-    };
-
-    Ok(Json(response))
+    Ok(Json(otlp_payload))
 }
 
 // Route Builder
