@@ -1967,7 +1967,7 @@ pub struct OtelSpan {
     pub trace_id: String,
     pub span_id: String,
     /// optional parent span for hierarchical DAG rendering
-    #[serde(skip_serialization_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_span_id: Option<String>,
     pub name: String,
     /// SpanKind 1 = intrnal, 3 = Client
@@ -2002,7 +2002,7 @@ pub enum OtelAnyValue {
 pub struct OtelStatus {
     /// 1 = STATUS_CODE_OK, 2 = STATUS_CODE_ERROR
     pub code: u32,
-    #[serde(skip_serialization_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }
 
