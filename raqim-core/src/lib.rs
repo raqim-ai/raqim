@@ -15,6 +15,7 @@ pub mod state;
 pub mod utils;
 
 pub mod hot_memory;
+pub mod otel;
 pub mod witness;
 
 use blake3::Hasher;
