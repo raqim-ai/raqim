@@ -720,6 +720,79 @@ class RaqimClient:
         msg = {"type": "RegisterCapability", "capability": capability}
         await self._ws_connection.send(json.dumps(msg))
 
+    # Otel Export Engine
+    async def export_to_otel(self, endpoint: str, headers: Optional[Dict[str, str]] = None, timeout: float = 10.0 ) -> Dict[str, Any]: 
+        """
+        Gathers the cryptographically verified agent timeline from Raqim daemon, enriches it with
+        OTLP v1/traces GenAI semantic convention and Merkle proof hashes, and transmit it directly 
+        to an Otel collector or enterprise APM backend (e.g., Datadog, Grafana Tempo, Dynatrace, New Relic). 
+        
+        Args: 
+            endpoint: OTLP/HTTP target (e.g 'http://otel-collector:4318/v1/traces')
+            headers: Optional HTTP headers (e.g. {"Authorization": "Bearer <token>"})
+            timeout: Maximum network wait time in seconds
+        
+        Returns: 
+            Dict containing transmission status and exported span counts.
+        """
+        # Fetch the authoritative OTLP trace from the dameon's verifiable ledger 
+        daemon_otel_url = f"{self.http_url}/v1/session/timeline/{self.agent_hex}/export/otel"
+        async with httpx.AsyncClient(timeout=timeout) as http: 
+            try: 
+                res = http.get(daemon_otel_url)
+                if res.status_codee != 200: 
+                    raise RaqimClientError(
+                        f"Daemon failed to synthesize OTLP trace for {self.agent_hex}: ", 
+                        f"HTTTP {res.status_code} - {res.text}"
+                    )
+                otlp_payload = res.json()
+            except Exception as e: 
+                raise RaqimClientError(f"Failed to fetch OTLP trace from Raqim daemon: {e}")
+            
+        # Enrich the payload with client-side host metadata and agent alias 
+        resource = otlp_payload["resourceSpans"][0]["resource"]["attributes"] 
+        resource.append({
+            "key": "raqim.agent_alias",
+            "value": {"stringValue": self.alias}
+        })
+        resource.append({ 
+            "key": "raqim.execution_mode",
+            "value": {"stringValue": self.mode}                 
+        })
+        resource.append({
+            "key": "raqim.is_forked",
+            "value": {"boolValue": self.is_forked}            
+        })      
+        
+        # Transmit the standard OTLP/HTTP JSON Payload to the collector
+        req_headers = {"Content-Type": "application/json"}
+        if headers: 
+            req_headers.update(headers)
+        
+        try: 
+            post_resp = await http.post(endpoint, json=otlp_payload, headers=req_headers)
+            success = post_resp.status_code in (200, 202)
+            
+            span_count = len(otlp_payload["resourceSpans"][0]["scopeSpans"][0]["spans"]) 
+            
+            if success: 
+                print(
+                    f"[OTEL EXPORT SUCCESS] Pushed {span_count} spans for agent '{self.alias}' to {endpoint} (HTTP {post_resp.status_code}) "
+                )
+            else: 
+                print(f"[OTEL EXPORT WARN] Collector returned HTTP {post_resp.status_code}: {post_resp.text} ")
+
+            return {
+                "success": success, 
+                "status_code": post_resp.status_code, 
+                "spans_exported": span_count,
+                "target_endpoint": endpoint, 
+                "agent_hex": self.agent_hex,
+            }
+        except Exception as e: 
+            raise RaqimClientError(f"Failed to post OTLP payload to {endpoint}: {e}")
+        
+
 # Zero Dependency Offline merkle proof verifier
 def verify_state_proof_offline(payload_bytes: bytes, agent_id_str: str, proof_dict: dict) -> bool:
     agent_id_bytes = bytes.fromhex(agent_id_str)
