@@ -198,6 +198,60 @@ impl AegisGateKeeper {
         }
     }
 
+    /// Persists a quartantine record to durable storage
+    fn persist_quarantine_to_disk(record: &QuarantineRecord) {
+        let path = std::path::Path::new("./vault/quartantine.json");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        // Read existing records or create new list
+        let mut records: Vec<QuarantineRecord> = if path.exists() {
+            std::fs::read_to_string(path)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        // Duplicate by agent_hex
+        records.retain(|r| r.agent_hex != record.agent_hex);
+        records.push(record.clone());
+
+        if let Ok(json_bytes) = serde_json::to_vec_pretty(&records) {
+            let _ = std::fs::write(path, json_bytes);
+        }
+    }
+
+    // Hydrate QuarantineRecord RAM from disk
+    pub fn hydrate_quarantine_from_disk(&self) -> usize {
+        let path = std::path::Path::new("./vault/quarantine.json");
+        if !path.exists() {
+            return 0;
+        }
+
+        let records: Vec<QuarantineRecord> = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let count = records.len();
+
+        for record in records {
+            self.quarantine_blocklist
+                .insert(record.agent_hex.clone(), record);
+        }
+
+        if count > 0 {
+            println!(
+                "[AEGIS BOOT] Hydrated {} active quarantitned agents from durable storage.",
+                count
+            );
+        }
+
+        count
+    }
+
     /// Hot-reloaded API: Override memory policy maps when file changes occur on disk
     pub fn reload_policies(&self, new_policies: HashMap<String, GroupPolicy>) {
         let mut guard = self.group_policies.write();
@@ -230,6 +284,8 @@ impl AegisGateKeeper {
         // Lock the agent down at network layer instantly.
         self.quarantine_blocklist
             .insert(agent_hex.to_string(), record.clone());
+
+        Self::persist_quarantine_to_disk(&record);
 
         // Shout into the event bus
         let _ = self.tx.send(SystemEvent::GlobalQuarantineSync {
