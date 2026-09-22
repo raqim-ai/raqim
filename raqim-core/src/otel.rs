@@ -95,8 +95,6 @@ pub struct OtelStatus {
 // Helper methods to help construct attr cleanly without repetitive boilerplate
 impl OtelKeyValue {
     pub fn string(key: &str, val: impl Into<String>) -> Self {
-        // - coming ----------
-
         Self {
             key: key.to_string(),
             value: OtelAnyValue::StringValue(val.into()),
@@ -123,15 +121,16 @@ pub fn build_otlp_trace_from_timeline(
     let mut trace_hasher = blake3::Hasher::new_derive_key("raqim.otel.v1.trace_id");
     trace_hasher.update(agent_hex.as_bytes());
     trace_hasher.update(tenant_id.as_bytes());
-    let trace_id_bytes = trace_hasher.finalize(); // coming ------------
-    let trace_id_hex = hex::encode(&trace_id_bytes.as_bytes()[..16]);
+    let mut trace_id_bytes = [0u8; 16];
+    trace_hasher.finalize_xof().fill(&mut trace_id_bytes);
+    let trace_id_hex = hex::encode(trace_id_bytes);
 
     let mut spans = Vec::with_capacity(nodes.len());
     let mut prevoious_span_id: Option<String> = None;
 
     for (ordinal, node) in nodes.iter().enumerate() {
         // Derive unique 8-byte span ID from the lower bits of the TxID
-        let span_id_u64 = (node.tx_id & 0xFFFF_FFFF_FFFF_FFFF) as u64; // -- coming -------------
+        let span_id_u64 = (node.tx_id & 0xFFFF_FFFF_FFFF_FFFF) as u64;
         let span_id_hex = format!("{:016x}", span_id_u64);
 
         // Convert millisecond or RFC339 timesttamp to UNIX nanoseconds
@@ -150,14 +149,14 @@ pub fn build_otlp_trace_from_timeline(
         // Synthetic end time: start + 2ms hardware WAL sync duration
         let end_time_nanos = (start_time_nano.parse::<u128>().unwrap_or(0) + 2_000_000).to_string();
 
-        let is_halted = node.agent_status == "HALTED"; // does trigger_quarantine ensures this
+        let is_halted = node.agent_status == "HALTED";
 
         // Build span attribuutes (Stndard GenAI + Raqim cryptotgraphic attestation)
         let attributes = vec![
             OtelKeyValue::string("gen_ai.completion", &node.payload_preview),
             OtelKeyValue::string("raqim.agent_hex", agent_hex),
             OtelKeyValue::string("raqim.tx_id", format!("{:032x}", node.tx_id)),
-            OtelKeyValue::int("raqim.step_ordinal", ordinal as i64), // -- coming ---
+            OtelKeyValue::int("raqim.step_ordinal", ordinal as i64),
             OtelKeyValue::string("raqim.merkle_root", active_merkle_root),
             OtelKeyValue::string("raqim.agent_status", &node.agent_status),
             OtelKeyValue::string(
