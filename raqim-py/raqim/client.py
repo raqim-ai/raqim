@@ -136,7 +136,7 @@ class TraceMetadata:
         
         return meta 
         
-        
+
 class RaqimClient:
     
     def __init__(
@@ -166,6 +166,7 @@ class RaqimClient:
         self.is_forked = False
         self.last_tx_id: Optional[str] = None
         self.recorded_tx_ids: Dict[int, str] = {}
+        self._step_metadata: Dict[int, TraceMetadata] = {}
 
         # THE ASYNC MULTIPLEXER (Python's equivalent to DashMap + oneshot)
         self._pending_requests: Dict[str, asyncio.Future] = {}
@@ -309,7 +310,10 @@ class RaqimClient:
         """
         def decorator(fn: Callable[..., Any]) -> Callable[..., Any]: 
             if inspect.isasyncgenfunction(fn): 
+                
+                # ----------------------------------------------------
                 # Path A: Async Generator (Streaming LLM tokens)
+                # ----------------------------------------------------
                 @functools.wraps(fn)
                 async def async_gen_wrapper(*args: Any, **kwargs: Any) -> AsyncGenerator[Any, None]:
                     step = _execution_step_context.get()
@@ -342,14 +346,22 @@ class RaqimClient:
                     async for item in fn(*args, **kwargs):
                         accumulated_chunks.append(item)
                         yield item 
+                        
+                    # Capture telemetry metadata 
+                    meta = TraceMetadata.from_response(accumulated_chunks, default_model=model)
+                    if system: 
+                        meta.system = system
+                    self._step_metadata[step] = meta
                     
                     # Persist accumulated stream to WAL
                     await self._persist_effect(step, call_sig_hex, accumulated_chunks, target_ns)
                 
                 return async_gen_wrapper
             
+            # ----------------------------------------------------
+            # Path B: Standard Async Coroutine
+            # ----------------------------------------------------
             elif asyncio.iscoroutinefunction(fn): 
-                # Path B: Standard Async Coroutine
                 @functools.wraps(fn) 
                 async def async_wrapper(*args: Any, **kwargs: Any) -> Any: 
                     step = _execution_step_context.get()
@@ -377,13 +389,22 @@ class RaqimClient:
 
                     # Live execution
                     result = await fn(*args, **kwargs) 
+                    
+                    # Capture telemetry metadata
+                    meta = TraceMetadata.from_response(result, default_model=model)
+                    if system: 
+                        meta.system = system 
+                    self._step_metadata[step] = meta 
+                    
                     await self._persist_effect(step, call_sig_hex, result, target_ns)
                     return result
                 
                 return async_wrapper
             
+            # ---------------------------------------
+            # Path C: Synchronous function
+            # ---------------------------------------
             else: 
-                # Path C: Synchronous function
                 @functools.wraps(fn)
                 def sync_wrapper(*args: Any, **kwargs: Any) -> Any: 
                     step = _execution_step_context.get()
@@ -418,6 +439,13 @@ class RaqimClient:
                             pool.submit(lambda: asyncio.run(self._preflight_effect(step, call_sig_hex, target_ns))).result()
 
                         result = fn(*args, **kwargs)
+                        
+                        meta = TraceMetadata.from_response(result, default_model=model)
+                        if system: 
+                            meta.system = system
+                        
+                        self._step_metadata[step] = meta 
+                        
                         # Schedule persistence without blocking the running loop
                         asyncio.create_task(self._persist_effect(step, call_sig_hex, result, target_ns))
                         return result
@@ -440,6 +468,12 @@ class RaqimClient:
                         loop.run_until_complete(self._preflight_effect(step, call_sig_hex, target_ns))
 
                         result = fn(*args, **kwargs)
+                        
+                        meta = TraceMetadata.from_response(result, default_model=model)
+                        if system: 
+                            meta.system = system
+                        self._step_metadata[step] = meta 
+                        
                         loop.run_until_complete(self._persist_effect(step, call_sig_hex, result, target_ns))
                         return result 
                 
@@ -702,7 +736,32 @@ class RaqimClient:
         resource.append({
             "key": "raqim.is_forked",
             "value": {"boolValue": self.is_forked}            
-        })      
+        })   
+        
+        # Enrich daemon spans with client-side token and model data
+        for span in otlp_payload["resourceSpans"][0]["scopeSpans"][0]["spans"]: 
+            # Look up step ordinal attr
+            for attr in span["attributes"]:
+                if attr["key"] == "raqim.step_ordinal": 
+                    step = attr["value"].get("intValue")
+                    if step in self._step_metadata: 
+                        step_meta = self._step_metadata[step]
+                        if step_meta.model: 
+                            span["attributes"].append({
+                                "key": "gen_ai.request.model", 
+                                "value": {"stringValue": step_meta.model}
+                            })   
+                        if step_meta.prompt_tokens is not None:
+                            span["attributes"].append({
+                                "key": "gen_ai.usage.input_tokens", 
+                                "value": { "intValue": step_meta.prompt_tokens }
+                            })
+                        
+                        if step_meta.completion_tokens is not None: 
+                            span["attributes"].append({
+                                "key": "gen_ai.usage.output_token", 
+                                "value": {"intValue": step_meta.completion_tokens }
+                            })
         
         # Transmit the standard OTLP/HTTP JSON Payload to the collector
         req_headers = {"Content-Type": "application/json"}
