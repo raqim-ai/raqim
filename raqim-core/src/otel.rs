@@ -128,10 +128,26 @@ pub fn build_otlp_trace_from_timeline(
     let mut spans = Vec::with_capacity(nodes.len());
     let mut prevoious_span_id: Option<String> = None;
 
-    for (ordinal, node) in nodes.iter().enumerate() {
+    for (idx, node) in nodes.iter().enumerate() {
         // Derive unique 8-byte span ID from the lower bits of the TxID
         let span_id_u64 = (node.tx_id & 0xFFFF_FFFF_FFFF_FFFF) as u64;
         let span_id_hex = format!("{:016x}", span_id_u64);
+
+        // Ordinal Extraction: Check if payload preview contains "[STEP <N> EFFECT]"
+        let (step_num, span_name) = if let Some(pos) = node.payload_preview.find("STEP ") {
+            let rest = &node.payload_preview[pos + 6..];
+            if let Some(end) = rest.find(" EFFECT") {
+                let parsed_num = rest[..end].parse::<i64>().unwrap_or(idx as i64);
+                (
+                    parsed_num,
+                    format!("Step {}: {}", parsed_num, node.agent_status),
+                )
+            } else {
+                (idx as i64, format!("Event {}: {}", idx, node.agent_status))
+            }
+        } else {
+            (idx as i64, format!("Event {}: {}", idx, node.agent_status))
+        };
 
         // Convert millisecond or RFC339 timesttamp to UNIX nanoseconds
         let start_time_nano = node
@@ -156,7 +172,7 @@ pub fn build_otlp_trace_from_timeline(
             OtelKeyValue::string("gen_ai.completion", &node.payload_preview),
             OtelKeyValue::string("raqim.agent_hex", agent_hex),
             OtelKeyValue::string("raqim.tx_id", format!("{:032x}", node.tx_id)),
-            OtelKeyValue::int("raqim.step_ordinal", ordinal as i64),
+            OtelKeyValue::int("raqim.step_ordinal", step_num),
             OtelKeyValue::string("raqim.merkle_root", active_merkle_root),
             OtelKeyValue::string("raqim.agent_status", &node.agent_status),
             OtelKeyValue::string(
@@ -173,7 +189,7 @@ pub fn build_otlp_trace_from_timeline(
             trace_id: trace_id_hex.clone(),
             span_id: span_id_hex.clone(),
             parent_span_id: prevoious_span_id.clone(),
-            name: format!("Step {}:{}", ordinal, node.agent_status),
+            name: span_name,
             kind: 1,
             start_time_unix_nano: start_time_nano,
             end_time_unix_nano: end_time_nanos,

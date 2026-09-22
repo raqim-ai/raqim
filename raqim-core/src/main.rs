@@ -305,6 +305,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // THE PHOENIX HYDRATION PROTOCOL: Reconstructs in-memory Axon Merkle trees from uncompacted WAL frames on boot.
     // ============================
 
+    aegis.hydrate_quarantine_from_disk();
+
     println!(
         "[INITIALIIZATION] Phoenix protocol: Commencing state rehydration scanning from active WAL frame sequences..."
     );
