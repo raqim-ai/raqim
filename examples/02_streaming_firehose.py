@@ -90,8 +90,8 @@ async def main():
     print("Raqim High-Velocity TCP Data Plane: Streaming Firehose Demo")
     print("==================================================================")
     print("Targeting: 127.0.0.1:8080 (TCP Ingress) | 127.0.0.1:8081 (Control Plane)")
-    print("👉 Open http://localhost:3000 to watch the Semantic Firehose update live!\n")
-    
+    print("👉 Open http://localhost:3000 to watch  the Semantic Firehose update live!\n")
+
     # Use finance_worker or admin_group to avoid analyst_group's strict 100 TPS quota
     k1, c1 = await forge_credentials("triage_screener", "finance_worker")
     k2, c2 = await forge_credentials("settlement_engine", "finance_worker")
