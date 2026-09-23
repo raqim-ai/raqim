@@ -198,9 +198,9 @@ impl AegisGateKeeper {
         }
     }
 
-    /// Persists a quartantine record to durable storage
+    /// Persists a quarantine record to durable storage
     fn persist_quarantine_to_disk(record: &QuarantineRecord) {
-        let path = std::path::Path::new("./vault/quartantine.json");
+        let path = std::path::Path::new("./vault/quarantine.json");
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }

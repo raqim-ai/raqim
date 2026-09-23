@@ -759,7 +759,7 @@ class RaqimClient:
                         
                         if step_meta.completion_tokens is not None: 
                             span["attributes"].append({
-                                "key": "gen_ai.usage.output_token", 
+                                "key": "gen_ai.usage.output_tokens", 
                                 "value": {"intValue": step_meta.completion_tokens }
                             })
         
@@ -768,28 +768,29 @@ class RaqimClient:
         if headers: 
             req_headers.update(headers)
         
-        try: 
-            post_resp = await http.post(endpoint, json=otlp_payload, headers=req_headers)
-            success = post_resp.status_code in (200, 202)
-            
-            span_count = len(otlp_payload["resourceSpans"][0]["scopeSpans"][0]["spans"]) 
-            
-            if success: 
-                print(
-                    f"[OTEL EXPORT SUCCESS] Pushed {span_count} spans for agent '{self.alias}' to {endpoint} (HTTP {post_resp.status_code}) "
-                )
-            else: 
-                print(f"[OTEL EXPORT WARN] Collector returned HTTP {post_resp.status_code}: {post_resp.text} ")
+        async with httpx.AsyncClient(timeout=timeout) as http: 
+            try: 
+                post_resp = await http.post(endpoint, json=otlp_payload, headers=req_headers)
+                success = post_resp.status_code in (200, 202)
+                
+                span_count = len(otlp_payload["resourceSpans"][0]["scopeSpans"][0]["spans"]) 
+                
+                if success: 
+                    print(
+                        f"[OTEL EXPORT SUCCESS] Pushed {span_count} spans for agent '{self.alias}' to {endpoint} (HTTP {post_resp.status_code}) "
+                    )
+                else: 
+                    print(f"[OTEL EXPORT WARN] Collector returned HTTP {post_resp.status_code}: {post_resp.text} ")
 
-            return {
-                "success": success, 
-                "status_code": post_resp.status_code, 
-                "spans_exported": span_count,
-                "target_endpoint": endpoint, 
-                "agent_hex": self.agent_hex,
-            }
-        except Exception as e: 
-            raise RaqimClientError(f"Failed to post OTLP payload to {endpoint}: {e}")
+                return {
+                    "success": success, 
+                    "status_code": post_resp.status_code, 
+                    "spans_exported": span_count,
+                    "target_endpoint": endpoint, 
+                    "agent_hex": self.agent_hex,
+                }
+            except Exception as e: 
+                raise RaqimClientError(f"Failed to post OTLP payload to {endpoint}: {e}")
         
 
 # Zero Dependency Offline merkle proof verifier
