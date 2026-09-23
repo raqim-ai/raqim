@@ -121,6 +121,9 @@ pub fn build_otlp_trace_from_timeline(
     let mut trace_hasher = blake3::Hasher::new_derive_key("raqim.otel.v1.trace_id");
     trace_hasher.update(agent_hex.as_bytes());
     trace_hasher.update(tenant_id.as_bytes());
+    if let Some(first_node) = nodes.first() {
+        trace_hasher.update(&first_node.tx_id.to_le_bytes());
+    }
     let mut trace_id_bytes = [0u8; 16];
     trace_hasher.finalize_xof().fill(&mut trace_id_bytes);
     let trace_id_hex = hex::encode(trace_id_bytes);
@@ -134,9 +137,9 @@ pub fn build_otlp_trace_from_timeline(
         let span_id_hex = format!("{:016x}", span_id_u64);
 
         // Ordinal Extraction: Check if payload preview contains "[STEP <N> EFFECT]"
-        let (step_num, span_name) = if let Some(pos) = node.payload_preview.find("STEP ") {
+        let (step_num, span_name) = if let Some(pos) = node.payload_preview.find("[STEP ") {
             let rest = &node.payload_preview[pos + 6..];
-            if let Some(end) = rest.find(" EFFECT") {
+            if let Some(end) = rest.find(" EFFECT]") {
                 let parsed_num = rest[..end].parse::<i64>().unwrap_or(idx as i64);
                 (
                     parsed_num,
@@ -150,17 +153,22 @@ pub fn build_otlp_trace_from_timeline(
         };
 
         // Convert millisecond or RFC339 timesttamp to UNIX nanoseconds
-        let start_time_nano = node
-            .timestamp
-            .parse::<i64>()
-            .map(|ms| (ms * 1_000_000).to_string())
-            .unwrap_or_else(|_| {
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos()
-                    .to_string()
-            });
+        let ts_val = node.timestamp.parse::<i64>().unwrap_or_else(|_| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64
+        });
+
+        // If < 10 billion, it's seconds -> multiply by 1e9 for nanoseconds
+        // If < 10 trillion, it's milliseconds -> multiply by 1e6
+        let start_time_nano = if ts_val < 10_000_000_000 {
+            (ts_val as i128 * 1_000_000_000).to_string()
+        } else if ts_val < 10_000_000_000_000 {
+            (ts_val as i128 * 1_000_000).to_string()
+        } else {
+            ts_val.to_string()
+        };
 
         // Synthetic end time: start + 2ms hardware WAL sync duration
         let end_time_nanos = (start_time_nano.parse::<u128>().unwrap_or(0) + 2_000_000).to_string();

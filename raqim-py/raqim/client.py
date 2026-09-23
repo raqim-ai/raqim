@@ -713,8 +713,8 @@ class RaqimClient:
         daemon_otel_url = f"{self.http_url}/v1/session/timeline/{self.agent_hex}/export/otel"
         async with httpx.AsyncClient(timeout=timeout) as http: 
             try: 
-                res = http.get(daemon_otel_url)
-                if res.status_codee != 200: 
+                res = await http.get(daemon_otel_url)
+                if res.status_code != 200: 
                     raise RaqimClientError(
                         f"Daemon failed to synthesize OTLP trace for {self.agent_hex}: ", 
                         f"HTTTP {res.status_code} - {res.text}"
