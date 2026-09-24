@@ -199,30 +199,11 @@ impl AegisGateKeeper {
     }
 
     /// Persists a quarantine record to durable storage via control journal
-    fn persist_quarantine_to_disk(record: &QuarantineRecord) {
+    fn persist_quarantine_to_journal(record: &QuarantineRecord) {
         let _ = crate::checkpoint::CheckpointEngine::append_control_mutation(
             std::path::Path::new("./vault/control_journal.bin"),
             &crate::checkpoint::ControlMutation::Quarantine(record.clone()),
         );
-
-        // Also write legacy json for fallback compatibility
-        let path = std::path::Path::new("./vault/quarantine.json");
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let mut records: Vec<QuarantineRecord> = if path.exists() {
-            std::fs::read_to_string(path)
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        records.retain(|r| r.agent_hex != record.agent_hex);
-        records.push(record.clone());
-        if let Ok(json_bytes) = serde_json::to_vec_pretty(&records) {
-            let _ = std::fs::write(path, json_bytes);
-        }
     }
 
     /// Exports active quarantined records for checkpointing
@@ -302,7 +283,7 @@ impl AegisGateKeeper {
         self.quarantine_blocklist
             .insert(agent_hex.to_string(), record.clone());
 
-        Self::persist_quarantine_to_disk(&record);
+        Self::persist_quarantine_to_journal(&record);
 
         // Shout into the event bus
         let _ = self.tx.send(SystemEvent::GlobalQuarantineSync {
@@ -627,3 +608,4 @@ impl AegisGateKeeper {
         ))
     }
 }
+    

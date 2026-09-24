@@ -989,19 +989,6 @@ async fn lift_qurantine_and_resurrect(
             },
         );
 
-        // Remove from Disk (legacy fallback)
-        let path = std::path::Path::new("./vault/quarantine.json");
-        if path.exists() {
-            if let Ok(content) = std::fs::read_to_string(path) {
-                if let Ok(mut records) = serde_json::from_str::<Vec<QuarantineRecord>>(&content) {
-                    records.retain(|r| r.agent_hex != payload.agent_hex);
-                    if let Ok(bytes) = serde_json::to_vec_pretty(&records) {
-                        let _ = std::fs::write(path, bytes);
-                    }
-                }
-            }
-        }
-
         // Also update the Ram process table so the Topology page knows it's alive again.
         // TODO: Update the  namespace
         state
