@@ -1,6 +1,7 @@
 pub mod aegis;
 pub mod api;
 pub mod axon;
+pub mod checkpoint;
 pub mod compactor;
 
 pub mod config;

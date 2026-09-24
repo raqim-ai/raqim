@@ -981,7 +981,15 @@ async fn lift_qurantine_and_resurrect(
         .remove(&payload.agent_hex)
         .is_some()
     {
-        // Remove from Disk
+        // Append to durable control journal
+        let _ = crate::checkpoint::CheckpointEngine::append_control_mutation(
+            std::path::Path::new("./vault/control_journal.bin"),
+            &crate::checkpoint::ControlMutation::LiftQuarantine {
+                agent_hex: payload.agent_hex.clone(),
+            },
+        );
+
+        // Remove from Disk (legacy fallback)
         let path = std::path::Path::new("./vault/quarantine.json");
         if path.exists() {
             if let Ok(content) = std::fs::read_to_string(path) {

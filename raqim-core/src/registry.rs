@@ -1,9 +1,9 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AgentProcess {
     pub agent_hex: String,
     pub alias: String,
@@ -48,6 +48,18 @@ impl SwarmRegistry {
     pub fn quarantine_agent(&self, agent_hex: &str) {
         if let Some(mut process) = self.active_agents.get_mut(agent_hex) {
             process.status = "Quarantined".to_string();
+        }
+    }
+
+    /// Exports all live agent processes for checkpointing
+    pub fn export_agents(&self) -> Vec<AgentProcess> {
+        self.active_agents.iter().map(|e| e.value().clone()).collect()
+    }
+
+    /// Hydrates agent processes from a checkpoint
+    pub fn hydrate_agents(&self, agents: Vec<AgentProcess>) {
+        for a in agents {
+            self.active_agents.insert(a.agent_hex.clone(), a);
         }
     }
 }

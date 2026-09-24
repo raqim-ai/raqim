@@ -166,4 +166,30 @@ impl SwarmStateRegistry {
 
         purge_count
     }
+
+    /// Exports binary Loro snapshots for all active namespace shards
+    pub fn export_all_snapshots(&self) -> std::collections::HashMap<String, Vec<u8>> {
+        let mut map = std::collections::HashMap::new();
+        for entry in self.shards.iter() {
+            let ns = entry.key().clone();
+            let brain = entry.value();
+            if let Ok(bytes) = brain.doc.write().export(loro::ExportMode::Snapshot) {
+                map.insert(ns, bytes);
+            }
+        }
+        map
+    }
+
+    /// Hydrates namespaces from binary snapshots
+    pub fn import_snapshots(&self, snapshots: std::collections::HashMap<String, Vec<u8>>) {
+        for (ns, snapshot_bytes) in snapshots {
+            let brain = self.get_or_create_brain(&ns);
+            if let Err(e) = brain.clone().doc.write().import(&snapshot_bytes) {
+                eprintln!(
+                    "[CRDT HYDRATION ERROR] Failed to import snapshot for {}: {}",
+                    ns, e
+                );
+            }
+        }
+    }
 }

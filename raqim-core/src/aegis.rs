@@ -198,14 +198,18 @@ impl AegisGateKeeper {
         }
     }
 
-    /// Persists a quarantine record to durable storage
+    /// Persists a quarantine record to durable storage via control journal
     fn persist_quarantine_to_disk(record: &QuarantineRecord) {
+        let _ = crate::checkpoint::CheckpointEngine::append_control_mutation(
+            std::path::Path::new("./vault/control_journal.bin"),
+            &crate::checkpoint::ControlMutation::Quarantine(record.clone()),
+        );
+
+        // Also write legacy json for fallback compatibility
         let path = std::path::Path::new("./vault/quarantine.json");
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-
-        // Read existing records or create new list
         let mut records: Vec<QuarantineRecord> = if path.exists() {
             std::fs::read_to_string(path)
                 .ok()
@@ -214,17 +218,30 @@ impl AegisGateKeeper {
         } else {
             Vec::new()
         };
-
-        // Duplicate by agent_hex
         records.retain(|r| r.agent_hex != record.agent_hex);
         records.push(record.clone());
-
         if let Ok(json_bytes) = serde_json::to_vec_pretty(&records) {
             let _ = std::fs::write(path, json_bytes);
         }
     }
 
-    // Hydrate QuarantineRecord RAM from disk
+    /// Exports active quarantined records for checkpointing
+    pub fn export_quarantines(&self) -> Vec<QuarantineRecord> {
+        self.quarantine_blocklist
+            .iter()
+            .map(|e| e.value().clone())
+            .collect()
+    }
+
+    /// Hydrates quarantine records into RAM from checkpoint
+    pub fn hydrate_quarantines(&self, records: Vec<QuarantineRecord>) {
+        for record in records {
+            self.quarantine_blocklist
+                .insert(record.agent_hex.clone(), record);
+        }
+    }
+
+    // Hydrate QuarantineRecord RAM from legacy disk fallback
     pub fn hydrate_quarantine_from_disk(&self) -> usize {
         let path = std::path::Path::new("./vault/quarantine.json");
         if !path.exists() {
@@ -244,7 +261,7 @@ impl AegisGateKeeper {
 
         if count > 0 {
             println!(
-                "[AEGIS BOOT] Hydrated {} active quarantitned agents from durable storage.",
+                "[AEGIS BOOT] Hydrated {} active quarantined agents from durable storage.",
                 count
             );
         }

@@ -700,6 +700,12 @@ impl MemoryRouter {
 
         self.effect_index.insert(effect_key, record.clone());
 
+        // Durably append to control journal for reboot recovery
+        let _ = crate::checkpoint::CheckpointEngine::append_control_mutation(
+            std::path::Path::new("./vault/control_journal.bin"),
+            &crate::checkpoint::ControlMutation::RecordEffect(record.clone()),
+        );
+
         let payload_str = String::from_utf8(output_payload.clone())
             .unwrap_or_else(|_| format!("[RAW_BYTES: {}]", output_payload.len()));
 
@@ -765,5 +771,32 @@ impl MemoryRouter {
         }
 
         None
+    }
+
+    /// Exports all cached effect records for checkpointing
+    pub fn export_effects(&self) -> Vec<EffectRecord> {
+        self.effect_index.iter().map(|e| e.value().clone()).collect()
+    }
+
+    /// Hydrates effect records from checkpoint
+    pub fn hydrate_effects(&self, effects: Vec<EffectRecord>) {
+        for record in effects {
+            let key = EffectKey::derive(
+                &record.agent_id,
+                record.step_ordinal,
+                &record.call_signature_hash,
+            );
+            self.effect_index.insert(key, record);
+        }
+    }
+
+    /// Directly records an effect without re-journaling (used during replay/hydration)
+    pub fn record_effect_direct(&self, record: EffectRecord) {
+        let key = EffectKey::derive(
+            &record.agent_id,
+            record.step_ordinal,
+            &record.call_signature_hash,
+        );
+        self.effect_index.insert(key, record);
     }
 }
