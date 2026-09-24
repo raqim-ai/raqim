@@ -4,7 +4,7 @@ use rand_core::OsRng;
 use raqim_core::aegis::{AegisConfigFile, AegisGateKeeper};
 use raqim_core::api::{build_admin_router, ApiState, UiEvent};
 use raqim_core::axon::AxonGateKeeper;
-use raqim_core::checkpoint::{CheckpointEngine, ControlMutation, StateCheckpoint};
+use raqim_core::checkpoint::{CheckpointEngine, ControlMutation};
 
 use axum::http::Method;
 use raqim_core::compactor::WalCompactor;
