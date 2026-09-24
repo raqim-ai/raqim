@@ -21,7 +21,7 @@ use futures_util::{stream::StreamExt, SinkExt};
 use serde_json::{json, Value};
 use std::convert::Infallible;
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::{eprintln, format, println, vec};
+use std::{eprintln, format, println};
 use tokio_stream::wrappers::BroadcastStream;
 
 use serde::{Deserialize, Serialize};

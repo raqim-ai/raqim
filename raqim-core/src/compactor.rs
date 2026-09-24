@@ -17,11 +17,10 @@ use std::{
     path::Path,
     println,
     sync::Arc,
-    time::{Duration, Instant, interval_at, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::{
-    sync::{broadcast::Sender, mpsc, oneshot},
-};
+use tokio::sync::{broadcast::Sender, mpsc, oneshot};
+use tokio::time::{interval_at, Instant};
 
 // The 2pc state machine defining the boundary btw Hot WAL and cold lance db
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
