@@ -27,7 +27,8 @@ When autonomous AI agents make tool calls, execute financial transactions, mutat
 4. **Domain-Separated Merkle DAG (Axon):** Batches state transitions into 1,024-leaf binary Merkle trees using BLAKE3 domain-separated hashing, generating compact cryptographic inclusion proofs verifiable offline without network access.
 5. **Conflict-Free State Convergence:** Backed by in-memory CRDT shards (`Loro`) to merge multi-agent causal timelines across namespaces with mathematical guarantees against race conditions.
 6. **$0 Deterministic Replay & Causal Reality Forking:** The `@client.trace` decorator hashes canonical function signatures and arguments. Unmodified replays execute in `<1ms` at **$0.00 API token cost** directly from WAL effect caches. When code or prompts mutate, Raqim automatically isolates execution into a parallel universe (`phantom_`) branch, preserving historical integrity while enabling safe counterfactual exploration.
-7. **Cold Columnar Compaction:** A 2-Phase Commit (2PC) background engine compacts historical WAL frames into LanceDB for hybrid semantic and exact memory retrieval.
+7. **2PC Compaction & Zero-Amnesia State Checkpointing:** A 2-Phase Commit (2PC) engine compacts historical WAL frames into LanceDB for hybrid semantic and exact memory retrieval while capturing atomic binary state snapshots (`state_checkpoint.bin`), guaranteeing instant `<5ms` Phoenix rehydration with zero RAM amnesia across crashes.
+8. **Enterprise OpenTelemetry (OTel) Bridge:** Full projection of Raqim's execution-integrity DAG and Merkle proofs into CNCF-standard OTLP JSON (`client.export_to_otel()`), pushing token metrics and causal spans directly to Datadog, Jaeger, Grafana Tempo, or Langfuse with zero application refactors.
 
 ---
 
@@ -348,6 +349,16 @@ async def main():
     except PermissionError as e:
         print("🛡️ [AEGIS INTERDICTION]: Action blocked at kernel boundary!")
         print(f"   Details: {e}")
+
+    # -------------------------------------------------------------------------
+    # PHASE 5: ENTERPRISE OPENTELEMETRY (OTel) EXPORT
+    # -------------------------------------------------------------------------
+    print("\n--- PHASE 5: OPENTELEMETRY PROJECTION ---")
+    res = await client.export_to_otel(
+        endpoint="http://localhost:4318/v1/traces",
+        headers={"Authorization": "Bearer otel_token"}
+    )
+    print(f"Pushed {res['spans_exported']} execution spans to OTLP collector.")
 
 if __name__ == "__main__":
     asyncio.run(main())
