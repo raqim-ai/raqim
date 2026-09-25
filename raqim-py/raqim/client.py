@@ -96,6 +96,45 @@ class CanonicalSerializer:
         call_sig_hash = hasher.digest(length=32)
         
         return call_sig_hash.hex(), canonical_str
+
+# Programmatic telemetry & attributes protocol
+class TraceMetadata:
+    """Standard Container for step-level execution and model metadata"""
+    def __init__(self, system: Optional[str] = None, model: Optional[str] = None, prompt_tokens: Optional[int] = None, completion_tokens: Optional[int] = None, custom_attributes: Optional[Dict[str, Any]] = None ):
+        self.system = system
+        self.model = model
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens 
+        self.custom_attributes = custom_attributes or {}
+        
+    
+    @classmethod
+    def from_response(cls, response: Any, default_model: Optional[str] = None ) -> "TraceMetadata": 
+        """
+        Programatically extracts standard token usage conforming to the universal 
+        ChatCompletion wire protocol (OpenAI, OpenRouter, vLLM, Ollama) 
+        Falls back cleanly without throwing or brittle type checking  
+        """
+        meta = cls(model=default_model)
+        if not response: 
+            return meta 
+        
+        # Universal wire dict protocol (OpenAI / OpenRouter / vLLM/ Groq)
+        if isinstance(response, dict): 
+            usage = response.get("usage") or response.get("usageMetadata") or {}
+            meta.prompt_tokens = usage.get("prompt_tokens") or usage.get("promptTokenCount")
+            meta.completion_tokens = usage.get("completion_tokens") or usage.get("candidatesToeknCount")
+            meta.model = response.get("model") or default_model
+            return meta 
+
+        # Univeral attr protocol (pydantic / SDK objects)
+        usage_obj = getattr(response, "usage", None) or getattr(response, "usage_metadata", None)
+        if usage_obj: 
+            meta.prompt_tokens = getattr(usage_obj, "prompt_tokens", None) or getattr(usage_obj, "prompt_token_count", None)
+            meta.completion_tokens = getattr(usage_obj, "completion_tokens", None) or getattr(usage_obj, "candidates_token_count", None)
+            meta.model = getattr(response, "model", None) or default_model
+        
+        return meta 
         
 
 class RaqimClient:
@@ -127,6 +166,7 @@ class RaqimClient:
         self.is_forked = False
         self.last_tx_id: Optional[str] = None
         self.recorded_tx_ids: Dict[int, str] = {}
+        self._step_metadata: Dict[int, TraceMetadata] = {}
 
         # THE ASYNC MULTIPLEXER (Python's equivalent to DashMap + oneshot)
         self._pending_requests: Dict[str, asyncio.Future] = {}
@@ -226,7 +266,6 @@ class RaqimClient:
             writer.close()
             await writer.wait_closed()
     
-    
     @contextlib.asynccontextmanager
     async def open_stream(self): 
         """Maintains a single persistent TCP connection for high-throughput batch streaming. """
@@ -260,17 +299,21 @@ class RaqimClient:
             return resp.json()
 
     # @raqim.trace DECORATOR 
-    def trace(self, namespace: str = "/default", custom_signature: Optional[str] = None) -> Callable[..., Any]: 
+    def trace(self, namespace: str = "/default", model: Optional[str] = None, system: Optional[str] = None, custom_signature: Optional[str] = None) -> Callable[..., Any]: 
         """ 
         @raqim.trace Decorator: 
         Wraps any sync function, async coroutine, or async streaming generator. 
         - In 'record' mode: Runs fn live, records result to Raqim WAL. 
         - In 'replay' mode: Bypasses execution, fetches output from WAL ($0 API cost). 
         - On code change: Auto-forks execution into a parallel universe branch.
+        Supoorts Optional model attribution
         """
         def decorator(fn: Callable[..., Any]) -> Callable[..., Any]: 
             if inspect.isasyncgenfunction(fn): 
+                
+                # ----------------------------------------------------
                 # Path A: Async Generator (Streaming LLM tokens)
+                # ----------------------------------------------------
                 @functools.wraps(fn)
                 async def async_gen_wrapper(*args: Any, **kwargs: Any) -> AsyncGenerator[Any, None]:
                     step = _execution_step_context.get()
@@ -303,14 +346,22 @@ class RaqimClient:
                     async for item in fn(*args, **kwargs):
                         accumulated_chunks.append(item)
                         yield item 
+                        
+                    # Capture telemetry metadata 
+                    meta = TraceMetadata.from_response(accumulated_chunks, default_model=model)
+                    if system: 
+                        meta.system = system
+                    self._step_metadata[step] = meta
                     
                     # Persist accumulated stream to WAL
                     await self._persist_effect(step, call_sig_hex, accumulated_chunks, target_ns)
                 
                 return async_gen_wrapper
             
+            # ----------------------------------------------------
+            # Path B: Standard Async Coroutine
+            # ----------------------------------------------------
             elif asyncio.iscoroutinefunction(fn): 
-                # Path B: Standard Async Coroutine
                 @functools.wraps(fn) 
                 async def async_wrapper(*args: Any, **kwargs: Any) -> Any: 
                     step = _execution_step_context.get()
@@ -338,13 +389,22 @@ class RaqimClient:
 
                     # Live execution
                     result = await fn(*args, **kwargs) 
+                    
+                    # Capture telemetry metadata
+                    meta = TraceMetadata.from_response(result, default_model=model)
+                    if system: 
+                        meta.system = system 
+                    self._step_metadata[step] = meta 
+                    
                     await self._persist_effect(step, call_sig_hex, result, target_ns)
                     return result
                 
                 return async_wrapper
             
+            # ---------------------------------------
+            # Path C: Synchronous function
+            # ---------------------------------------
             else: 
-                # Path C: Synchronous function
                 @functools.wraps(fn)
                 def sync_wrapper(*args: Any, **kwargs: Any) -> Any: 
                     step = _execution_step_context.get()
@@ -379,6 +439,13 @@ class RaqimClient:
                             pool.submit(lambda: asyncio.run(self._preflight_effect(step, call_sig_hex, target_ns))).result()
 
                         result = fn(*args, **kwargs)
+                        
+                        meta = TraceMetadata.from_response(result, default_model=model)
+                        if system: 
+                            meta.system = system
+                        
+                        self._step_metadata[step] = meta 
+                        
                         # Schedule persistence without blocking the running loop
                         asyncio.create_task(self._persist_effect(step, call_sig_hex, result, target_ns))
                         return result
@@ -401,6 +468,12 @@ class RaqimClient:
                         loop.run_until_complete(self._preflight_effect(step, call_sig_hex, target_ns))
 
                         result = fn(*args, **kwargs)
+                        
+                        meta = TraceMetadata.from_response(result, default_model=model)
+                        if system: 
+                            meta.system = system
+                        self._step_metadata[step] = meta 
+                        
                         loop.run_until_complete(self._persist_effect(step, call_sig_hex, result, target_ns))
                         return result 
                 
@@ -620,6 +693,105 @@ class RaqimClient:
         self._capabilities[capability] = handler
         msg = {"type": "RegisterCapability", "capability": capability}
         await self._ws_connection.send(json.dumps(msg))
+
+    # Otel Export Engine
+    async def export_to_otel(self, endpoint: str, headers: Optional[Dict[str, str]] = None, timeout: float = 10.0 ) -> Dict[str, Any]: 
+        """
+        Gathers the cryptographically verified agent timeline from Raqim daemon, enriches it with
+        OTLP v1/traces GenAI semantic convention and Merkle proof hashes, and transmit it directly 
+        to an Otel collector or enterprise APM backend (e.g., Datadog, Grafana Tempo, Dynatrace, New Relic). 
+        
+        Args: 
+            endpoint: OTLP/HTTP target (e.g 'http://otel-collector:4318/v1/traces')
+            headers: Optional HTTP headers (e.g. {"Authorization": "Bearer <token>"})
+            timeout: Maximum network wait time in seconds
+        
+        Returns: 
+            Dict containing transmission status and exported span counts.
+        """
+        # Fetch the authoritative OTLP trace from the dameon's verifiable ledger 
+        daemon_otel_url = f"{self.http_url}/v1/session/timeline/{self.agent_hex}/export/otel"
+        async with httpx.AsyncClient(timeout=timeout) as http: 
+            try: 
+                res = await http.get(daemon_otel_url)
+                if res.status_code != 200: 
+                    raise RaqimClientError(
+                        f"Daemon failed to synthesize OTLP trace for {self.agent_hex}: ", 
+                        f"HTTTP {res.status_code} - {res.text}"
+                    )
+                otlp_payload = res.json()
+            except Exception as e: 
+                raise RaqimClientError(f"Failed to fetch OTLP trace from Raqim daemon: {e}")
+            
+        # Enrich the payload with client-side host metadata and agent alias 
+        resource = otlp_payload["resourceSpans"][0]["resource"]["attributes"] 
+        resource.append({
+            "key": "raqim.agent_alias",
+            "value": {"stringValue": self.alias}
+        })
+        resource.append({ 
+            "key": "raqim.execution_mode",
+            "value": {"stringValue": self.mode}                 
+        })
+        resource.append({
+            "key": "raqim.is_forked",
+            "value": {"boolValue": self.is_forked}            
+        })   
+        
+        # Enrich daemon spans with client-side token and model data
+        for span in otlp_payload["resourceSpans"][0]["scopeSpans"][0]["spans"]: 
+            # Look up step ordinal attr
+            for attr in span["attributes"]:
+                if attr["key"] == "raqim.step_ordinal": 
+                    step = attr["value"].get("intValue")
+                    if step in self._step_metadata: 
+                        step_meta = self._step_metadata[step]
+                        if step_meta.model: 
+                            span["attributes"].append({
+                                "key": "gen_ai.request.model", 
+                                "value": {"stringValue": step_meta.model}
+                            })   
+                        if step_meta.prompt_tokens is not None:
+                            span["attributes"].append({
+                                "key": "gen_ai.usage.input_tokens", 
+                                "value": { "intValue": step_meta.prompt_tokens }
+                            })
+                        
+                        if step_meta.completion_tokens is not None: 
+                            span["attributes"].append({
+                                "key": "gen_ai.usage.output_tokens", 
+                                "value": {"intValue": step_meta.completion_tokens }
+                            })
+        
+        # Transmit the standard OTLP/HTTP JSON Payload to the collector
+        req_headers = {"Content-Type": "application/json"}
+        if headers: 
+            req_headers.update(headers)
+        
+        async with httpx.AsyncClient(timeout=timeout) as http: 
+            try: 
+                post_resp = await http.post(endpoint, json=otlp_payload, headers=req_headers)
+                success = post_resp.status_code in (200, 202)
+                
+                span_count = len(otlp_payload["resourceSpans"][0]["scopeSpans"][0]["spans"]) 
+                
+                if success: 
+                    print(
+                        f"[OTEL EXPORT SUCCESS] Pushed {span_count} spans for agent '{self.alias}' to {endpoint} (HTTP {post_resp.status_code}) "
+                    )
+                else: 
+                    print(f"[OTEL EXPORT WARN] Collector returned HTTP {post_resp.status_code}: {post_resp.text} ")
+
+                return {
+                    "success": success, 
+                    "status_code": post_resp.status_code, 
+                    "spans_exported": span_count,
+                    "target_endpoint": endpoint, 
+                    "agent_hex": self.agent_hex,
+                }
+            except Exception as e: 
+                raise RaqimClientError(f"Failed to post OTLP payload to {endpoint}: {e}")
+        
 
 # Zero Dependency Offline merkle proof verifier
 def verify_state_proof_offline(payload_bytes: bytes, agent_id_str: str, proof_dict: dict) -> bool:

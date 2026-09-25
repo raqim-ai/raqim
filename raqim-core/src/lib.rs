@@ -1,6 +1,7 @@
 pub mod aegis;
 pub mod api;
 pub mod axon;
+pub mod checkpoint;
 pub mod compactor;
 
 pub mod config;
@@ -15,6 +16,7 @@ pub mod state;
 pub mod utils;
 
 pub mod hot_memory;
+pub mod otel;
 pub mod witness;
 
 use blake3::Hasher;

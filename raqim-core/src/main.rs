@@ -4,6 +4,7 @@ use rand_core::OsRng;
 use raqim_core::aegis::{AegisConfigFile, AegisGateKeeper};
 use raqim_core::api::{build_admin_router, ApiState, UiEvent};
 use raqim_core::axon::AxonGateKeeper;
+use raqim_core::checkpoint::{CheckpointEngine, ControlMutation};
 
 use axum::http::Method;
 use raqim_core::compactor::WalCompactor;
@@ -302,11 +303,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // ============================
-    // THE PHOENIX HYDRATION PROTOCOL: Reconstructs in-memory Axon Merkle trees from uncompacted WAL frames on boot.
+    // THE PHOENIX HYDRATION PROTOCOL: Unified Checkpoint + Control Journal + WAL Replay
     // ============================
 
+    // 1. Stage 1: State Checkpoint Hydration
+    let checkpoint_file = Path::new(&config.checkpoint_path);
+    if let Some(checkpoint) = CheckpointEngine::load_checkpoint(checkpoint_file) {
+        println!(
+            "[PHOENIX] State checkpoint detected from timestamp {}. Hydrating system core...",
+            checkpoint.timestamp
+        );
+        brain_shard.import_snapshots(checkpoint.crdt_snapshots);
+        axon.hydrate_from_checkpoint(checkpoint.axon_state);
+        mem_router.hydrate_effects(checkpoint.effects);
+        aegis.hydrate_quarantines(checkpoint.quarantines);
+        registry.hydrate_agents(checkpoint.active_agents);
+        println!("[PHOENIX] Checkpoint core hydration successful.");
+    } else {
+        // Fallback for legacy quarantine.json if migrating from pre-checkpoint versions
+        aegis.hydrate_quarantine_from_disk();
+    }
+
+    // 2. Stage 2: Control Journal Replay (Mutations occurring after last checkpoint)
+    let journal_file = Path::new(&config.control_journal_path);
+    let control_mutations = CheckpointEngine::replay_control_journal(journal_file);
+    if !control_mutations.is_empty() {
+        println!(
+            "[PHOENIX] Replaying {} trailing control mutations from journal...",
+            control_mutations.len()
+        );
+        for mutation in control_mutations {
+            match mutation {
+                ControlMutation::Quarantine(record) => {
+                    aegis
+                        .quarantine_blocklist
+                        .insert(record.agent_hex.clone(), record);
+                }
+                ControlMutation::LiftQuarantine { agent_hex } => {
+                    aegis.quarantine_blocklist.remove(&agent_hex);
+                }
+                ControlMutation::RecordEffect(record) => {
+                    mem_router.record_effect_direct(record);
+                }
+                ControlMutation::TouchAgent(process) => {
+                    registry
+                        .active_agents
+                        .insert(process.agent_hex.clone(), process);
+                }
+            }
+        }
+        println!("[PHOENIX] Control journal replay complete.");
+    }
+
+    // 3. Stage 3: Trailing WAL Replay
     println!(
-        "[INITIALIIZATION] Phoenix protocol: Commencing state rehydration scanning from active WAL frame sequences..."
+        "[INITIALIZATION] Phoenix protocol: Commencing state rehydration scanning from active WAL frame sequences..."
     );
     let manifest_path = "compaction.manifest.json";
     let mut files_to_scan = Vec::new();
@@ -523,7 +574,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let compactor = Arc::new(WalCompactor::new(
         &config.wal_path,
         &config.manifest_path,
+        &config.checkpoint_path,
+        &config.control_journal_path,
         lance_engine.clone(),
+        axon.clone(),
+        brain_shard.clone(),
+        aegis.clone(),
+        registry.clone(),
+        mem_router.clone(),
         event_tx.clone(),
         wal.cmd_sender.clone(),
     ));

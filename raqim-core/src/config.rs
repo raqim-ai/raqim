@@ -100,6 +100,8 @@ pub struct RaqimConfig {
     pub dims: i32,
     pub limit: usize,
     pub port: u16,
+    pub checkpoint_path: String,
+    pub control_journal_path: String,
 }
 
 impl Default for RaqimConfig {
@@ -122,6 +124,8 @@ impl Default for RaqimConfig {
             dims: 768,
             limit: 5,
             port: 8080,
+            checkpoint_path: "./vault/state_checkpoint.bin".to_string(),
+            control_journal_path: "./vault/control_journal.bin".to_string(),
         }
     }
 }
@@ -168,6 +172,8 @@ impl RaqimConfig {
                 dims: proxy.daemon.dims.unwrap_or(384),
                 limit: proxy.daemon.limit.unwrap_or(5),
                 port: proxy.daemon.port.unwrap_or(8080),
+                checkpoint_path: "./vault/state_checkpoint.bin".to_string(),
+                control_journal_path: "./vault/control_journal.bin".to_string(),
             }
         } else {
             let default_cfg = Self::default();

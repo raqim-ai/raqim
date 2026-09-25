@@ -1,4 +1,14 @@
-use crate::{OpLog, SystemEvent, lancedb_store::LanceEngine, nucleus::WalCommand};
+use crate::{
+    aegis::AegisGateKeeper,
+    axon::AxonGateKeeper,
+    checkpoint::{CheckpointEngine, StateCheckpoint},
+    lancedb_store::LanceEngine,
+    memory_router::MemoryRouter,
+    nucleus::WalCommand,
+    registry::SwarmRegistry,
+    state::SwarmStateRegistry,
+    OpLog, SystemEvent,
+};
 use rkyv::Archive;
 use std::{
     eprintln, format,
@@ -7,11 +17,11 @@ use std::{
     path::Path,
     println,
     sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::{
-    sync::{broadcast::Sender, mpsc, oneshot},
-    time::{Duration, Instant, interval_at},
-};
+use tokio::sync::{broadcast::Sender, mpsc, oneshot};
+
+use tokio::time::{interval_at, Instant};
 
 // The 2pc state machine defining the boundary btw Hot WAL and cold lance db
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -29,7 +39,14 @@ pub struct CompactionManifest {
 pub struct WalCompactor {
     wal_path: String,
     manifest_path: String,
+    checkpoint_path: String,
+    control_journal_path: String,
     lance_engine: Arc<LanceEngine>,
+    axon: Arc<AxonGateKeeper>,
+    brain: Arc<SwarmStateRegistry>,
+    aegis: Arc<AegisGateKeeper>,
+    registry: Arc<SwarmRegistry>,
+    memory_router: Arc<MemoryRouter>,
     tx: Sender<SystemEvent>,
     cmd_tx: mpsc::Sender<WalCommand>,
 }
@@ -38,14 +55,28 @@ impl WalCompactor {
     pub fn new(
         wal_path: &str,
         manifest_path: &str,
+        checkpoint_path: &str,
+        control_journal_path: &str,
         lance_engine: Arc<LanceEngine>,
+        axon: Arc<AxonGateKeeper>,
+        brain: Arc<SwarmStateRegistry>,
+        aegis: Arc<AegisGateKeeper>,
+        registry: Arc<SwarmRegistry>,
+        memory_router: Arc<MemoryRouter>,
         tx: Sender<SystemEvent>,
         cmd_tx: mpsc::Sender<WalCommand>,
     ) -> Self {
         Self {
             wal_path: wal_path.to_string(),
             manifest_path: manifest_path.to_string(),
+            checkpoint_path: checkpoint_path.to_string(),
+            control_journal_path: control_journal_path.to_string(),
             lance_engine,
+            axon,
+            brain,
+            aegis,
+            registry,
+            memory_router,
             tx,
             cmd_tx,
         }
@@ -315,6 +346,37 @@ impl WalCompactor {
         self.lance_engine
             .archive_batch(&logs_to_archive, &vectors)
             .await;
+
+        // Capture State Checkpoint before committing and deleting the rotated segment
+        let checkpoint = StateCheckpoint {
+            version: 1,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64,
+            last_tx_id: max_compacted_tx,
+            crdt_snapshots: self.brain.export_all_snapshots(),
+            axon_state: self.axon.export_checkpoint_state(),
+            effects: self.memory_router.export_effects(),
+            quarantines: self.aegis.export_quarantines(),
+            active_agents: self.registry.export_agents(),
+        };
+
+        if let Err(e) = CheckpointEngine::write_checkpoint_atomically(
+            Path::new(&self.checkpoint_path),
+            &checkpoint,
+        ) {
+            eprintln!(
+                "[COMPACTOR CRITICAL] Failed to write state checkpoint: {}",
+                e
+            );
+        } else {
+            println!(
+                "[COMPACTOR] State checkpoint successfully crystallized to '{}'",
+                self.checkpoint_path
+            );
+            CheckpointEngine::truncate_control_journal(Path::new(&self.control_journal_path));
+        }
 
         // 2PC State 2: COMMITTED
         let commited_manifest = CompactionManifest {

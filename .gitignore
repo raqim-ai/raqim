@@ -12,3 +12,6 @@ archive
 *.so
 *.pyc
 __pycache__/
+*.pem
+/vault/*.bin
+/vault/*.wal

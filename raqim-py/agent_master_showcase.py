@@ -7,7 +7,6 @@ import httpx
 from dotenv import load_dotenv
 
 load_dotenv()
-load_dotenv(os.path.join(os.path.abspath(os.path.dirname(__file__)), ".env"))
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 from raqim.client import RaqimClient, CanonicalSerializer, verify_state_proof_offline, _execution_step_context
@@ -34,7 +33,8 @@ print(f"Raqim Autonomous Agent Flight Recorder & Replay Verification")
 print("==================================================================")
 
 # ==============================================================================
-# 1. ENTERPRISE PKI WORKFLOW: FORGE KEYS & MINT CERTIFICATES OVER HTTP
+# 1. ENTERPRISE PKI WORK
+# FLOW: FORGE KEYS & MINT CERTIFICATES OVER HTTP
 # ==============================================================================
 async def forge_agent_credentials(agent_alias: str, security_group: str) -> tuple[str, str]:
     """
@@ -100,7 +100,7 @@ async def main():
     # Step 1: Provision authentic PKI credentials via CA Mint endpoint
     analyst_key, analyst_cert = await forge_agent_credentials("analyst_agent", "admin_group")
     rogue_key, rogue_cert = await forge_agent_credentials("crawler_agent", "analyst_group")
-
+    
     # Step 2: Initialize Agents in RECORD mode
     agent_analyst = RaqimClient(
         alias="financial_analyst",

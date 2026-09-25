@@ -283,6 +283,54 @@ impl AxonGateKeeper {
         let _ = self.ingest_leaf_internal(&namespace, log.current_hash, log.clone());
     }
 
+    /// Exports the full cryptographic Merkle DAG state for checkpointing
+    pub fn export_checkpoint_state(&self) -> crate::checkpoint::AxonCheckpointState {
+        let global_batch_counter = self.global_batch_counter.load(SeqCst);
+        let mut active_buffers = Vec::new();
+        for entry in self.active_buffers.iter() {
+            let ns = entry.key().clone();
+            let buf = entry.value().read();
+            active_buffers.push(crate::checkpoint::ActiveTreeBufferSnapshot {
+                namespace: ns,
+                current_batch_id: buf.current_batch_id,
+                parent_batch_root: buf.parent_batch_root,
+                accumulated_leaves: buf.accumulated_leaves.clone(),
+                accumulated_logs: buf.accumulated_logs.clone(),
+                accumulated_tx_ids: buf.accumulated_tx_ids.clone(),
+            });
+        }
+        let batch_archive: Vec<MarkleBatch> = self
+            .batch_archive
+            .iter()
+            .map(|e| e.value().clone())
+            .collect();
+        crate::checkpoint::AxonCheckpointState {
+            global_batch_counter,
+            active_buffers,
+            batch_archive,
+        }
+    }
+
+    /// Hydrates the cryptographic Merkle DAG from a checkpoint
+    pub fn hydrate_from_checkpoint(&self, state: crate::checkpoint::AxonCheckpointState) {
+        self.global_batch_counter
+            .store(state.global_batch_counter, SeqCst);
+        for snap in state.active_buffers {
+            let buffer = ActiveTreeBuffer {
+                current_batch_id: snap.current_batch_id,
+                parent_batch_root: snap.parent_batch_root,
+                accumulated_leaves: snap.accumulated_leaves,
+                accumulated_logs: snap.accumulated_logs,
+                accumulated_tx_ids: snap.accumulated_tx_ids,
+            };
+            self.active_buffers
+                .insert(snap.namespace, Arc::new(RwLock::new(buffer)));
+        }
+        for batch in state.batch_archive {
+            self.batch_archive.insert(batch.batch_id, batch);
+        }
+    }
+
     /// Validates inclusion proof using raw payload + proof data
     pub fn verify_inclusion(
         payload_bytes: &[u8],

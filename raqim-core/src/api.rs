@@ -39,6 +39,7 @@ use crate::health::SystemHealth;
 use crate::hot_memory::HotVectorBuffer;
 use crate::lancedb_store::LanceEngine;
 use crate::nucleus::WalEngine;
+use crate::otel::{self, OtelExportRequest};
 use crate::registry::SwarmRegistry;
 use crate::state::SwarmStateRegistry;
 use crate::{
@@ -973,13 +974,21 @@ async fn lift_qurantine_and_resurrect(
         .dispatch_control_override(&payload.agent_hex, &payload.system_prompt_override)
         .await;
 
-    // Unfreeze the Agent (Remove from DashhMap)
+    // Unfreeze the Agent (Remove from RAM)
     if state
         .aegis
         .quarantine_blocklist
         .remove(&payload.agent_hex)
         .is_some()
     {
+        // Append to durable control journal
+        let _ = crate::checkpoint::CheckpointEngine::append_control_mutation(
+            std::path::Path::new("./vault/control_journal.bin"),
+            &crate::checkpoint::ControlMutation::LiftQuarantine {
+                agent_hex: payload.agent_hex.clone(),
+            },
+        );
+
         // Also update the Ram process table so the Topology page knows it's alive again.
         // TODO: Update the  namespace
         state
@@ -1922,6 +1931,57 @@ pub async fn trigger_compaction_endpoint(
     })))
 }
 
+pub async fn export_agent_timeline_otel(
+    _auth: ValidatedIdentity,
+    State(state): State<ApiState>,
+    Path(agent_hex): Path<String>,
+) -> Result<Json<OtelExportRequest>, ApiError> {
+    // Scatter-gather historical timeline from lanceDB and WAL
+    let lance_future = state.lance.fetch_historical_timeline(&agent_hex);
+    let wal_future = async {
+        state
+            .wal
+            .fetch_hot_timeline(&agent_hex, &state.config.wal_path)
+    };
+
+    let (lance_res, wal_res) = tokio::join!(lance_future, wal_future);
+
+    let mut nodes = wal_res.unwrap_or_default();
+    if let Ok(mut cold_res) = lance_res {
+        nodes.append(&mut cold_res);
+    }
+
+    if nodes.is_empty() {
+        return Err(ApiError::NotFound(format!(
+            "No recorded timeline for agent {}",
+            agent_hex
+        )));
+    }
+
+    // fetch active merkle root
+    let active_root = state
+        .axon
+        .batch_archive
+        .iter()
+        .next()
+        .map(|b| hex::encode(b.value().markle_root))
+        .unwrap_or_else(|| {
+            "0000000000000000000000000000000000000000000000000000000000000000".to_string()
+        });
+    // -- what happens if the agent never has a merkle root? Maybe  the buffer is still active and yeet to seal?
+
+    // Delegate transformation to the dedicated domain builder
+    let otlp_payload = otel::build_otlp_trace_from_timeline(
+        &agent_hex,
+        &state.config.tenant_id,
+        &state.global_net.os_node_id,
+        &active_root,
+        &nodes,
+    );
+
+    Ok(Json(otlp_payload))
+}
+
 // Route Builder
 pub fn build_admin_router(state: ApiState) -> axum::Router {
     axum::Router::new()
@@ -1968,6 +2028,10 @@ pub fn build_admin_router(state: ApiState) -> axum::Router {
         .route("/v1/swarm/memory", get(semantic_search_endpoint))
         .route("/v1/vault/search", get(unified_vault_search))
         .route("/v1/vault/telemetry", get(vault_telemetry_endpoint))
+        .route(
+            "/v1/session/timeline/:agent_hex/export/otel",
+            get(export_agent_timeline_otel),
+        )
         .layer(CatchPanicLayer::new())
         .with_state(state)
 }
