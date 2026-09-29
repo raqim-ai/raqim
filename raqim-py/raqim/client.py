@@ -480,6 +480,10 @@ class RaqimClient:
                 return sync_wrapper
 
         return decorator
+
+    # Aliases for trace() for ergonomic semantic naming
+    observe_agent = trace
+    flight_recorder = trace
         
     async def _preflight_effect(self, step_ordinal: int, call_signature_hex: str, namespace: str) -> None:
         """

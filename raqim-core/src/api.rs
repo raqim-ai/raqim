@@ -1985,6 +1985,11 @@ pub async fn export_agent_timeline_otel(
 // Route Builder
 pub fn build_admin_router(state: ApiState) -> axum::Router {
     axum::Router::new()
+        // Health check endpoint
+        .route(
+            "/health",
+            get(|| async { axum::Json(serde_json::json!({"status": "ok", "version": "0.1.2"})) }),
+        )
         // State Proofs & Effect Recording
         .route("/v1/state/proof/:tx_id", get(get_state_proof_handler))
         .route("/v1/effect/preflight", post(preflight_effect_handler))

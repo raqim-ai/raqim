@@ -637,17 +637,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let api_port = config.port + 1;
     tokio::spawn(async move {
-        let listener = TcpListener::bind(format!("0.0.0.0:{}", api_port))
-            .await
-            .unwrap();
+        let addr: std::net::SocketAddr = format!("0.0.0.0:{}", api_port).parse().unwrap();
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        let _ = socket.set_reuseaddr(true);
+        #[cfg(unix)]
+        let _ = socket.set_reuseport(true);
+        socket.bind(addr).unwrap();
+        let listener = socket.listen(1024).unwrap();
         println!("[SYSTEM] Axum control plane live on port {} ", api_port);
         axum::serve(listener, axum_app).await.unwrap();
     });
 
     // 3. The Production TCP ingress.
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", config.port))
-        .await
-        .unwrap();
+    let addr: std::net::SocketAddr = format!("0.0.0.0:{}", config.port).parse().unwrap();
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    let _ = socket.set_reuseaddr(true);
+    #[cfg(unix)]
+    let _ = socket.set_reuseport(true);
+    socket.bind(addr).unwrap();
+    let listener = socket.listen(1024).unwrap();
     println!("Organism live. Awaiting LLM Agent TCP Connections...");
 
     // JoinSet automatically tracks all spawned TCP worker tasks.

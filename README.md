@@ -19,40 +19,32 @@
 
 When autonomous AI agents make tool calls, execute financial transactions, mutate databases, and stream reasoning in production, they cannot be governed by disposable logs or passive HTTP tracing. If an agent hallucinates, loops infinitely, leaks sensitive records, or attempts unauthorized operations, standard observability tools merely record the disaster after it occurs.
 
-**Raqim** is an in-enclave execution substrate, flight recorder, and cryptographic zero-trust firewall built in Rust (`raqim-core`) with native Python SDK bindings (`raqim-py`). It intercepts every thought, tool invocation, and state mutation at the network and process boundary:
+**Raqim** is an open-source, process-isolated execution substrate, flight recorder, and cryptographic zero-trust firewall built in Rust (`raqim-core`) with native Python SDK bindings (`raqim-py`). It intercepts every thought, tool invocation, and state mutation at the network and process boundary:
 
 1. **Cryptographic Identity (PKI):** Every agent is issued a unique Ed25519 keypair and a signed capability passport. Anonymous or forged packets are dropped at the TCP edge before reaching runtime memory.
 2. **Pre-Execution Firewall (Aegis):** Enforces wildcard namespace Access Control Lists (ACL) and atomic token-bucket rate limits (via lock-free CAS loops) *before* external tools or APIs can be executed.
 3. **Append-Only Write-Ahead Log (Nucleus WAL):** Delivers crash-safe durability via a binary WAL with 2ms NVMe group-commit synchronization, zero-copy `rkyv` serialization, and automatic torn-frame recovery.
 4. **Domain-Separated Merkle DAG (Axon):** Batches state transitions into 1,024-leaf binary Merkle trees using BLAKE3 domain-separated hashing, generating compact cryptographic inclusion proofs verifiable offline without network access.
 5. **Conflict-Free State Convergence:** Backed by in-memory CRDT shards (`Loro`) to merge multi-agent causal timelines across namespaces with mathematical guarantees against race conditions.
-6. **$0 Deterministic Replay & Causal Reality Forking:** The `@client.trace` decorator hashes canonical function signatures and arguments. Unmodified replays execute in `<1ms` at **$0.00 API token cost** directly from WAL effect caches. When code or prompts mutate, Raqim automatically isolates execution into a parallel universe (`phantom_`) branch, preserving historical integrity while enabling safe counterfactual exploration.
+6. **$0.00 Deterministic Side-Effect Replay & Reality Forking:** The `@client.trace` decorator hashes canonical function signatures and arguments. Unmodified replays execute in `<1ms` at **$0.00 API token cost** directly from WAL effect caches. When code or prompts mutate, Raqim automatically isolates execution into a parallel universe (`phantom_`) branch, preserving historical integrity while enabling safe counterfactual exploration.
 7. **2PC Compaction & Zero-Amnesia State Checkpointing:** A 2-Phase Commit (2PC) engine compacts historical WAL frames into LanceDB for hybrid semantic and exact memory retrieval while capturing atomic binary state snapshots (`state_checkpoint.bin`), guaranteeing instant `<5ms` Phoenix rehydration with zero RAM amnesia across crashes.
 8. **Enterprise OpenTelemetry (OTel) Bridge:** Full projection of Raqim's execution-integrity DAG and Merkle proofs into CNCF-standard OTLP JSON (`client.export_to_otel()`), pushing token metrics and causal spans directly to Datadog, Jaeger, Grafana Tempo, or Langfuse with zero application refactors.
 
 ---
 
-## Architectural Comparison: Raqim vs The Industry
+## Architectural Comparison: Execution Integrity vs. Passive Telemetry
 
-| Architectural Dimension | Traditional AI Observability<br>*(LangSmith, Arize Phoenix, AgentOps)* | Message Queues & Event Stores<br>*(Kafka, Redis Streams, Postgres)* | Distributed Ledgers<br>*(Ethereum, Hyperledger)* | API Gateways<br>*(Envoy, Kong)* | **Raqim Core** |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Intervention Timing** | Passive / Post-hoc (records failure after tool executes) | Passive transport (stores data passed to it) | Post-hoc consensus (state updates after block commit) | Pre-execution network filter (HTTP routes only) | **Active Pre-Execution Interdiction** (Aegis blocks unauthorized tool calls before dispatch) |
-| **Identity & Non-Repudiation** | API keys / Bearer tokens (shared secrets, easily leaked) | Client certificates or plaintext credentials | Asymmetric cryptography (wallet keypairs) | mTLS or bearer tokens | **Ed25519 PKI + Swarm Master CA Passports** (verified per packet) |
-| **Audit Integrity** | Mutable database records in third-party SaaS cloud | Append-only logs (no cryptographic inclusion proofs) | Cryptographic Merkle/Patricia trees | Ephemeral access logs | **Domain-Separated BLAKE3 Merkle DAG** (Axon batches with offline inclusion proofs) |
-| **Offline Attestation** | ❌ Impossible (must query SaaS vendor API) | ❌ None | ✅ Yes (requires chain headers/light client) | ❌ None | **✅ Mathematical Offline Proof** (`verify_state_proof_offline` zero network calls) |
-| **Deterministic Replay** | ❌ Re-invokes LLM APIs ($$$) or uses manual brittle mocks | ❌ Re-plays raw byte stream; no concept of LLM side-effects | ❌ EVM state replay; cannot replay nondeterministic LLM calls | ❌ Not applicable | **✅ Bit-for-bit replay in <1ms at $0.00 token cost** via BLAKE3 canonical input hashing |
-| **Code Divergence Policy** | ❌ Overwrites trace or creates disconnected trace ID | ❌ Messages processed linearly or dropped to DLQ | ❌ Hard fork or transaction revert | ❌ HTTP error code | **✅ Automatic Causal Reality Forking** (divergent execution forks into `phantom_` branch) |
-| **Multi-Agent Convergence** | ❌ Race conditions; last-write-wins | ❌ Partition ordering; manual conflict resolution | State machine transitions | ❌ Not applicable | **✅ In-Memory CRDT Shards (Loro)** (mathematically guaranteed conflict-free merges) |
-| **Closed-Loop ACK Throughput** | ~100 – 500 TPS (SaaS network & ingestion limits) | 50,000 – 100,000 TPS (unstructured raw bytes) | 15 – 500 TPS (global consensus bottleneck) | 20,000 – 50,000 TPS (HTTP proxying only) | **23,355.21 TPS** (Full NVMe group-commit sync + Ed25519 verify + Merkle batching) |
-| **P50 Commit Latency** | 50 – 250 ms (remote HTTPS API roundtrip) | 5 – 15 ms (disk flush dependent) | Seconds to minutes | 1 – 3 ms (proxy overhead) | **1.85 ms** (aligned to 2ms NVMe physical group commit) |
-
-> [!NOTE]
-> **Benchmarking Methodology & Contextual Baselines:**
-> - **Raqim Core**: Empirically benchmarked on PCIe 4.0 NVMe hardware using `raqim-siege` under full 50-worker concurrent load (measuring closed-loop server ACKs covering Ed25519 signature validation, Aegis ACL checks, BLAKE3 Merkle DAG batching, and physical 2ms `fdatasync` NVMe commits).
-> - **Traditional AI Observability (LangSmith, Arize Phoenix, AgentOps)**: Reflects typical public cloud WAN HTTPS roundtrip latency (50–250 ms) and standard API tier ingestion quotas (~100–500 TPS).
-> - **Message Queues (Kafka, Redis Streams)**: Reflects published single-node benchmarks for unauthenticated, unstructured raw byte streams without application-layer cryptographic proof or CRDT convergence overhead.
-> - **Distributed Ledgers (Ethereum, Hyperledger)**: Reflects documented mainnet Byzantine fault tolerance and consensus constraints (Ethereum L1 ~15–30 TPS with 12s block times; Hyperledger Fabric Raft ~200–500 TPS).
-> - **API Gateways (Envoy, Kong)**: Reflects standard Layer 7 HTTP reverse-proxy routing latency on local high-throughput networks.
+| Architectural Dimension | Uninstrumented Agents<br>*(Raw Scripts, CrewAI, AutoGen)* | Passive SaaS Observability<br>*(LangSmith, Arize Phoenix, Langfuse)* | Enterprise Cloud Logging<br>*(CloudWatch, Elasticsearch, Datadog)* | **Raqim Core Substrate** |
+| :--- | :--- | :--- | :--- | :--- |
+| **Intervention Timing** | ❌ None (tools execute unconditionally) | ❌ Passive / Post-hoc (records failure after action executes) | ❌ Passive log ingestion after execution | **✅ Active Pre-Execution Interdiction** (Aegis blocks unauthorized tool calls before dispatch) |
+| **Identity & Lineage** | ❌ Ambient / None (shared credentials) | ⚠️ API keys / Bearer tokens (shared secrets, easily leaked) | ⚠️ IAM roles / Service accounts (broad infrastructure perms) | **✅ Ed25519 PKI + Swarm Master Passports** (verified per packet) |
+| **Audit Evidentiary Weight** | ❌ None (ephemeral stdout / stderr) | ❌ Mutable database records in third-party SaaS cloud | ❌ Mutable text logs (subject to admin UPDATE / DELETE) | **✅ Domain-Separated BLAKE3 Merkle DAG** (Axon batches with signed WORM receipts) |
+| **Offline Attestation** | ❌ None | ❌ Impossible (must trust SaaS vendor API) | ❌ None (no cryptographic hash chains) | **✅ Mathematical Offline Proof** (`verify_state_proof_offline` zero network calls) |
+| **Debugging & Failure Reproduction** | ❌ Re-run whole pipeline ($$$ token burn + stochastic drift) | ❌ Re-invokes LLM APIs ($$$) or uses manual brittle mocks | ❌ Static logs; no concept of LLM side-effects | **✅ Deterministic Side-Effect Replay at $0.00 cost** via canonical input hashing |
+| **Code / Prompt Divergence** | ❌ Overwrites state or crashes | ❌ Overwrites trace or creates disconnected trace ID | ❌ Unstructured log spam | **✅ Automatic Causal Reality Forking** (divergent execution forks into `phantom_` branch) |
+| **Multi-Agent Convergence** | ❌ Race conditions; data overwrites | ❌ Race conditions; last-write-wins | ❌ Partition ordering; manual conflict resolution | **✅ In-Memory CRDT Shards (Loro)** (mathematically guaranteed conflict-free merges) |
+| **Closed-Loop Persistence Throughput** | N/A | ~100 – 500 TPS (SaaS network & ingestion limits) | 1,000 – 5,000 TPS (unsealed log lines) | **✅ 23,355.21 TPS** (Full NVMe group-commit sync + Ed25519 verify + Merkle batching) |
+| **P50 Commit Latency** | N/A | 50 – 250 ms (remote HTTPS API roundtrip) | 10 – 50 ms (remote log agent flush) | **✅ 1.85 ms** (aligned to 2ms NVMe physical group commit) |
 
 ### Why Existing Tools Fail for Autonomous Agent Swarms
 

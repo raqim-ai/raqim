@@ -15,3 +15,5 @@ __pycache__/
 *.pem
 /vault/*.bin
 /vault/*.wal
+/vault
+/docs/research
