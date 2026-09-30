@@ -35,8 +35,26 @@ import blake3
 import httpx
 import nacl.signing
 
-DAEMON_TCP_PORT = 8082
-DAEMON_HTTP_PORT = 8083
+def find_free_port_pair(start_port=8080) -> Tuple[int, int]:
+    """Finds an available pair of adjacent ports (TCP ingress and HTTP admin)."""
+    for port in range(start_port, 9000, 2):
+        s1 = socket.socket()
+        s1.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s2 = socket.socket()
+        s2.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s1.bind(('0.0.0.0', port))
+            s2.bind(('0.0.0.0', port + 1))
+            s1.close()
+            s2.close()
+            return port, port + 1
+        except Exception:
+            s1.close()
+            s2.close()
+            continue
+    return 8080, 8081
+
+DAEMON_TCP_PORT, DAEMON_HTTP_PORT = find_free_port_pair()
 DAEMON_HTTP = f"http://127.0.0.1:{DAEMON_HTTP_PORT}"
 KEY_DIR = os.path.join(REPO_ROOT, "vault", "demo_keys")
 LOG_PATH = os.path.join(REPO_ROOT, "vault", "daemon_demo.log")
@@ -160,8 +178,12 @@ async def check_daemon_health() -> bool:
     except Exception:
         return False
 
-async def ensure_daemon_running() -> subprocess.Popen:
+async def ensure_daemon_running() -> Optional[subprocess.Popen]:
     global DAEMON_PROC
+
+    if await check_daemon_health():
+        print(f"{Style.GREEN}✔ Raqim Core daemon is already live and healthy on {DAEMON_HTTP}{Style.RESET}\n")
+        return None
 
     # Ensure no leftover process is bound to our ports
     wait_for_ports_free()
