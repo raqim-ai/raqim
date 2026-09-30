@@ -603,7 +603,7 @@ class RaqimClient:
         phantom_ns = f"phantom_{namespace}_{self.agent_hex}_step{step}"
         print(
             f"\n [RAQIM PARALLEL UNIVERSE FORK] Code divergence at Step {step}! "
-            f"Auto-swtiching REPLAY -> LIVE mode on branch: {phantom_ns}"
+            f"Auto-switching REPLAY -> LIVE mode on branch: {phantom_ns}"
         )
         
     def _get_or_create_event_loop(self) -> asyncio.AbstractEventLoop: 

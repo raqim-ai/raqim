@@ -291,7 +291,7 @@ async def main():
         health_resp = await http.get(f"{DAEMON_HTTP}/health")
         print(f"  ✔ Daemon Status     : {Style.GREEN}{health_resp.json().get('status', 'OK')}{Style.RESET}")
         print(f"  ✔ Zero-Amnesia Proof: {Style.GREEN}WAL State Restored with ZERO Data Loss{Style.RESET}")
-        print(f"  ✔ Quarantine Held   : {Style.GREEN}Rogue Agent {rogue_crawler.agent_hex[:12]}... REMAYS LOCKED DOWN IN RAM{Style.RESET}")
+        print(f"  ✔ Quarantine Held   : {Style.GREEN}Rogue Agent {rogue_crawler.agent_hex[:12]}... REMAINS LOCKED DOWN IN RAM{Style.RESET}")
     assert quarantine_held, "Quarantine state lost across reboot!"
 
     # --------------------------------------------------------------------------
