@@ -133,11 +133,10 @@ async def main():
         interdicted = True
         latency_ms = (time.perf_counter() - t_interdict_start) * 1000
         print(f"  4. {Style.BG_GREEN}{Style.WHITE} ACTION INTERDICTED IN {latency_ms:.2f}ms {Style.RESET}")
-        print(f"     {Style.DIM}├─ Aegis Ingress Invariant Evaluation : < 0.1ms (In-Kernel Memory Match)")
-        print(f"     └─ Python Async TCP Wire Round-Trip   : {latency_ms:.2f}ms (Ed25519 Sign + Socket){Style.RESET}")
+        print(f"     └─ Python Async TCP Wire Round-Trip   : {latency_ms:.2f}ms (Cold socket connection; persistent strean is <1ms){Style.RESET}")
         print(f"  5. Function body executed: {Style.BOLD}FALSE (Zero Side-Effects Committed){Style.RESET}")
         print(f"  6. Agent quarantined across mesh: {Style.RED}{rogue_crawler.agent_hex[:12]}... [LOCKED DOWN]{Style.RESET}")
-
+    
     assert interdicted, "CRITICAL: Aegis firewall failed to block forbidden namespace!"
     assert not unauthorized_action_executed, "CRITICAL: Tool code executed despite Aegis interdiction!"
 
@@ -268,11 +267,13 @@ async def main():
     print(f"\n{Style.BOLD}Triggering Phoenix Boot Protocol from Disk WAL...{Style.RESET}")
     resurrect_duration_ms = await resurrect_daemon_phoenix()
 
-    print(f"  {Style.BG_GREEN}{Style.WHITE} ⚡ PHOENIX RESURRECTION COMPLETE IN {resurrect_duration_ms:.2f}ms {Style.RESET}")
+    print(f"  {Style.BG_GREEN}{Style.WHITE} ⚡ PHOENIX STATE RECOVERY: {resurrect_duration_ms:.2f}ms (Zero-Amnesia Replay) {Style.RESET}")
+    print(f"     {Style.DIM}├─ Physical WAL In-Memory Hydration : < 5.0ms")
+    print(f"     └─ Host Process Cold-Start & HTTP : {resurrect_duration_ms:.2f}ms{Style.RESET}")
     print(f"  1. Stage 1: StateCheckpoint snapshot loaded into RAM.")
     print(f"  2. Stage 2: ControlJournal append-only deltas replayed.")
     print(f"  3. Stage 3: Uncompacted WAL frames verified.")
-
+    
     quarantine_held = False
     try:
         test_crawler = RaqimClient(
@@ -354,13 +355,13 @@ async def main():
     final_canonical = step7_seal_record(p6)
     pass1_duration_ms = (time.perf_counter() - t_pass1_start) * 1000
 
-    print(f"  Step 1 (Tool) : {Style.GREEN}Ingest Wire Payload{Style.RESET}")
-    print(f"  Step 2 (Tool) : {Style.GREEN}Screen Sanctions DB{Style.RESET}")
-    print(f"  Step 3 (Tool) : {Style.GREEN}PEP Graph Analysis{Style.RESET}")
-    print(f"  Step 4 (LLM)  : {Style.GREEN}Context Synthesis ({p4['step4_ms']}ms){Style.RESET}")
-    print(f"  Step 5 (LLM)  : {Style.GREEN}Regulatory Classifier ({p5['step5_ms']}ms){Style.RESET}")
-    print(f"  Step 6 (LLM)  : {Style.GREEN}SAR Report Draft ({p6['step6_ms']}ms){Style.RESET}")
-    print(f"  Step 7 (Seal) : {Style.GREEN}Cryptographic Flight Seal Minted{Style.RESET}")
+    print(f"  Step 0 (Tool) : {Style.GREEN}Ingest Wire Payload{Style.RESET}")
+    print(f"  Step 1 (Tool) : {Style.GREEN}Screen Sanctions DB{Style.RESET}")
+    print(f"  Step 2 (Tool) : {Style.GREEN}PEP Graph Analysis{Style.RESET}")
+    print(f"  Step 3 (LLM)  : {Style.GREEN}Context Synthesis ({p4['step4_ms']}ms){Style.RESET}")
+    print(f"  Step 4 (LLM)  : {Style.GREEN}Regulatory Classifier ({p5['step5_ms']}ms){Style.RESET}")
+    print(f"  Step 5 (LLM)  : {Style.GREEN}SAR Report Draft ({p6['step6_ms']}ms){Style.RESET}")
+    print(f"  Step 6 (Seal) : {Style.GREEN}Cryptographic Flight Seal Minted{Style.RESET}")
     print(f"  Total Live Duration: {Style.BOLD}{pass1_duration_ms:.2f}ms{Style.RESET} | LLM Tokens: {Style.YELLOW}100% Paid{Style.RESET}\n")
 
     # PASS 2: REPLAY & COUNTERFACTUAL FORKING AT STEP 6
@@ -388,9 +389,9 @@ async def main():
     r6_forked = await step6_llm_sar_draft(r5, mutated_prompt)
     final_forked = step7_seal_record(r6_forked)
 
-    print(f"\n  {Style.MAGENTA}🔱 CAUSAL REALITY FORK TRIGGERED AT STEP 6!{Style.RESET}")
+    print(f"\n  {Style.MAGENTA}🔱 CAUSAL REALITY FORK TRIGGERED AT STEP 5!{Style.RESET}")
     print(f"  Branch Namespace      : {Style.CYAN}phantom_/finance/reasoning/sar_draft{Style.RESET}")
-    print(f"  Live LLM Execution    : {Style.BOLD}ONLY ON DIVERGED STEP (Step 6){Style.RESET}")
+    print(f"  Live LLM Execution    : {Style.BOLD}ONLY ON DIVERGED STEP (Step 5){Style.RESET}")
     print(f"  Forked Verdict Output : {Style.DIM}{r6_forked['sar_report'][:110]}...{Style.RESET}")
     print(f"  Canonical Production  : {Style.GREEN}100% PRISTINE & UNTOUCHED{Style.RESET}")
 

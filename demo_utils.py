@@ -303,7 +303,8 @@ async def call_llm(prompt: str, context: str) -> Tuple[str, float]:
     start_t = time.perf_counter()
 
     if GEMINI_API_KEY:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+        print("LIVE Gemini API LLM CALL")
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent?key={GEMINI_API_KEY}"
         payload = {"contents": [{"parts": [{"text": f"{prompt}\n\nEvidence Context:\n{context}"}]}]}
         try:
             async with httpx.AsyncClient(timeout=15.0) as http:
@@ -316,6 +317,7 @@ async def call_llm(prompt: str, context: str) -> Tuple[str, float]:
             pass
 
     if OPENAI_API_KEY:
+        print("LIVE OpenAI API LLM CALL")
         url = "https://api.openai.com/v1/chat/completions"
         headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
         payload = {
