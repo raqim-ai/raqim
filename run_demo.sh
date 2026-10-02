@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Raqim 1000x Interactive Showcase Runner
+# Raqim Interactive Showcase Runner
 # ==============================================================================
 set -e
 
@@ -23,4 +23,4 @@ echo "Using Python: $PYTHON_BIN"
 echo "=================================================================="
 
 # Execute demo with unbuffered output
-exec "$PYTHON_BIN" -u demo.py "$@"
+exec "$PYTHON_BIN" -u demo-show.py "$@"

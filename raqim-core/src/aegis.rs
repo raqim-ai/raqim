@@ -608,4 +608,3 @@ impl AegisGateKeeper {
         ))
     }
 }
-    
