@@ -1,0 +1,5 @@
+{
+  "terminal.integrated.fontFamily": "'JetBrains Mono', monospace",
+  "editor.fontFamily": "'JetBrains Mono', monospace",
+  "editor.fontLigatures": true
+}
