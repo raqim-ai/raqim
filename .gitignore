@@ -17,3 +17,4 @@ __pycache__/
 /vault/*.wal
 /vault
 /docs/research
+demo.tape
