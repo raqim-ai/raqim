@@ -23,4 +23,4 @@ echo "Using Python: $PYTHON_BIN"
 echo "=================================================================="
 
 # Execute demo with unbuffered output
-exec "$PYTHON_BIN" -u demo-show.py "$@"
+exec "$PYTHON_BIN" -u demo.py "$@"
