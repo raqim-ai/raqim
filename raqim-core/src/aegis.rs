@@ -177,6 +177,7 @@ pub struct AegisGateKeeper {
     pub master_public_key: VerifyingKey,
     pub tx: Sender<SystemEvent>,
     pub ui_tx: Sender<UiEvent>,
+    pub control_journal_path: String,
 }
 
 impl AegisGateKeeper {
@@ -185,6 +186,7 @@ impl AegisGateKeeper {
         master_pub_bytes: &[u8; 32],
         tx: Sender<SystemEvent>,
         ui_tx: Sender<UiEvent>,
+        control_journal_path: String,
     ) -> Self {
         let master_public_key = VerifyingKey::from_bytes(master_pub_bytes)
             .expect("FATAL: Failed to parse master public key");
@@ -195,13 +197,14 @@ impl AegisGateKeeper {
             master_public_key,
             tx,
             ui_tx,
+            control_journal_path,
         }
     }
 
     /// Persists a quarantine record to durable storage via control journal
-    fn persist_quarantine_to_journal(record: &QuarantineRecord) {
+    fn persist_quarantine_to_journal(&self, record: &QuarantineRecord) {
         let _ = crate::checkpoint::CheckpointEngine::append_control_mutation(
-            std::path::Path::new("./vault/control_journal.bin"),
+            std::path::Path::new(&self.control_journal_path),
             &crate::checkpoint::ControlMutation::Quarantine(record.clone()),
         );
     }
@@ -283,7 +286,7 @@ impl AegisGateKeeper {
         self.quarantine_blocklist
             .insert(agent_hex.to_string(), record.clone());
 
-        Self::persist_quarantine_to_journal(&record);
+        self.persist_quarantine_to_journal(&record);
 
         // Shout into the event bus
         let _ = self.tx.send(SystemEvent::GlobalQuarantineSync {
@@ -352,6 +355,14 @@ impl AegisGateKeeper {
         intent_path: &str,
         packet_timestamp: i64,
     ) -> Result<(), anyhow::Error> {
+        // Enforce Quarantine Barrier
+        if self.is_quarantined(agent_hex) {
+            return Err(anyhow::anyhow!(
+                "Security Violation: Agent '{}' is locked in quarantine blocklist",
+                agent_hex
+            ));
+        }
+
         // Freshness Window Check
         let current_ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)

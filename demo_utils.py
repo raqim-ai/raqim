@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-Raqim 1000x Interactive Showcase - Engineering Utilities & Helpers
+Raqim Interactive Showcase - Verified Systems Utilities & Sandbox Manager
 ================================================================================
-Separates low-level plumbing (OS process supervision, Ed25519 cert minting,
-terminal formatting, offline cryptography) from the executive demo narrative.
+Strictly manages isolated demo sandboxing, cross-platform process lifecycle,
+deterministic LLM verification, and cryptographic state attestation.
+
+Zero external dependencies outside repo environment. Zero mutation of host
+production data.
 ================================================================================
 """
 
 import asyncio
 import atexit
 import os
-import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -35,16 +38,29 @@ import blake3
 import httpx
 import nacl.signing
 
+# ==============================================================================
+# ISOLATED DEMO SANDBOX CONFIGURATION (NEVER TOUCHES PRODUCTION DATA)
+# ==============================================================================
+DEMO_SANDBOX_DIR = os.path.join(REPO_ROOT, ".demo_sandbox")
+DEMO_WAL_PATH = os.path.join(DEMO_SANDBOX_DIR, "demo.wal")
+DEMO_MANIFEST_PATH = os.path.join(DEMO_SANDBOX_DIR, "compaction.manifest.json")
+DEMO_WITNESS_PATH = os.path.join(DEMO_SANDBOX_DIR, "witnesses")
+DEMO_AEGIS_PATH = os.path.join(DEMO_SANDBOX_DIR, "aegis.toml")
+DEMO_KEY_DIR = os.path.join(DEMO_SANDBOX_DIR, "keys")
+DEMO_LOG_PATH = os.path.join(DEMO_SANDBOX_DIR, "daemon.log")
+DEMO_CONTROL_JOURNAL = os.path.join(DEMO_SANDBOX_DIR, "control_journal.bin")
+DEMO_CHECKPOINT = os.path.join(DEMO_SANDBOX_DIR, "checkpoint.bin")
+
 def find_free_port_pair(start_port=8080) -> Tuple[int, int]:
-    """Finds an available pair of adjacent ports (TCP ingress and HTTP admin)."""
-    for port in range(start_port, 9000, 2):
-        s1 = socket.socket()
+    """Finds an available pair of adjacent loopback ports (TCP ingress & HTTP admin)."""
+    for port in range(start_port, 9500, 2):
+        s1 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s1.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s2 = socket.socket()
+        s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s2.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            s1.bind(('0.0.0.0', port))
-            s2.bind(('0.0.0.0', port + 1))
+            s1.bind(('127.0.0.1', port))
+            s2.bind(('127.0.0.1', port + 1))
             s1.close()
             s2.close()
             return port, port + 1
@@ -56,13 +72,11 @@ def find_free_port_pair(start_port=8080) -> Tuple[int, int]:
 
 DAEMON_TCP_PORT, DAEMON_HTTP_PORT = find_free_port_pair()
 DAEMON_HTTP = f"http://127.0.0.1:{DAEMON_HTTP_PORT}"
-KEY_DIR = os.path.join(REPO_ROOT, "vault", "demo_keys")
-LOG_PATH = os.path.join(REPO_ROOT, "vault", "daemon_demo.log")
 
 DAEMON_PROC: Optional[subprocess.Popen] = None
 
 # ==============================================================================
-# TERMINAL FORMATTING & STYLING
+# BUILD INTROSPECTION & STYLING
 # ==============================================================================
 class Style:
     RESET = "\033[0m"
@@ -79,7 +93,22 @@ class Style:
     BG_GREEN = "\033[42m"
     BG_BLUE = "\033[44m"
 
+def get_binary_info() -> Tuple[str, str]:
+    """Detects available raqim-core binary and returns (path, build_profile)."""
+    release_path = os.path.join(REPO_ROOT, "target", "release", "raqim-core")
+    debug_path = os.path.join(REPO_ROOT, "target", "debug", "raqim-core")
+    if os.path.exists(release_path) and os.path.exists(debug_path):
+        if os.path.getmtime(release_path) >= os.path.getmtime(debug_path):
+            return release_path, "release (optimized)"
+        return debug_path, "debug (unoptimized)"
+    if os.path.exists(release_path):
+        return release_path, "release (optimized)"
+    if os.path.exists(debug_path):
+        return debug_path, "debug (unoptimized)"
+    return debug_path, "uncompiled"
+
 def print_banner():
+    _, profile = get_binary_info()
     print(f"""{Style.BOLD}{Style.CYAN}
     ██████╗  █████╗  ██████╗ ██╗███╗   ███╗
     ██╔══██╗██╔══██╗██╔═══██╗██║████╗ ████║
@@ -88,6 +117,7 @@ def print_banner():
     ██║  ██║██║  ██║╚██████╔╝██║██║ ╚═╝ ██║
     ╚═╝  ╚═╝╚═╝  ╚═╝ ╚══▀▀═╝ ╚═╝╚═╝     ╚═╝
     {Style.WHITE}Execution-Integrity Runtime & Cryptographic Flight Recorder{Style.RESET}
+    {Style.DIM}[Build Profile: {profile} | Bind: 127.0.0.1 (Loopback Only)]{Style.RESET}
     """)
 
 def print_header(title: str, subtitle: str = ""):
@@ -97,111 +127,107 @@ def print_header(title: str, subtitle: str = ""):
         print(f"{Style.DIM}{Style.CYAN}  {subtitle}{Style.RESET}")
     print(f"{Style.BOLD}{Style.CYAN}{'═' * 76}{Style.RESET}\n")
 
-def print_box(text: str, color: str = Style.WHITE):
-    lines = text.strip().split("\n")
-    max_len = max(len(l) for l in lines)
-    print(f"{color}┌─{'─' * max_len}─┐{Style.RESET}")
-    for l in lines:
-        print(f"{color}│ {l.ljust(max_len)} │{Style.RESET}")
-    print(f"{color}└─{'─' * max_len}─┘{Style.RESET}")
-
 # ==============================================================================
-# DEMO SANDBOX & PROCESS SUPERVISION
+# PROCESS SUPERVISION (TRACKS SPECIFIC DEMO PID, NO PKILL)
 # ==============================================================================
-def cleanup_daemon():
+def stop_demo_daemon(proc: Optional[subprocess.Popen] = None):
+    """Gracefully terminates only the specific demo child process."""
     global DAEMON_PROC
-    if DAEMON_PROC and DAEMON_PROC.poll() is None:
-        DAEMON_PROC.terminate()
+    target = proc or DAEMON_PROC
+    if target and target.poll() is None:
+        target.terminate()
         try:
-            DAEMON_PROC.wait(timeout=2)
+            target.wait(timeout=2.0)
         except subprocess.TimeoutExpired:
-            DAEMON_PROC.kill()
+            target.kill()
+            try:
+                target.wait(timeout=1.0)
+            except Exception:
+                pass
+    if target == DAEMON_PROC:
+        DAEMON_PROC = None
 
-atexit.register(cleanup_daemon)
+atexit.register(stop_demo_daemon)
 
-def wait_for_ports_free(ports=(DAEMON_TCP_PORT, DAEMON_HTTP_PORT), timeout=5.0) -> bool:
-    """Verifies that the target TCP ports are completely released by the operating system."""
-    start = time.time()
-    while time.time() - start < timeout:
-        all_free = True
-        for port in ports:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(0.1)
-                if s.connect_ex(("127.0.0.1", port)) == 0:
-                    all_free = False
-                    break
-        if all_free:
-            return True
-        subprocess.run(["pkill", "-9", "raqim-core"], check=False)
-        time.sleep(0.15)
-    return False
+def write_demo_aegis_manifest(path: str):
+    """Writes strict policy rules specifically for the demo sandbox."""
+    content = """# Raqim Aegis Demo Security Manifest (Sandbox Isolated)
+[groups.admin_group]
+allowed_namespaces = ["*"]
+blocked_namespaces = []
+max_tps = 10000
+burst_capacity = 1000
+
+[groups.analyst_group]
+allowed_namespaces = ["/finance/tools/*", "/finance/reasoning/*", "/default/*"]
+blocked_namespaces = ["/finance/restricted/*", "/admin/*"]
+max_tps = 1000
+burst_capacity = 100
+
+[groups.finance_worker]
+allowed_namespaces = ["/finance/tools/screening", "/default/*"]
+blocked_namespaces = ["/finance/restricted/*", "/admin/*"]
+max_tps = 100
+burst_capacity = 20
+"""
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
 
 def clean_demo_sandbox():
     """
-    Standard test isolation: Stops any running daemon, waits for ports to clear,
-    and purges leftover demo WAL frames and journals so every run starts with a pristine state.
+    Safely isolates the demo.
+    Wipes ONLY `.demo_sandbox/`. Leaves repo root files (production.wal, vault/, data/) untouched.
     """
-    subprocess.run(["pkill", "-9", "raqim-core"], check=False)
-    wait_for_ports_free()
+    global DAEMON_PROC
+    stop_demo_daemon()
 
-    os.makedirs(os.path.join(REPO_ROOT, "vault"), exist_ok=True)
-    os.makedirs(os.path.join(REPO_ROOT, "data"), exist_ok=True)
-    os.makedirs(KEY_DIR, exist_ok=True)
-
-    targets = [
-        os.path.join(REPO_ROOT, "production.wal"),
-        os.path.join(REPO_ROOT, "data", "production.wal"),
-        os.path.join(REPO_ROOT, "vault", "control_journal.bin"),
-        os.path.join(REPO_ROOT, "vault", "quarantine.json"),
-        os.path.join(REPO_ROOT, "vault", "quarantine.journal"),
-        os.path.join(REPO_ROOT, "vault", "control.journal"),
-        LOG_PATH,
-    ]
-    for target in targets:
-        if os.path.exists(target):
-            try:
-                os.remove(target)
-            except Exception:
-                pass
-
-    for f in os.listdir(KEY_DIR):
+    if os.path.exists(DEMO_SANDBOX_DIR):
         try:
-            os.remove(os.path.join(KEY_DIR, f))
+            shutil.rmtree(DEMO_SANDBOX_DIR)
         except Exception:
             pass
 
-async def check_daemon_health() -> bool:
+    os.makedirs(DEMO_SANDBOX_DIR, exist_ok=True)
+    os.makedirs(DEMO_KEY_DIR, exist_ok=True)
+    os.makedirs(DEMO_WITNESS_PATH, exist_ok=True)
+    write_demo_aegis_manifest(DEMO_AEGIS_PATH)
+
+async def check_daemon_health(timeout: float = 0.5) -> bool:
     try:
-        async with httpx.AsyncClient(timeout=0.8) as http:
+        async with httpx.AsyncClient(timeout=timeout) as http:
             resp = await http.get(f"{DAEMON_HTTP}/health")
             return resp.status_code == 200
     except Exception:
         return False
 
-async def ensure_daemon_running() -> Optional[subprocess.Popen]:
+async def ensure_daemon_running() -> subprocess.Popen:
+    """Spawns raqim-core bound strictly to 127.0.0.1 with isolated sandbox paths."""
     global DAEMON_PROC
 
-    if await check_daemon_health():
-        print(f"{Style.GREEN}✔ Raqim Core daemon is already live and healthy on {DAEMON_HTTP}{Style.RESET}\n")
-        return None
-
-    # Ensure no leftover process is bound to our ports
-    wait_for_ports_free()
-
-    binary_candidates = [
-        os.path.join(REPO_ROOT, "target", "debug", "raqim-core"),
-        os.path.join(REPO_ROOT, "target", "release", "raqim-core"),
-    ]
-    binary_path = next((b for b in binary_candidates if os.path.exists(b)), None)
-    if not binary_path:
-        print(f"{Style.YELLOW}⚙ Compiling raqim-core (cargo build --bin raqim-core)...{Style.RESET}")
+    binary_path, profile = get_binary_info()
+    if profile == "uncompiled":
+        print(f"{Style.YELLOW}⚙ Compiling raqim-core from source (cargo build --bin raqim-core)...{Style.RESET}")
+        t0 = time.perf_counter()
         subprocess.run(["cargo", "build", "--bin", "raqim-core"], cwd=REPO_ROOT, check=True)
+        print(f"{Style.GREEN}✔ Built in {time.perf_counter() - t0:.1f}s{Style.RESET}")
         binary_path = os.path.join(REPO_ROOT, "target", "debug", "raqim-core")
 
-    log_file = open(LOG_PATH, "ab")
-    print(f"{Style.CYAN}🚀 Booting sovereign Raqim daemon ({binary_path} --port {DAEMON_TCP_PORT})...{Style.RESET}")
+    log_file = open(DEMO_LOG_PATH, "ab")
+    cmd = [
+        binary_path,
+        "--port", str(DAEMON_TCP_PORT),
+        "--host", "127.0.0.1",
+        "--wal-path", DEMO_WAL_PATH,
+        "--manifest-path", DEMO_MANIFEST_PATH,
+        "--witnes-path", DEMO_WITNESS_PATH,
+        "--aegis-path", DEMO_AEGIS_PATH,
+        "--control-journal-path", DEMO_CONTROL_JOURNAL,
+        "--checkpoint-path", DEMO_CHECKPOINT,
+    ]
+
+    print(f"{Style.CYAN}🚀 Launching isolated daemon (PID supervisor on 127.0.0.1:{DAEMON_TCP_PORT})...{Style.RESET}")
     proc = subprocess.Popen(
-        [binary_path, "--port", str(DAEMON_TCP_PORT)],
+        cmd,
         cwd=REPO_ROOT,
         stdout=log_file,
         stderr=subprocess.STDOUT,
@@ -212,35 +238,46 @@ async def ensure_daemon_running() -> Optional[subprocess.Popen]:
     for _ in range(150):
         await asyncio.sleep(0.1)
         if await check_daemon_health():
-            print(f"{Style.GREEN}✔ Raqim Core daemon live on {DAEMON_HTTP} (HTTP) & {DAEMON_TCP_PORT} (TCP){Style.RESET}\n")
+            print(f"{Style.GREEN}✔ Daemon online: HTTP 127.0.0.1:{DAEMON_HTTP_PORT} | TCP 127.0.0.1:{DAEMON_TCP_PORT}{Style.RESET}")
+            print(f"  {Style.DIM}Sandbox: {DEMO_SANDBOX_DIR} (Production WAL completely isolated){Style.RESET}\n")
             return proc
 
     log_file.close()
-    with open(LOG_PATH, "r", errors="ignore") as f:
-        tail = "".join(f.readlines()[-25:])
-    print(f"{Style.RED}Recent daemon logs:\n{tail}{Style.RESET}")
+    if os.path.exists(DEMO_LOG_PATH):
+        with open(DEMO_LOG_PATH, "r", errors="ignore") as f:
+            tail = "".join(f.readlines()[-25:])
+        print(f"{Style.RED}Daemon failed to boot. Recent logs:\n{tail}{Style.RESET}")
+    stop_demo_daemon(proc)
     raise RuntimeError("Timed out waiting for raqim-core daemon to boot.")
 
-async def kill_daemon_phoenix(proc: Optional[subprocess.Popen]):
-    """Simulates hard uncatchable crash (kill -9) leaving disk storage intact."""
-    if proc:
-        proc.kill()
-        try:
-            proc.wait(timeout=2)
-        except Exception:
-            pass
-    subprocess.run(["pkill", "-9", "raqim-core"], check=False)
-    wait_for_ports_free()
+async def kill_daemon_phoenix(proc: subprocess.Popen):
+    """Sends hard uncatchable SIGKILL directly to the demo process PID only."""
+    proc.kill()
+    try:
+        proc.wait(timeout=2.0)
+    except Exception:
+        pass
 
-async def resurrect_daemon_phoenix() -> float:
-    """Relaunches daemon and measures Phoenix state rehydration latency."""
-    wait_for_ports_free()
+async def resurrect_daemon_phoenix() -> Tuple[float, subprocess.Popen]:
+    """Relaunches daemon with the exact same sandbox WAL to measure true rehydration latency."""
     t_start = time.perf_counter()
-    binary_path = os.path.join(REPO_ROOT, "target", "debug", "raqim-core")
-    log_file = open(LOG_PATH, "ab")
+    binary_path, _ = get_binary_info()
+    log_file = open(DEMO_LOG_PATH, "ab")
+
+    cmd = [
+        binary_path,
+        "--port", str(DAEMON_TCP_PORT),
+        "--host", "127.0.0.1",
+        "--wal-path", DEMO_WAL_PATH,
+        "--manifest-path", DEMO_MANIFEST_PATH,
+        "--witnes-path", DEMO_WITNESS_PATH,
+        "--aegis-path", DEMO_AEGIS_PATH,
+        "--control-journal-path", DEMO_CONTROL_JOURNAL,
+        "--checkpoint-path", DEMO_CHECKPOINT,
+    ]
 
     new_proc = subprocess.Popen(
-        [binary_path, "--port", str(DAEMON_TCP_PORT)],
+        cmd,
         cwd=REPO_ROOT,
         stdout=log_file,
         stderr=subprocess.STDOUT,
@@ -250,22 +287,22 @@ async def resurrect_daemon_phoenix() -> float:
 
     resurrected = False
     for _ in range(150):
-        await asyncio.sleep(0.05)
-        if await check_daemon_health():
+        await asyncio.sleep(0.02)
+        if await check_daemon_health(timeout=0.2):
             resurrected = True
             break
 
     elapsed_ms = (time.perf_counter() - t_start) * 1000
-    assert resurrected, f"Phoenix boot failed within 10s! Check {LOG_PATH}"
-    return elapsed_ms
+    assert resurrected, f"Phoenix recovery failed within 10s! Check {DEMO_LOG_PATH}"
+    return elapsed_ms, new_proc
 
 # ==============================================================================
-# CRYPTOGRAPHIC IDENTITY (ED25519 + CAPABILITY PASSPORT)
+# CRYPTOGRAPHIC IDENTITY MINTING
 # ==============================================================================
 async def forge_agent_credentials(agent_alias: str, security_group: str) -> Tuple[str, str]:
-    """Generates local Ed25519 identity and requests signed passport from Master CA."""
-    key_path = os.path.join(KEY_DIR, f"{agent_alias}.pem")
-    cert_path = os.path.join(KEY_DIR, f"{agent_alias}.cert")
+    """Generates local Ed25519 identity and requests signed capability passport from master CA."""
+    key_path = os.path.join(DEMO_KEY_DIR, f"{agent_alias}.pem")
+    cert_path = os.path.join(DEMO_KEY_DIR, f"{agent_alias}.cert")
 
     if os.path.exists(key_path) and os.path.exists(cert_path):
         return key_path, cert_path
@@ -294,63 +331,109 @@ async def forge_agent_credentials(agent_alias: str, security_group: str) -> Tupl
     return key_path, cert_path
 
 # ==============================================================================
-# REASONING ENGINE (LIVE GEMINI/OPENAI WITH HIGH-FIDELITY LOCAL FALLBACK)
+# REASONING ENGINE (HONEST LLM TRACKING & REAL CALL VERIFICATION)
 # ==============================================================================
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 
+LLM_CALL_COUNT = 0
+ACTIVE_LLM_PROVIDER: Optional[str] = None
+
+if ANTHROPIC_API_KEY:
+    ACTIVE_LLM_PROVIDER = "Anthropic (Claude 3.5 Sonnet)"
+elif GEMINI_API_KEY:
+    ACTIVE_LLM_PROVIDER = "Google Gemini (Gemini 2.5 Flash)"
+elif OPENAI_API_KEY:
+    ACTIVE_LLM_PROVIDER = "OpenAI (GPT-4o-mini)"
+else:
+    ACTIVE_LLM_PROVIDER = None
+
+def get_llm_call_count() -> int:
+    global LLM_CALL_COUNT
+    return LLM_CALL_COUNT
+
+def reset_llm_call_count():
+    global LLM_CALL_COUNT
+    LLM_CALL_COUNT = 0
+
 async def call_llm(prompt: str, context: str) -> Tuple[str, float]:
+    """
+    Executes live LLM call if credentials are configured.
+    FAILS LOUDLY if an API key is provided but the request errors.
+    If no credentials exist, transparently uses deterministic simulated reasoning.
+    """
+    global LLM_CALL_COUNT
+    LLM_CALL_COUNT += 1
     start_t = time.perf_counter()
 
-    if GEMINI_API_KEY:
-        print("LIVE Gemini API LLM CALL")
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent?key={GEMINI_API_KEY}"
-        payload = {"contents": [{"parts": [{"text": f"{prompt}\n\nEvidence Context:\n{context}"}]}]}
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as http:
-                resp = await http.post(url, json=payload)
-                if resp.status_code == 200:
-                    text = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-                    elapsed_ms = (time.perf_counter() - start_t) * 1000
-                    return text, elapsed_ms
-        except Exception:
-            pass
+    # 1. Anthropic Claude (Primary for systems engineers)
+    if ANTHROPIC_API_KEY:
+        url = "https://api.anthropic.com/v1/messages"
+        headers = {
+            "x-api-key": ANTHROPIC_API_KEY,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+        payload = {
+            "model": "claude-3-5-sonnet-20241022",
+            "max_tokens": 256,
+            "system": prompt,
+            "messages": [{"role": "user", "content": f"Analyze AML context:\n{context}"}],
+        }
+        async with httpx.AsyncClient(timeout=20.0) as http:
+            resp = await http.post(url, headers=headers, json=payload)
+            if resp.status_code != 200:
+                raise RuntimeError(f"Anthropic API call failed (HTTP {resp.status_code}): {resp.text}")
+            data = resp.json()
+            text = data["content"][0]["text"].strip()
+            elapsed_ms = (time.perf_counter() - start_t) * 1000
+            return text, elapsed_ms
 
+    # 2. Google Gemini
+    if GEMINI_API_KEY:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+        payload = {
+            "contents": [{"parts": [{"text": f"{prompt}\n\nEvidence Context:\n{context}"}]}]
+        }
+        async with httpx.AsyncClient(timeout=20.0) as http:
+            resp = await http.post(url, json=payload)
+            if resp.status_code != 200:
+                raise RuntimeError(f"Gemini API call failed (HTTP {resp.status_code}): {resp.text}")
+            data = resp.json()
+            text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            elapsed_ms = (time.perf_counter() - start_t) * 1000
+            return text, elapsed_ms
+
+    # 3. OpenAI
     if OPENAI_API_KEY:
-        print("LIVE OpenAI API LLM CALL")
         url = "https://api.openai.com/v1/chat/completions"
         headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
         payload = {
             "model": "gpt-4o-mini",
             "messages": [
                 {"role": "system", "content": prompt},
-                {"role": "user", "content": f"Analyze this transaction:\n{context}"},
+                {"role": "user", "content": f"Analyze AML context:\n{context}"},
             ],
             "temperature": 0.2,
         }
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as http:
-                resp = await http.post(url, headers=headers, json=payload)
-                if resp.status_code == 200:
-                    text = resp.json()["choices"][0]["message"]["content"].strip()
-                    elapsed_ms = (time.perf_counter() - start_t) * 1000
-                    return text, elapsed_ms
-        except Exception:
-            pass
+        async with httpx.AsyncClient(timeout=20.0) as http:
+            resp = await http.post(url, headers=headers, json=payload)
+            if resp.status_code != 200:
+                raise RuntimeError(f"OpenAI API call failed (HTTP {resp.status_code}): {resp.text}")
+            data = resp.json()
+            text = data["choices"][0]["message"]["content"].strip()
+            elapsed_ms = (time.perf_counter() - start_t) * 1000
+            return text, elapsed_ms
 
-    # High-Fidelity Local Simulation (Realistic 60-80ms inference)
-    await asyncio.sleep(0.06)
+    # 4. Deterministic Simulated Reasoning (No Keys)
+    await asyncio.sleep(0.045)  # Simulated fast local inference
     elapsed_ms = (time.perf_counter() - start_t) * 1000
 
     if "lenient" in prompt.lower() or "holiday" in prompt.lower():
         text = (
-            "[COMPLIANCE VERDICT - BRANCH: FORKED]: Transaction approved under discretionary executive waiver. "
+            "[COMPLIANCE VERDICT - BRANCH: FORKED]: Transaction approved under discretionary waiver. "
             "Flag waived by regional branch manager."
-        )
-    elif "french" in prompt.lower():
-        text = (
-            "[VERDICT DE CONFORMITÉ - BRANCHE: FORKED]: Anomalie critique confirmée. "
-            "Routage à haute vélocité vers une juridiction offshore. Rapport d'activité suspecte requis."
         )
     else:
         text = (

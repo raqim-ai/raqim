@@ -18,3 +18,4 @@ __pycache__/
 /vault
 /docs/research
 demo.tape
+.demo_sandbox/

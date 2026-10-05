@@ -18,7 +18,7 @@ else
 fi
 
 echo "=================================================================="
-echo "Starting Raqim 1000x Interactive Showcase..."
+echo "Starting Raqim Sovereign Execution-Integrity Demonstration..."
 echo "Using Python: $PYTHON_BIN"
 echo "=================================================================="
 

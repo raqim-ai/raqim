@@ -199,6 +199,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &master_public_key,
         event_tx.clone(),
         ui_tx.clone(),
+        config.control_journal_path.clone(),
     ));
 
     let aegis_clone = aegis.clone();
@@ -636,27 +637,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .allow_headers(Any),
     );
     let api_port = config.port + 1;
+    let host_for_api = config.host.clone();
     tokio::spawn(async move {
-        let addr: std::net::SocketAddr = format!("0.0.0.0:{}", api_port).parse().unwrap();
+        let addr: std::net::SocketAddr = format!("{}:{}", host_for_api, api_port).parse().unwrap();
         let socket = tokio::net::TcpSocket::new_v4().unwrap();
         let _ = socket.set_reuseaddr(true);
         #[cfg(unix)]
         let _ = socket.set_reuseport(true);
         socket.bind(addr).unwrap();
         let listener = socket.listen(1024).unwrap();
-        println!("[SYSTEM] Axum control plane live on port {} ", api_port);
+        println!("[SYSTEM] Axum control plane live on {}:{} ", host_for_api, api_port);
         axum::serve(listener, axum_app).await.unwrap();
     });
 
     // 3. The Production TCP ingress.
-    let addr: std::net::SocketAddr = format!("0.0.0.0:{}", config.port).parse().unwrap();
+    let addr: std::net::SocketAddr = format!("{}:{}", config.host, config.port).parse().unwrap();
     let socket = tokio::net::TcpSocket::new_v4().unwrap();
     let _ = socket.set_reuseaddr(true);
     #[cfg(unix)]
     let _ = socket.set_reuseport(true);
     socket.bind(addr).unwrap();
     let listener = socket.listen(1024).unwrap();
-    println!("Organism live. Awaiting LLM Agent TCP Connections...");
+    println!("Organism live on {}:{}. Awaiting LLM Agent TCP Connections...", config.host, config.port);
 
     // JoinSet automatically tracks all spawned TCP worker tasks.
     let mut tcp_workers = JoinSet::new();
@@ -804,6 +806,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             match task_aegis.verify_session_lineage(archived_ingress.capability_cert.as_slice(), &agent_pub_key) {
                                 Ok((agent_hex, group_name)) => {
+                                    if task_aegis.is_quarantined(&agent_hex) {
+                                        eprintln!("[AEGIS INTERDICTION] Quarantined Agent {} denied connection. Dropping Socket.", agent_hex);
+                                        let mut err_buf = [0u8; 20];
+                                        err_buf[0..4].copy_from_slice(&2u32.to_le_bytes()); // Status 2: Quarantined
+                                        let _ = tokio::io::AsyncWriteExt::write_all(&mut write_half, &err_buf).await;
+                                        break;
+                                    }
                                     session_established = true;
                                     cached_agent_hex = agent_hex;
                                     cached_group_name = group_name;

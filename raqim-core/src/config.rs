@@ -18,6 +18,7 @@ struct DaemonSection {
     witness_path: String,
     aegis_path: String,
     port: Option<u16>,
+    host: Option<String>,
     dims: Option<i32>,
     limit: Option<usize>,
     embedder_type: Option<String>,
@@ -81,6 +82,15 @@ pub struct CliArgs {
 
     #[arg(short, long)]
     port: Option<u16>,
+
+    #[arg(long)]
+    pub host: Option<String>,
+
+    #[arg(long)]
+    pub control_journal_path: Option<String>,
+
+    #[arg(long)]
+    pub checkpoint_path: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -100,6 +110,7 @@ pub struct RaqimConfig {
     pub dims: i32,
     pub limit: usize,
     pub port: u16,
+    pub host: String,
     pub checkpoint_path: String,
     pub control_journal_path: String,
 }
@@ -124,6 +135,7 @@ impl Default for RaqimConfig {
             dims: 768,
             limit: 5,
             port: 8080,
+            host: "127.0.0.1".to_string(),
             checkpoint_path: "./vault/state_checkpoint.bin".to_string(),
             control_journal_path: "./vault/control_journal.bin".to_string(),
         }
@@ -172,6 +184,7 @@ impl RaqimConfig {
                 dims: proxy.daemon.dims.unwrap_or(384),
                 limit: proxy.daemon.limit.unwrap_or(5),
                 port: proxy.daemon.port.unwrap_or(8080),
+                host: proxy.daemon.host.unwrap_or_else(|| "127.0.0.1".to_string()),
                 checkpoint_path: "./vault/state_checkpoint.bin".to_string(),
                 control_journal_path: "./vault/control_journal.bin".to_string(),
             }
@@ -237,6 +250,15 @@ impl RaqimConfig {
         }
         if let Some(p) = args.port {
             config.port = p
+        }
+        if let Some(h) = args.host {
+            config.host = h;
+        }
+        if let Some(cj) = args.control_journal_path {
+            config.control_journal_path = cj;
+        }
+        if let Some(cp) = args.checkpoint_path {
+            config.checkpoint_path = cp;
         }
 
         config
