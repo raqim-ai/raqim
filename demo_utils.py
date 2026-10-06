@@ -28,6 +28,34 @@ for p in [RAQIM_PY_DIR, REPO_ROOT]:
     if p not in sys.path and os.path.exists(p):
         sys.path.insert(0, p)
 
+# Load environment variables from raqim-py/.env and repo root .env
+def _load_env_file(filepath: str):
+    if not os.path.isfile(filepath):
+        return
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip().strip("'\"")
+                if k and k not in os.environ:
+                    os.environ[k] = v
+    except Exception:
+        pass
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(RAQIM_PY_DIR, ".env"))
+    load_dotenv(os.path.join(REPO_ROOT, ".env"))
+except ImportError:
+    pass
+
+_load_env_file(os.path.join(RAQIM_PY_DIR, ".env"))
+_load_env_file(os.path.join(REPO_ROOT, ".env"))
+
 # Sanitize proxy variables so local httpx connects directly to localhost
 for k in ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"]:
     os.environ.pop(k, None)
@@ -343,7 +371,7 @@ ACTIVE_LLM_PROVIDER: Optional[str] = None
 if ANTHROPIC_API_KEY:
     ACTIVE_LLM_PROVIDER = "Anthropic (Claude 3.5 Sonnet)"
 elif GEMINI_API_KEY:
-    ACTIVE_LLM_PROVIDER = "Google Gemini (Gemini 2.5 Flash)"
+    ACTIVE_LLM_PROVIDER = "Google Gemini (Gemini Flash)"
 elif OPENAI_API_KEY:
     ACTIVE_LLM_PROVIDER = "OpenAI (GPT-4o-mini)"
 else:
@@ -392,18 +420,33 @@ async def call_llm(prompt: str, context: str) -> Tuple[str, float]:
 
     # 2. Google Gemini
     if GEMINI_API_KEY:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
-        payload = {
-            "contents": [{"parts": [{"text": f"{prompt}\n\nEvidence Context:\n{context}"}]}]
-        }
-        async with httpx.AsyncClient(timeout=20.0) as http:
-            resp = await http.post(url, json=payload)
-            if resp.status_code != 200:
-                raise RuntimeError(f"Gemini API call failed (HTTP {resp.status_code}): {resp.text}")
-            data = resp.json()
-            text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-            elapsed_ms = (time.perf_counter() - start_t) * 1000
-            return text, elapsed_ms
+        models_to_try = ["gemini-flash-lite-latest", "gemini-flash-latest"]
+        last_err = None
+        for model_name in models_to_try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+            payload = {
+                "contents": [{"parts": [{"text": f"{prompt}\n\nEvidence Context:\n{context}"}]}]
+            }
+            for attempt in range(2):
+                try:
+                    async with httpx.AsyncClient(timeout=30.0) as http:
+                        resp = await http.post(url, json=payload)
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                            elapsed_ms = (time.perf_counter() - start_t) * 1000
+                            return text, elapsed_ms
+                        elif resp.status_code == 503:
+                            last_err = f"HTTP 503 (High Demand on {model_name})"
+                            await asyncio.sleep(1.0)
+                            continue
+                        else:
+                            last_err = f"Gemini API ({model_name}) HTTP {resp.status_code}: {resp.text}"
+                            break
+                except Exception as e:
+                    last_err = f"Gemini API ({model_name}) exception: {e}"
+                    await asyncio.sleep(0.5)
+        raise RuntimeError(f"Gemini API call failed after retries: {last_err}")
 
     # 3. OpenAI
     if OPENAI_API_KEY:

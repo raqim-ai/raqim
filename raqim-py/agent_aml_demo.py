@@ -81,7 +81,7 @@ def get_synthetic_stream():
 # 3. DIRECT ROBUST GEMINI CALL (Bypasses WSL2 httpx TLS bugs)
 # ==============================================================================
 def call_gemini_rest(prompt: str, user_query: str) -> str:
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent?key={GEMINI_API_KEY}"
     payload = {
         "contents": [{
             "parts": [{"text": f"{prompt}\n\n{user_query}"}]
