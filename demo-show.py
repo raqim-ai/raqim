@@ -87,7 +87,7 @@ async def main():
 
     analyst = RaqimClient(
         alias="SeniorAMLAnalyst",
-        tenant="unilorin_optometry_corp",
+        tenant="raqim_aml_demo",
         private_key_path=analyst_key,
         cert_path=analyst_cert,
         tcp_port=DAEMON_TCP_PORT,
@@ -99,7 +99,7 @@ async def main():
 
     rogue_crawler = RaqimClient(
         alias="CompromisedCrawler",
-        tenant="unilorin_optometry_corp",
+        tenant="raqim_aml_demo",
         private_key_path=crawler_key,
         cert_path=crawler_cert,
         tcp_port=DAEMON_TCP_PORT,
@@ -329,9 +329,8 @@ async def main():
     await stream(f"{Style.BOLD}Resurrecting Daemon from Sandbox WAL...{Style.RESET}", 0.2)
     resurrect_duration_ms, daemon_proc = await resurrect_daemon_phoenix()
 
-    await stream(f"  {Style.BG_GREEN}{Style.WHITE} ⚡ PHOENIX RESURRECTION COMPLETE {Style.RESET}", 0.1)
-    await stream(f"     ├─ In-Memory State Reconstruction    : < 5.00ms (Design target for WAL frame replay)", 0.08)
-    await stream(f"     └─ OS Process Cold Boot + Socket Bind: {resurrect_duration_ms:.2f}ms ({build_profile})\n", 0.2)
+    await stream(f"  {Style.BG_GREEN}{Style.WHITE} ⚡ PHOENIX RESURRECTION COMPLETE: {resurrect_duration_ms:.2f}ms {Style.RESET}", 0.1)
+    await stream(f"     └─ Full Process Restart + Socket Binding: {resurrect_duration_ms:.2f}ms ({build_profile})\n", 0.2)
 
     # Positive Control & Strict Durability Verification
     await stream(f"{Style.BOLD}Post-Crash Durability Verification:{Style.RESET}", 0.1)
@@ -417,7 +416,7 @@ async def main():
     p3 = step3_pep_graph(p2)
     p4 = await step4_llm_synthesis(p3, "Synthesize historical account velocity and offshore risk.")
     p5 = await step5_llm_classify(p4, "Classify BSA/AML structuring violation (Threshold: $10,000).")
-    prompt_sar_canonical = "Draft mandatory Suspicious Activity Report (SAR) for FinCEN filing."
+    prompt_sar_canonical = "Draft Suspicious Activity Report for regulatory review."
     p6 = await step6_llm_sar_draft(p5, prompt_sar_canonical)
     final_canonical = step7_seal_record(p6)
     pass1_duration_ms = (time.perf_counter() - t_pass1_start) * 1000
@@ -512,8 +511,7 @@ async def main():
         ("Offline Cryptographic Inclusion Proof", f"VERIFIED ({proof_bytes_calc} bytes, {len(siblings)} siblings)"),
         ("In-Flight Payload Tamper Resistance", "REJECTED (Leaf hash mismatch)"),
         ("Physical On-Disk WAL Corruption Check", f"PASSED (Halted at offset {offset})"),
-        ("Phoenix In-Memory State Hydration", "< 5.00 ms (State reconstruction design target)"),
-        ("Phoenix OS Process Boot Time", f"{resurrect_duration_ms:.2f} ms ({build_profile})"),
+        ("Full Process Restart + Socket Binding", f"{resurrect_duration_ms:.2f} ms ({build_profile})"),
         ("Durability Across SIGKILL", "VERIFIED (Merkle root invariant)"),
         ("Quarantine Enforcement Across Reboot", "VERIFIED (Confirmed in /quarantine_list)"),
         ("Steps 1-5 Replay LLM Invocations", "0 LLM Calls (Values 100% matched)"),

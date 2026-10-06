@@ -434,33 +434,28 @@ async def call_llm(prompt: str, context: str) -> Tuple[str, float]:
 
     # 2. Google Gemini
     if GEMINI_API_KEY:
-        models_to_try = ["gemini-flash-lite-latest", "gemini-flash-latest"]
+        models_to_try = ["gemini-3.7-flash", "gemini-flash-latest"]
         last_err = None
         for model_name in models_to_try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
             payload = {
                 "contents": [{"parts": [{"text": f"{prompt}\n\nEvidence Context:\n{context}"}]}]
             }
-            for attempt in range(2):
-                try:
-                    async with httpx.AsyncClient(timeout=30.0) as http:
-                        resp = await http.post(url, json=payload)
-                        if resp.status_code == 200:
-                            data = resp.json()
-                            text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                            elapsed_ms = (time.perf_counter() - start_t) * 1000
-                            return text, elapsed_ms
-                        elif resp.status_code == 503:
-                            last_err = f"HTTP 503 (High Demand on {model_name})"
-                            await asyncio.sleep(1.0)
-                            continue
-                        else:
-                            last_err = f"Gemini API ({model_name}) HTTP {resp.status_code}: {resp.text}"
-                            break
-                except Exception as e:
-                    last_err = f"Gemini API ({model_name}) exception: {e}"
-                    await asyncio.sleep(0.5)
-        raise RuntimeError(f"Gemini API call failed after retries: {last_err}")
+            try:
+                async with httpx.AsyncClient(timeout=8.0) as http:
+                    resp = await http.post(url, json=payload)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                        elapsed_ms = (time.perf_counter() - start_t) * 1000
+                        return text, elapsed_ms
+                    elif resp.status_code == 503:
+                        last_err = f"HTTP 503 (High Demand on {model_name})"
+                    else:
+                        last_err = f"Gemini API ({model_name}) HTTP {resp.status_code}"
+            except Exception as e:
+                last_err = f"Gemini API ({model_name}) exception: {e}"
+        print(f"[\033[33mWARN\033[0m] Live Gemini API request failed ({last_err}). Falling back to deterministic local reasoning.")
 
     # 3. OpenAI
     if OPENAI_API_KEY:
@@ -474,14 +469,18 @@ async def call_llm(prompt: str, context: str) -> Tuple[str, float]:
             ],
             "temperature": 0.2,
         }
-        async with httpx.AsyncClient(timeout=20.0) as http:
-            resp = await http.post(url, headers=headers, json=payload)
-            if resp.status_code != 200:
-                raise RuntimeError(f"OpenAI API call failed (HTTP {resp.status_code}): {resp.text}")
-            data = resp.json()
-            text = data["choices"][0]["message"]["content"].strip()
-            elapsed_ms = (time.perf_counter() - start_t) * 1000
-            return text, elapsed_ms
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as http:
+                resp = await http.post(url, headers=headers, json=payload)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    text = data["choices"][0]["message"]["content"].strip()
+                    elapsed_ms = (time.perf_counter() - start_t) * 1000
+                    return text, elapsed_ms
+                else:
+                    print(f"[\033[33mWARN\033[0m] OpenAI API failed (HTTP {resp.status_code}). Falling back to deterministic local reasoning.")
+        except Exception as e:
+            print(f"[\033[33mWARN\033[0m] OpenAI API call exception ({e}). Falling back to deterministic local reasoning.")
 
     # 4. Deterministic Simulated Reasoning (No Keys)
     await asyncio.sleep(0.045)  # Simulated fast local inference

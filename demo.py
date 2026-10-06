@@ -78,7 +78,7 @@ async def main():
 
     analyst = RaqimClient(
         alias="SeniorAMLAnalyst",
-        tenant="unilorin_aml_research",
+        tenant="raqim_aml_demo",
         private_key_path=analyst_key,
         cert_path=analyst_cert,
         daemon_host="127.0.0.1",
@@ -91,7 +91,7 @@ async def main():
 
     rogue_crawler = RaqimClient(
         alias="CompromisedCrawler",
-        tenant="unilorin_aml_research",
+        tenant="raqim_aml_demo",
         private_key_path=crawler_key,
         cert_path=crawler_cert,
         daemon_host="127.0.0.1",
@@ -322,9 +322,8 @@ async def main():
     print(f"\n{Style.BOLD}Resurrecting Daemon from Sandbox WAL...{Style.RESET}")
     resurrect_duration_ms, daemon_proc = await resurrect_daemon_phoenix()
 
-    print(f"  {Style.BG_GREEN}{Style.WHITE} ⚡ PHOENIX RESURRECTION COMPLETE {Style.RESET}")
-    print(f"     ├─ In-Memory State Reconstruction    : < 5.00ms (Design target for WAL frame replay)")
-    print(f"     └─ OS Process Cold Boot + Socket Bind: {resurrect_duration_ms:.2f}ms ({build_profile})")
+    print(f"  {Style.BG_GREEN}{Style.WHITE} ⚡ PHOENIX RESURRECTION COMPLETE: {resurrect_duration_ms:.2f}ms {Style.RESET}")
+    print(f"     └─ Full Process Restart + Socket Binding: {resurrect_duration_ms:.2f}ms ({build_profile})")
 
     # Positive Control & Strict Durability Verification
     print(f"\n{Style.BOLD}Post-Crash Durability Verification:{Style.RESET}")
@@ -410,7 +409,7 @@ async def main():
     p3 = step3_pep_graph(p2)
     p4 = await step4_llm_synthesis(p3, "Synthesize historical account velocity and offshore risk.")
     p5 = await step5_llm_classify(p4, "Classify BSA/AML structuring violation (Threshold: $10,000).")
-    prompt_sar_canonical = "Draft mandatory Suspicious Activity Report (SAR) for FinCEN filing."
+    prompt_sar_canonical = "Draft Suspicious Activity Report for regulatory review."
     p6 = await step6_llm_sar_draft(p5, prompt_sar_canonical)
     final_canonical = step7_seal_record(p6)
     pass1_duration_ms = (time.perf_counter() - t_pass1_start) * 1000
@@ -506,8 +505,7 @@ async def main():
         ("Offline Cryptographic Inclusion Proof", f"VERIFIED ({proof_bytes_calc} bytes, {len(siblings)} siblings)"),
         ("In-Flight Payload Tamper Resistance", "REJECTED (Leaf hash mismatch)"),
         ("Physical On-Disk WAL Corruption Check", f"PASSED (Halted at offset {offset})"),
-        ("Phoenix In-Memory State Hydration", "< 5.00 ms (State reconstruction design target)"),
-        ("Phoenix OS Process Boot Time", f"{resurrect_duration_ms:.2f} ms ({build_profile})"),
+        ("Full Process Restart + Socket Binding", f"{resurrect_duration_ms:.2f} ms ({build_profile})"),
         ("Durability Across SIGKILL", "VERIFIED (Merkle root invariant)"),
         ("Quarantine Enforcement Across Reboot", "VERIFIED (Confirmed in /quarantine_list)"),
         ("Steps 1-5 Replay LLM Invocations", f"0 LLM Calls (Values 100% matched)"),
