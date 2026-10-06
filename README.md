@@ -23,11 +23,11 @@ When autonomous AI agents make tool calls, execute financial transactions, mutat
 
 1. **Cryptographic Identity (PKI):** Every agent is issued a unique Ed25519 keypair and a signed capability passport. Anonymous or forged packets are dropped at the TCP edge before reaching runtime memory.
 2. **Pre-Execution Firewall (Aegis):** Enforces wildcard namespace Access Control Lists (ACL) and atomic token-bucket rate limits (via lock-free CAS loops) *before* external tools or APIs can be executed.
-3. **Append-Only Write-Ahead Log (Nucleus WAL):** Delivers crash-safe durability via a binary WAL with 2ms NVMe group-commit synchronization, zero-copy `rkyv` serialization, and automatic torn-frame recovery.
-4. **Domain-Separated Merkle DAG (Axon):** Batches state transitions into 1,024-leaf binary Merkle trees using BLAKE3 domain-separated hashing, generating compact cryptographic inclusion proofs verifiable offline without network access.
+3. **Append-Only Write-Ahead Log (Nucleus WAL):** Delivers crash-safe durability via a binary WAL with a 2ms group-commit interval with `fdatasync()`, zero-copy `rkyv` serialization, and automatic torn-frame recovery.
+4. **Domain-Separated Merkle DAG (Axon):** Batches state transitions into binary Merkle trees using BLAKE3 domain-separated hashing. Generates compact cryptographic inclusion proofs verifiable offline without network access (e.g., 192 bytes for a 64-leaf tree; 320 bytes for a sealed 1,024-leaf batch).
 5. **Conflict-Free State Convergence:** Backed by in-memory CRDT shards (`Loro`) to merge multi-agent causal timelines across namespaces, mathematically guaranteeing eventual consistency across concurrent writes.
 6. **$0.00 Deterministic Side-Effect Replay & Reality Forking:** The `@client.trace` decorator hashes canonical function signatures and arguments. Unmodified replays execute at **$0.00 API token cost** directly from WAL effect caches. When code or prompts mutate, Raqim automatically isolates execution into a parallel universe (`phantom_`) branch, preserving historical integrity while enabling safe counterfactual exploration.
-7. **2PC Compaction & Zero-Amnesia State Checkpointing:** A 2-Phase Commit (2PC) engine compacts historical WAL frames into LanceDB for hybrid semantic and exact memory retrieval while capturing atomic binary state snapshots (`state_checkpoint.bin`), guaranteeing instant Phoenix rehydration with zero RAM amnesia across crashes.
+7. **2PC Compaction & Zero-Amnesia State Checkpointing:** A 2-Phase Commit (2PC) engine compacts historical WAL frames into LanceDB for hybrid semantic and exact memory retrieval while capturing atomic binary state snapshots (`state_checkpoint.bin`). Phoenix rehydration is designed for sub-5ms in-memory state reconstruction from WAL frames, preserving complete state across crashes.
 8. **Enterprise OpenTelemetry (OTel) Bridge:** Full projection of Raqim's execution-integrity DAG and Merkle proofs into CNCF-standard OTLP JSON (`client.export_to_otel()`), pushing token metrics and causal spans directly to Datadog, Jaeger, Grafana Tempo, or Langfuse with zero application refactors.
 
 ---
@@ -101,7 +101,7 @@ When autonomous AI agents make tool calls, execute financial transactions, mutat
    - Rate limit tokens are decremented atomically via a compare-and-swap loop. Violations are instantly quarantined, triggering an out-of-band eviction directive.
 3. **Causal Convergence:** The state delta is merged into the namespace's Loro CRDT memory shard.
 4. **Merkle Sealing:** A BLAKE3 domain-separated leaf hash (`raqim.axon.v1.leaf`) is computed. When 1,024 leaves accumulate, a Merkle tree is crystallized, anchoring the batch root to the temporal DAG.
-5. **Physical Durability:** The sealed frame is pushed to the Nucleus WAL queue, which syncs to NVMe SSD every 2ms via group commit.
+5. **Physical Durability:** The sealed frame is pushed to the Nucleus WAL queue, which syncs to disk every 2ms via a group-commit interval with `fdatasync()`.
 6. **Confirmation:** Raqim returns a physical 20-byte closed-loop acknowledgment to the client containing the 128-bit UUIDv7 transaction ID.
 
 ---
@@ -110,7 +110,7 @@ When autonomous AI agents make tool calls, execute financial transactions, mutat
 
 All figures are reproducible using the included benchmark harness: `cargo run --release --bin raqim-siege`.
 
-Throughput figures reflect **Synchronous Closed-Loop Acknowledgment (ACK)**: every single measurement represents an end-to-end round trip where the server validated cryptographic signatures, enforced firewall policies, derived Merkle leaves, committed to physical NVMe storage via group commit, and returned an acknowledgment over the TCP socket.
+Throughput figures reflect **Synchronous Closed-Loop Acknowledgment (ACK)**: every single measurement represents an end-to-end round trip where the server validated cryptographic signatures, enforced firewall policies, derived Merkle leaves, committed to physical NVMe storage via a 2ms group-commit interval with `fdatasync()`, and returned an acknowledgment over the TCP socket.
 
 ### Test Environment
 * **Hardware:** Intel Core i7 (10 Cores / 16 Threads), 16GB DDR4 RAM, PCIe 4.0 NVMe SSD
@@ -396,6 +396,9 @@ is_valid = verify_state_proof_offline(
 print(f"Proof Cryptographically Valid: {is_valid}")
 # Output: True
 ```
+
+> [!NOTE]
+> **Proof Sizing & Depth:** A 64-leaf active tree produces a 6-sibling proof (192 bytes); a fully crystallized 1,024-leaf batch produces a 10-sibling proof (320 bytes). Proof verification executes in $O(\log N)$ time with zero network queries.
 
 ---
 

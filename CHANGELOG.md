@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Zero-Amnesia State Checkpointing & Control Journaling**:
   - **`StateCheckpoint` (`./vault/state_checkpoint.bin`)**: High-performance binary snapshot capturing consolidated in-memory state during WAL compaction (Loro CRDT binary documents, Axon Merkle DAG counters, deterministic effect caches, Aegis quarantine blocklists, and active agent session tables).
   - **`ControlJournal` (`./vault/control_journal.bin`)**: CRC32-checksummed append-only journal capturing discrete control mutations between compaction cycles.
-  - **Phoenix 3-Stage Boot Recovery**: Automatically hydrates state snapshots in `< 5ms`, replays trailing control mutations, and streams trailing WAL thoughts, eliminating reboot state loss even if compaction occurred seconds before power loss.
+  - **Phoenix 3-Stage Boot Recovery**: Designed for sub-5ms in-memory state reconstruction, replays trailing control mutations, and streams trailing WAL thoughts, eliminating reboot state loss even if compaction occurred seconds before power loss.
 - **Automated Durability & OTel Smoke Tests**: Added `tests/smoke_test_v012.rs` verifying snapshot roundtrips, journal truncation, and OTLP trace projections.
 
 ### Changed
@@ -38,7 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.1] - 2026-09-17
 
 ### Added
-- **Hardware-Enforced Group Commits**: 2ms NVMe `fdatasync` batching yielding 23,355 closed-loop server ACKs/sec.
+- **Group-Commit WAL Synchronization**: 2ms NVMe `fdatasync` batching yielding 23,355 closed-loop server ACKs/sec.
 - **Automatic Torn-Frame Recovery**: Pre-flight recovery scanner truncates corrupted frames from previous ungraceful OS shutdowns.
 - **Apache-2.0 License**: Project officially open-sourced under Apache-2.0.
 

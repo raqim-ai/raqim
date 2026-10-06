@@ -113,7 +113,7 @@ async def main():
 
     print(f"{Style.BOLD}Scenario:{Style.RESET}")
     print(f"An autonomous agent script proposes an unauthorized fund transfer:")
-    print(f"{Style.RED}  Dispatch Target: /finance/restricted/vault_transfer ($500,000 to CAYMAN_VAULT_99821){Style.RESET}\n")
+    print(f"{Style.RED}  Dispatch Target: /finance/restricted/vault_transfer (Simulated $500,000 to CAYMAN_VAULT_99821){Style.RESET}\n")
 
     # REALITY A: Unprotected Execution (What happens without a pre-execution gate)
     print(f"{Style.YELLOW}▶ REALITY A: Unprotected Python Execution (No Policy Gate){Style.RESET}")
@@ -127,9 +127,9 @@ async def main():
     result_a = await raw_wire_transfer("CAYMAN_VAULT_99821", 500000.0)
     assert unprotected_executed, "Sanity check failed: raw function should execute"
     print(f"  1. Agent proposes transfer without control-plane checks.")
-    print(f"  2. Function body executed : {Style.RED}{Style.BOLD}TRUE ($500,000 EXFILTRATED){Style.RESET}")
+    print(f"  2. Function body executed : {Style.RED}{Style.BOLD}TRUE (Simulated $500,000 exfiltrated){Style.RESET}")
     print(f"  3. External API Result    : {Style.RED}{result_a}{Style.RESET}")
-    print(f"  {Style.RED}✖ OBSERVABILITY LIMITATION:{Style.RESET} Passive logs/traces can only record this after money left.\n")
+    print(f"  {Style.RED}✖ OBSERVABILITY LIMITATION:{Style.RESET} Passive logs/traces can only record this after the transaction completes.\n")
 
     # REALITY B: The Raqim Pre-Execution Gate
     print(f"{Style.CYAN}▶ REALITY B: Raqim Control-Plane Gate (@rogue_crawler.trace){Style.RESET}")
@@ -246,7 +246,7 @@ async def main():
     print(f"  {Style.CYAN}Merkle Root     :{Style.RESET} {merkle_root}")
     print(f"  {Style.CYAN}Sibling Hashes  :{Style.RESET} {len(siblings)} nodes ({proof_bytes_calc} bytes)")
     print(f"  {Style.CYAN}Active Buffer   :{Style.RESET} {is_active} (Un-crystallized Workspace Tree)")
-    print(f"  {Style.DIM}  Math: Current tree depth = log2(64) = 6 levels (192 B). Sealed 1,024 batch = 10 levels (320 B).{Style.RESET}")
+    print(f"  {Style.DIM}  Note: Current demo verifies a 64-leaf proof ({proof_bytes_calc} bytes, {len(siblings)} siblings); a fully crystallized 1,024-leaf batch produces a 10-sibling, 320-byte proof.{Style.RESET}")
     assert len(siblings) > 0, f"CRITICAL: Merkle proof returned {len(siblings)} siblings for a 64-leaf tree!"
 
     # Offline Verification of the untampered record
@@ -322,8 +322,9 @@ async def main():
     print(f"\n{Style.BOLD}Resurrecting Daemon from Sandbox WAL...{Style.RESET}")
     resurrect_duration_ms, daemon_proc = await resurrect_daemon_phoenix()
 
-    print(f"  {Style.BG_GREEN}{Style.WHITE} ⚡ PHOENIX RESURRECTION COMPLETE: {resurrect_duration_ms:.2f}ms {Style.RESET}")
-    print(f"     └─ OS Process Cold Boot + Port Binding: {resurrect_duration_ms:.2f}ms ({build_profile})")
+    print(f"  {Style.BG_GREEN}{Style.WHITE} ⚡ PHOENIX RESURRECTION COMPLETE {Style.RESET}")
+    print(f"     ├─ In-Memory State Reconstruction    : < 5.00ms (Design target for WAL frame replay)")
+    print(f"     └─ OS Process Cold Boot + Socket Bind: {resurrect_duration_ms:.2f}ms ({build_profile})")
 
     # Positive Control & Strict Durability Verification
     print(f"\n{Style.BOLD}Post-Crash Durability Verification:{Style.RESET}")
@@ -505,6 +506,7 @@ async def main():
         ("Offline Cryptographic Inclusion Proof", f"VERIFIED ({proof_bytes_calc} bytes, {len(siblings)} siblings)"),
         ("In-Flight Payload Tamper Resistance", "REJECTED (Leaf hash mismatch)"),
         ("Physical On-Disk WAL Corruption Check", f"PASSED (Halted at offset {offset})"),
+        ("Phoenix In-Memory State Hydration", "< 5.00 ms (State reconstruction design target)"),
         ("Phoenix OS Process Boot Time", f"{resurrect_duration_ms:.2f} ms ({build_profile})"),
         ("Durability Across SIGKILL", "VERIFIED (Merkle root invariant)"),
         ("Quarantine Enforcement Across Reboot", "VERIFIED (Confirmed in /quarantine_list)"),

@@ -70,7 +70,7 @@
       <text x="24" y="52" fill="#34D399" font-family="monospace" font-size="34" font-weight="800">23,355</text>
       <text x="145" y="44" fill="#6EE7B7" font-family="monospace" font-size="14" font-weight="600">TPS</text>
       <text x="24" y="86" fill="#F1F5F9" font-family="-apple-system, sans-serif" font-size="15" font-weight="600">Closed-Loop ACK</text>
-      <text x="24" y="112" fill="#64748B" font-family="-apple-system, sans-serif" font-size="12">Hardware NVMe group commit</text>
+      <text x="24" y="112" fill="#64748B" font-family="-apple-system, sans-serif" font-size="12">2ms fdatasync group commit</text>
     </g>
 
     <!-- Metric 2: Deterministic Replay -->
