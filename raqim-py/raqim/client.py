@@ -174,12 +174,19 @@ class RaqimClient:
         self._ws_connection: Optional[websockets.WebSocketClientProtocol] = None
         self._zenoh_session: Optional[Any] = None
         self._reality_fork_hook: Callable[[str], None] = None 
-        self._http_client: Optional[httpx.AsyncClient] = None
+        self._http_clients_by_loop: Dict[Any, httpx.AsyncClient] = {}
 
     def _get_http_client(self) -> httpx.AsyncClient:
-        if self._http_client is None or self._http_client.is_closed:
-            self._http_client = httpx.AsyncClient(timeout=10.0)
-        return self._http_client 
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        client = self._http_clients_by_loop.get(loop)
+        if client is None or client.is_closed:
+            client = httpx.AsyncClient(timeout=10.0)
+            self._http_clients_by_loop[loop] = client
+        return client 
 
     async def boot(self):
         """

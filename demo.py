@@ -232,7 +232,12 @@ async def main():
     merkle_root = proof_dict.get("merkleRootHex", proof_dict.get("merkle_root_hex", ""))
     leaf_idx = proof_dict.get("leafIndex", proof_dict.get("leaf_index", 0))
     batch_id = proof_dict.get("batchId", proof_dict.get("batch_id", 0))
-    siblings = proof_dict.get("siblings", proof_dict.get("sibling_hashes_hex", []))
+    siblings = (
+        proof_dict.get("siblingHashesHex")
+        or proof_dict.get("sibling_hashes_hex")
+        or proof_dict.get("siblings")
+        or []
+    )
     is_active = proof_dict.get("isActiveBuffer", proof_dict.get("is_active_buffer", True))
     proof_bytes_calc = len(siblings) * 32
 
@@ -242,6 +247,7 @@ async def main():
     print(f"  {Style.CYAN}Sibling Hashes  :{Style.RESET} {len(siblings)} nodes ({proof_bytes_calc} bytes)")
     print(f"  {Style.CYAN}Active Buffer   :{Style.RESET} {is_active} (Un-crystallized Workspace Tree)")
     print(f"  {Style.DIM}  Math: Current tree depth = log2(64) = 6 levels (192 B). Sealed 1,024 batch = 10 levels (320 B).{Style.RESET}")
+    assert len(siblings) > 0, f"CRITICAL: Merkle proof returned {len(siblings)} siblings for a 64-leaf tree!"
 
     # Offline Verification of the untampered record
     canonical_bytes = CanonicalSerializer.canonical_json(evidence_leaf_17).encode("utf-8")
@@ -429,6 +435,7 @@ async def main():
 
     _execution_step_context.set(0)
     analyst.mode = "replay"
+    analyst.is_forked = False
     reset_llm_call_count()
 
     t_pass2_start = time.perf_counter()
@@ -472,6 +479,7 @@ async def main():
     print("Re-evaluating Step 6 with canonical prompt to verify production branch was untouched:")
     _execution_step_context.set(0)
     analyst.mode = "replay"
+    analyst.is_forked = False
     reset_llm_call_count()
 
     c1 = step1_ingest("TX_BSA_9950", 9950.00, "OFFSHORE_CAYMAN_HOP")

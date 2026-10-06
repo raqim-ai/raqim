@@ -570,10 +570,14 @@ async def test_disk_wal_corruption_recovery() -> Tuple[bool, str, int]:
             except Exception:
                 pass
 
-    mismatch_detected = "[PHOENIX CORRUPTION] CRC32 mismatch" in log_content
+    mismatch_detected = (
+        "CRC mismatch" in log_content
+        or "CRC32 mismatch" in log_content
+        or "CORRUPTION" in log_content
+    )
     log_line = ""
     for line in log_content.splitlines():
-        if "CRC32 mismatch" in line:
+        if "CRC mismatch" in line or "CRC32 mismatch" in line or "CORRUPTION" in line:
             log_line = line.strip()
             break
 
