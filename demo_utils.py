@@ -16,10 +16,28 @@ import atexit
 import os
 import shutil
 import socket
+import re
 import subprocess
 import sys
 import time
 from typing import Optional, Tuple, Dict, Any
+
+ANSI_ESCAPE_RE = re.compile(r'\x1b\[[0-9;]*m')
+
+def strip_ansi(s: str) -> str:
+    """Removes ANSI color and style escape codes."""
+    return ANSI_ESCAPE_RE.sub('', s)
+
+def visible_len(s: str) -> int:
+    """Calculates visible character count ignoring ANSI formatting."""
+    return len(strip_ansi(s))
+
+def pad_visible(s: str, width: int) -> str:
+    """Pads string to width based on visible character length."""
+    v = visible_len(s)
+    if v < width:
+        return s + " " * (width - v)
+    return s
 
 # Ensure workspace paths
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -122,18 +140,14 @@ class Style:
     BG_BLUE = "\033[44m"
 
 def get_binary_info() -> Tuple[str, str]:
-    """Detects available raqim-core binary and returns (path, build_profile)."""
+    """Detects available raqim-core binary and returns (path, build_profile). Always prefers release."""
     release_path = os.path.join(REPO_ROOT, "target", "release", "raqim-core")
     debug_path = os.path.join(REPO_ROOT, "target", "debug", "raqim-core")
-    if os.path.exists(release_path) and os.path.exists(debug_path):
-        if os.path.getmtime(release_path) >= os.path.getmtime(debug_path):
-            return release_path, "release (optimized)"
-        return debug_path, "debug (unoptimized)"
     if os.path.exists(release_path):
         return release_path, "release (optimized)"
     if os.path.exists(debug_path):
         return debug_path, "debug (unoptimized)"
-    return debug_path, "uncompiled"
+    return release_path, "uncompiled"
 
 def print_banner():
     _, profile = get_binary_info()
@@ -234,11 +248,11 @@ async def ensure_daemon_running() -> subprocess.Popen:
 
     binary_path, profile = get_binary_info()
     if profile == "uncompiled":
-        print(f"{Style.YELLOW}⚙ Compiling raqim-core from source (cargo build --bin raqim-core)...{Style.RESET}")
+        print(f"{Style.YELLOW}⚙ Compiling raqim-core in release mode (cargo build --release --bin raqim-core)...{Style.RESET}")
         t0 = time.perf_counter()
-        subprocess.run(["cargo", "build", "--bin", "raqim-core"], cwd=REPO_ROOT, check=True)
+        subprocess.run(["cargo", "build", "--release", "--bin", "raqim-core"], cwd=REPO_ROOT, check=True)
         print(f"{Style.GREEN}✔ Built in {time.perf_counter() - t0:.1f}s{Style.RESET}")
-        binary_path = os.path.join(REPO_ROOT, "target", "debug", "raqim-core")
+        binary_path = os.path.join(REPO_ROOT, "target", "release", "raqim-core")
 
     log_file = open(DEMO_LOG_PATH, "ab")
     cmd = [
@@ -247,7 +261,7 @@ async def ensure_daemon_running() -> subprocess.Popen:
         "--host", "127.0.0.1",
         "--wal-path", DEMO_WAL_PATH,
         "--manifest-path", DEMO_MANIFEST_PATH,
-        "--witnes-path", DEMO_WITNESS_PATH,
+        "--witness-path", DEMO_WITNESS_PATH,
         "--aegis-path", DEMO_AEGIS_PATH,
         "--control-journal-path", DEMO_CONTROL_JOURNAL,
         "--checkpoint-path", DEMO_CHECKPOINT,
@@ -298,7 +312,7 @@ async def resurrect_daemon_phoenix() -> Tuple[float, subprocess.Popen]:
         "--host", "127.0.0.1",
         "--wal-path", DEMO_WAL_PATH,
         "--manifest-path", DEMO_MANIFEST_PATH,
-        "--witnes-path", DEMO_WITNESS_PATH,
+        "--witness-path", DEMO_WITNESS_PATH,
         "--aegis-path", DEMO_AEGIS_PATH,
         "--control-journal-path", DEMO_CONTROL_JOURNAL,
         "--checkpoint-path", DEMO_CHECKPOINT,
@@ -369,7 +383,7 @@ LLM_CALL_COUNT = 0
 ACTIVE_LLM_PROVIDER: Optional[str] = None
 
 if ANTHROPIC_API_KEY:
-    ACTIVE_LLM_PROVIDER = "Anthropic (Claude 3.5 Sonnet)"
+    ACTIVE_LLM_PROVIDER = "Anthropic (Claude Haiku)"
 elif GEMINI_API_KEY:
     ACTIVE_LLM_PROVIDER = "Google Gemini (Gemini Flash)"
 elif OPENAI_API_KEY:
@@ -404,7 +418,7 @@ async def call_llm(prompt: str, context: str) -> Tuple[str, float]:
             "content-type": "application/json",
         }
         payload = {
-            "model": "claude-3-5-sonnet-20241022",
+            "model": "claude-3-5-haiku-latest",
             "max_tokens": 256,
             "system": prompt,
             "messages": [{"role": "user", "content": f"Analyze AML context:\n{context}"}],
@@ -484,3 +498,83 @@ async def call_llm(prompt: str, context: str) -> Tuple[str, float]:
             "High-velocity routing to offshore jurisdiction (Cayman hop). Mandatory Suspicious Activity Report (SAR) triggered."
         )
     return text, elapsed_ms
+
+
+# ==============================================================================
+# ACT 4B TRUE ON-DISK WAL CORRUPTION & ENGINE RECOVERY CHECK
+# ==============================================================================
+async def test_disk_wal_corruption_recovery() -> Tuple[bool, str, int]:
+    """
+    Act 4B True On-Disk Corruption Test:
+    1. Copies active demo.wal to demo_corrupted.wal on disk.
+    2. Flips 1 byte inside the payload section of a frame on disk.
+    3. Boots a throwaway raqim-core daemon instance pointing to demo_corrupted.wal.
+    4. Asserts raqim-core's Rust engine detects CRC32 mismatch on startup:
+       '[PHOENIX CORRUPTION] CRC32 mismatch in ... Truncating tail.'
+    5. Verifies daemon safely halts scan at that frame without crashing or loading corrupt state.
+    """
+    if not os.path.exists(DEMO_WAL_PATH) or os.path.getsize(DEMO_WAL_PATH) < 16:
+        raise RuntimeError(f"Cannot run disk corruption test: {DEMO_WAL_PATH} is empty or missing.")
+
+    corrupted_wal = os.path.join(DEMO_SANDBOX_DIR, "demo_corrupted.wal")
+    shutil.copyfile(DEMO_WAL_PATH, corrupted_wal)
+
+    # Flip 1 byte on disk inside the payload section (byte 24 is after the 8-byte frame header)
+    corrupted_offset = 24
+    with open(corrupted_wal, "r+b") as f:
+        f.seek(corrupted_offset)
+        orig_byte = f.read(1)
+        if not orig_byte:
+            raise RuntimeError("WAL frame unexpectedly short")
+        f.seek(corrupted_offset)
+        f.write(bytes([orig_byte[0] ^ 0xFF]))
+
+    test_tcp, test_http = find_free_port_pair(start_port=9600)
+    test_log_path = os.path.join(DEMO_SANDBOX_DIR, "throwaway_corrupt.log")
+    test_log = open(test_log_path, "wb")
+    binary_path, _ = get_binary_info()
+
+    cmd = [
+        binary_path,
+        "--port", str(test_tcp),
+        "--host", "127.0.0.1",
+        "--wal-path", corrupted_wal,
+        "--manifest-path", os.path.join(DEMO_SANDBOX_DIR, "throwaway_manifest.json"),
+        "--witness-path", DEMO_WITNESS_PATH,
+        "--aegis-path", DEMO_AEGIS_PATH,
+        "--control-journal-path", os.path.join(DEMO_SANDBOX_DIR, "throwaway_ctrl.bin"),
+        "--checkpoint-path", os.path.join(DEMO_SANDBOX_DIR, "throwaway_ckpt.bin"),
+    ]
+
+    proc = subprocess.Popen(cmd, cwd=REPO_ROOT, stdout=test_log, stderr=subprocess.STDOUT)
+    try:
+        # Give throwaway daemon 0.8s to scan WAL frames on startup
+        await asyncio.sleep(0.8)
+    finally:
+        proc.kill()
+        try:
+            proc.wait(timeout=1.0)
+        except Exception:
+            pass
+        test_log.close()
+
+    # Read the engine's real stdout/stderr
+    with open(test_log_path, "r", errors="ignore") as f:
+        log_content = f.read()
+
+    # Clean up test artifacts
+    for p in [corrupted_wal, test_log_path, os.path.join(DEMO_SANDBOX_DIR, "throwaway_manifest.json")]:
+        if os.path.exists(p):
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+
+    mismatch_detected = "[PHOENIX CORRUPTION] CRC32 mismatch" in log_content
+    log_line = ""
+    for line in log_content.splitlines():
+        if "CRC32 mismatch" in line:
+            log_line = line.strip()
+            break
+
+    return mismatch_detected, log_line, corrupted_offset

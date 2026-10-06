@@ -50,8 +50,8 @@ pub struct CliArgs {
     #[arg(short, long)]
     pub manifest_path: Option<String>,
 
-    #[arg(long)]
-    pub witnes_path: Option<String>,
+    #[arg(long, alias = "witnes-path")]
+    pub witness_path: Option<String>,
 
     #[arg(short, long)]
     pub lance_path: Option<String>,
@@ -211,7 +211,7 @@ impl RaqimConfig {
             config.manifest_path = m;
         }
 
-        if let Some(w_path) = args.witnes_path {
+        if let Some(w_path) = args.witness_path {
             config.witness_path = w_path;
         }
 

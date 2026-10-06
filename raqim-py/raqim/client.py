@@ -173,10 +173,15 @@ class RaqimClient:
         self._capabilities: Dict[str, Callable[[bytes], Awaitable[bytes]]] = {}
         self._ws_connection: Optional[websockets.WebSocketClientProtocol] = None
         self._zenoh_session: Optional[Any] = None
-        # The callback function provided by the developer
         self._reality_fork_hook: Callable[[str], None] = None 
-    
-    async def boot(self): 
+        self._http_client: Optional[httpx.AsyncClient] = None
+
+    def _get_http_client(self) -> httpx.AsyncClient:
+        if self._http_client is None or self._http_client.is_closed:
+            self._http_client = httpx.AsyncClient(timeout=10.0)
+        return self._http_client 
+
+    async def boot(self):
         """
         Enterprise Ignition Sequence: 
         - Emits /system/handshake over TCPP to trigger JIT CRDT memory hydration
@@ -507,17 +512,17 @@ class RaqimClient:
             "namespace": namespace,
         }
 
-        async with httpx.AsyncClient(timeout=5.0) as http:
-            resp = await http.post(f"{self.http_url}/v1/effect/preflight", json=payload)
-            if resp.status_code in (401, 403):
-                try:
-                    error_msg = resp.json().get("message", resp.text)
-                except Exception:
-                    error_msg = resp.text
-                raise PermissionError(f"[AEGIS PRE-FLIGHT INTERDICTION]: {error_msg}")
+        http = self._get_http_client()
+        resp = await http.post(f"{self.http_url}/v1/effect/preflight", json=payload)
+        if resp.status_code in (401, 403):
+            try:
+                error_msg = resp.json().get("message", resp.text)
+            except Exception:
+                error_msg = resp.text
+            raise PermissionError(f"[AEGIS PRE-FLIGHT INTERDICTION]: {error_msg}")
 
-            if resp.status_code != 200:
-                raise RuntimeError(f"Daemon preflight check failed (HTTP {resp.status_code}): {resp.text}")
+        if resp.status_code != 200:
+            raise RuntimeError(f"Daemon preflight check failed (HTTP {resp.status_code}): {resp.text}")
 
     async def _persist_effect(self, step_ordinal: int, call_signature_hex: str, result: Any, namespace: str) -> None: 
         """
@@ -548,25 +553,25 @@ class RaqimClient:
                         "output_payload_base64": b64_output 
                     }
         
-        async with httpx.AsyncClient(timeout=5.0) as http:
-            resp = await http.post(f"{self.http_url}/v1/effect/record", json=payload)
+        http = self._get_http_client()
+        resp = await http.post(f"{self.http_url}/v1/effect/record", json=payload)
+        
+        # Intercept Aegis Security Interdiction and raise to caller
+        if resp.status_code in (401, 403):
+            try:
+                error_msg = resp.json().get("message", resp.text)
+            except Exception:
+                error_msg = resp.text
+            raise PermissionError(f"[AEGIS INTERDICTION]: {error_msg}")
             
-            # Intercept Aegis Security Interdiction and raise to caller
-            if resp.status_code in (401, 403):
-                try:
-                    error_msg = resp.json().get("message", resp.text)
-                except Exception:
-                    error_msg = resp.text
-                raise PermissionError(f"[AEGIS INTERDICTION]: {error_msg}")
-                
-            if resp.status_code != 200:
-                raise RuntimeError(f"Daemon rejected effect (HTTP {resp.status_code}): {resp.text}") 
-            
-            resp_data = resp.json()
-            tx_id = resp_data.get("tx_id_hex")
-            if tx_id:
-                self.last_tx_id = tx_id
-                self.recorded_tx_ids[step_ordinal] = tx_id
+        if resp.status_code != 200:
+            raise RuntimeError(f"Daemon rejected effect (HTTP {resp.status_code}): {resp.text}") 
+        
+        resp_data = resp.json()
+        tx_id = resp_data.get("tx_id_hex")
+        if tx_id:
+            self.last_tx_id = tx_id
+            self.recorded_tx_ids[step_ordinal] = tx_id
 
             if self.is_forked:
                 print(f"[RAQIM EFFECT RECORD] Step {step_ordinal} recorded to branch: {namespace}")
@@ -574,21 +579,20 @@ class RaqimClient:
     # Internal Effect Engine Helpers
     async def _fetch_recorded_effect(self, step_ordinal: int, call_sig_hex  : str) -> Optional[Any]:
         """Fetches recorded effect from daemon. Returns None if signature diverged."""
-        async with httpx.AsyncClient() as http: 
-            try: 
-                res = await http.post(
-                    f"{self.http_url}/v1/effect/get", 
-                    json={"agent_hex": self.agent_hex, "step_ordinal": step_ordinal, "call_signature_hex": call_sig_hex }, 
-                    timeout=5.0
-                )
-                
-                if res.status_code == 200:
-                    data = res.json()
-                    if data.get("found") and data.get("output_payload_base64"): 
-                        raw_bytes = base64.b64decode(data["output_payload_base64"])
-                        return json.loads(raw_bytes.decode("utf-8"))
-            except Exception as e: 
-                print(f"[RAQIM REPLAY WARN] Effect fetch error at step {step_ordinal}: {e}")
+        http = self._get_http_client()
+        try: 
+            res = await http.post(
+                f"{self.http_url}/v1/effect/get", 
+                json={"agent_hex": self.agent_hex, "step_ordinal": step_ordinal, "call_signature_hex": call_sig_hex }, 
+                timeout=5.0
+            )
+            if res.status_code == 200:
+                data = res.json()
+                if data.get("found") and data.get("output_payload_base64"): 
+                    raw_bytes = base64.b64decode(data["output_payload_base64"])
+                    return json.loads(raw_bytes.decode("utf-8"))
+        except Exception as e: 
+            print(f"[RAQIM REPLAY WARN] Effect fetch error at step {step_ordinal}: {e}")
         return None
 
     def _handle_divergence(self, step: int, call_sig_hex: str, namespace: str) -> None: 
