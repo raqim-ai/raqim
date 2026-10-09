@@ -40,3 +40,4 @@ echo "=================================================================="
 
 # Execute demo-show with unbuffered output
 exec "$PYTHON_BIN" -u demo-show.py "$@"
+

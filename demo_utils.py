@@ -434,7 +434,7 @@ async def call_llm(prompt: str, context: str) -> Tuple[str, float]:
 
     # 2. Google Gemini
     if GEMINI_API_KEY:
-        models_to_try = ["gemini-3.7-flash", "gemini-flash-latest"]
+        models_to_try = ["gemini-3.5-flash", "gemini-3.8-flash", "gemini-2.5-flash", "gemini-flash-latest"]
         last_err = None
         for model_name in models_to_try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
