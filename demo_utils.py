@@ -385,7 +385,7 @@ ACTIVE_LLM_PROVIDER: Optional[str] = None
 if ANTHROPIC_API_KEY:
     ACTIVE_LLM_PROVIDER = "Anthropic (Claude Haiku)"
 elif GEMINI_API_KEY:
-    ACTIVE_LLM_PROVIDER = "Google Gemini (Gemini Flash)"
+    ACTIVE_LLM_PROVIDER = "Google Gemini (Gemini 3.5 Flash Lite)"
 elif OPENAI_API_KEY:
     ACTIVE_LLM_PROVIDER = "OpenAI (GPT-4o-mini)"
 else:
@@ -434,7 +434,7 @@ async def call_llm(prompt: str, context: str) -> Tuple[str, float]:
 
     # 2. Google Gemini
     if GEMINI_API_KEY:
-        models_to_try = ["gemini-3.5-flash", "gemini-3.8-flash", "gemini-2.5-flash", "gemini-flash-latest"]
+        models_to_try = ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.7-flash"]
         last_err = None
         for model_name in models_to_try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
@@ -442,7 +442,7 @@ async def call_llm(prompt: str, context: str) -> Tuple[str, float]:
                 "contents": [{"parts": [{"text": f"{prompt}\n\nEvidence Context:\n{context}"}]}]
             }
             try:
-                async with httpx.AsyncClient(timeout=8.0) as http:
+                async with httpx.AsyncClient(timeout=20.0) as http:
                     resp = await http.post(url, json=payload)
                     if resp.status_code == 200:
                         data = resp.json()
