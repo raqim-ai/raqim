@@ -17,6 +17,7 @@ flight recording, and deterministic replay for autonomous AI agents:
 
 import asyncio
 import os
+import sys
 import time
 import httpx
 from typing import Dict, Any, List
@@ -53,13 +54,25 @@ from raqim.client import (
 )
 
 # ==============================================================================
-# PACING STREAMER FOR LIVE PRESENTATION
+# PACING STREAMER & INTERACTIVE SPEAKER BEAT
 # ==============================================================================
+
+PAUSE = os.getenv("DEMO_PAUSE", "1") == "1" and sys.stdin.isatty()
 
 async def stream(text: str, delay: float = 0.12):
     """Outputs a single log line with presentation rhythm."""
     print(text, flush=True)
     await asyncio.sleep(delay)
+
+async def beat(label: str = ""):
+    """Pauses execution until speaker presses Enter, allowing speech pacing."""
+    if PAUSE:
+        prompt = f"\n  {Style.CYAN}▶ [Press Enter: {label}]{Style.RESET} " if label else f"\n  {Style.CYAN}▶ [Press Enter to continue]{Style.RESET} "
+        try:
+            await asyncio.to_thread(input, prompt)
+            print()
+        except (EOFError, KeyboardInterrupt):
+            print()
 
 
 async def main():
@@ -76,6 +89,8 @@ async def main():
     clean_demo_sandbox()
     daemon_proc = await ensure_daemon_running()
     await asyncio.sleep(0.8)
+
+    await beat("Start Act 1: Provision Agent Identity & Passports")
 
     # --------------------------------------------------------------------------
     # ACT 1: AGENT IDENTITY & CAPABILITY PASSPORTS
@@ -113,6 +128,8 @@ async def main():
     await stream(f"  {Style.GREEN}✔{Style.RESET} Agent 2: {Style.BOLD}CompromisedCrawler{Style.RESET} [ID: {rogue_crawler.agent_hex[:12]}...] (Group: {Style.CYAN}finance_worker{Style.RESET})", 0.1)
     await stream(f"    Root CA: Swarm Master Public Key verified locally.\n", 0.8)
 
+    await beat("Proceed to Act 2: Control-Plane Pre-Execution Interdiction")
+
     # --------------------------------------------------------------------------
     # ACT 2: CONTROL-PLANE PRE-EXECUTION INTERDICTION
     # --------------------------------------------------------------------------
@@ -137,6 +154,8 @@ async def main():
     await stream(f"  2. Function body executed : {Style.RED}{Style.BOLD}TRUE (Simulated $500,000 exfiltrated){Style.RESET}", 0.08)
     await stream(f"  3. External API Result    : {Style.RED}{result_a}{Style.RESET}", 0.08)
     await stream(f"  {Style.RED}✖ OBSERVABILITY LIMITATION:{Style.RESET} Passive logs/traces can only record this after the transaction completes.\n", 0.4)
+
+    await beat("Execute Reality B: Raqim Pre-Execution Gate")
 
     # REALITY B: The Raqim Pre-Execution Gate
     await stream(f"{Style.CYAN}▶ REALITY B: Raqim Control-Plane Gate (@rogue_crawler.trace){Style.RESET}", 0.1)
@@ -182,6 +201,8 @@ async def main():
     p50_latency_ms = warm_latencies[len(warm_latencies) // 2]
     p99_latency_ms = warm_latencies[int(len(warm_latencies) * 0.99)]
     await stream(f"  ✔ Warm Pre-Flight Benchmark (100 calls) : {Style.GREEN}p50 = {p50_latency_ms:.2f}ms | p99 = {p99_latency_ms:.2f}ms{Style.RESET}\n", 0.6)
+
+    await beat("Proceed to Act 3: Cryptographic Flight Recording & Merkle Proof")
 
     # --------------------------------------------------------------------------
     # ACT 3: CRYPTOGRAPHIC FLIGHT RECORDING & OFFLINE MERKLE ATTESTATION
@@ -270,6 +291,8 @@ async def main():
     await stream(f"  Mathematical Proof    : {Style.BOLD}{Style.GREEN}VALID (Leaf #17 provably anchored to Merkle Root){Style.RESET}\n", 0.6)
     assert is_valid, "CRITICAL: Untampered evidence failed offline cryptographic verification!"
 
+    await beat("Proceed to Act 4: Tamper Detection Tests")
+
     # --------------------------------------------------------------------------
     # ACT 4: TAMPER DETECTION TESTS
     # --------------------------------------------------------------------------
@@ -298,6 +321,8 @@ async def main():
         await stream("  Verdict: Unauthenticated modification detected offline.\n", 0.3)
     assert not tamper_verified, "CRITICAL: Modified payload must NOT pass Merkle verification!"
 
+    await beat("Execute Test 4B: Physical On-Disk WAL Corruption Check")
+
     # Test 4B: TRUE ON-DISK PHYSICAL WAL STORAGE CORRUPTION
     await stream(f"{Style.BOLD}Test 4B: Physical On-Disk WAL Corruption & Daemon Boot Scan:{Style.RESET}", 0.1)
     mismatch_detected, log_line, offset = await test_disk_wal_corruption_recovery()
@@ -305,6 +330,8 @@ async def main():
     await stream(f"  Throwaway Daemon Boot Log        : {Style.GREEN}{log_line}{Style.RESET}", 0.08)
     await stream(f"  Engine Integrity Assertion       : {Style.GREEN}Corrupted Frame Detected by Rust Engine (Halted Scan){Style.RESET}\n", 0.5)
     assert mismatch_detected, "CRITICAL: Engine failed to catch on-disk CRC32 corruption!"
+
+    await beat("Proceed to Act 5: The Phoenix Moment (Hard Crash & Rehydration)")
 
     # --------------------------------------------------------------------------
     # ACT 5: THE PHOENIX MOMENT (SIGKILL CRASH & ZERO-DATA-LOSS HYDRATION)
@@ -325,6 +352,8 @@ async def main():
         daemon_dead = True
     assert daemon_dead, "CRITICAL: Daemon socket still responding after SIGKILL!"
     await stream(f"  {Style.RED}✖ Process is DEAD.{Style.RESET} Verified: Connection to {DAEMON_HTTP} actively refused.\n", 0.4)
+
+    await beat("Resurrect Daemon from Sandbox Write-Ahead Log")
 
     await stream(f"{Style.BOLD}Resurrecting Daemon from Sandbox WAL...{Style.RESET}", 0.2)
     resurrect_duration_ms, daemon_proc = await resurrect_daemon_phoenix()
@@ -359,6 +388,8 @@ async def main():
     positive_tx = await tool_screen_tx({"tx_id": "TX_POST_REBOOT_01", "amount_usd": 200.0})
     assert positive_tx["amount_usd"] == 200.0, "Positive control tool dispatch failed"
     await stream(f"  ✔ Positive Control : {Style.GREEN}Authorized agent successfully dispatches tool calls (Daemon fully operational){Style.RESET}\n", 0.6)
+
+    await beat("Proceed to Act 6: 7-Step Autonomous AML Pipeline")
 
     # --------------------------------------------------------------------------
     # ACT 6: 7-STEP AML PIPELINE ($0.00 REPLAY & COUNTERFACTUAL FORKING)
@@ -434,6 +465,8 @@ async def main():
     token_label = "Live API Tokens Billed" if ACTIVE_LLM_PROVIDER else "0 (Simulated / Local Mock)"
     await stream(f"  Total Duration: {Style.BOLD}{pass1_duration_ms:.2f}ms{Style.RESET} | LLM Calls: {pass1_llm_calls} ({token_label})\n", 0.5)
 
+    await beat("Execute Pass 2: Replay & Step 6 Counterfactual Mutation")
+
     # PASS 2: TIME-TRAVEL REPLAY & DIVERGENCE AT STEP 6
     await stream(f"{Style.BOLD}▶ PASS 2: DETERMINISTIC REPLAY & DIVERGENCE AT STEP 6{Style.RESET}", 0.1)
     await stream("Developer mutates Step 6 prompt to test an alternative compliance hypothesis:", 0.08)
@@ -463,7 +496,7 @@ async def main():
     assert r4["synthesis"] == p4["synthesis"], "Replay Step 4 synthesis mismatch!"
     assert r5["classification"] == p5["classification"], "Replay Step 5 classification mismatch!"
 
-    await stream(f"  {Style.GREEN}✔ Steps 1-5 rehydrated from local WAL cache in {cached_replay_ms:.2f}ms{Style.RESET}", 0.08)
+    await stream(f"  {Style.GREEN}✔ Steps 1-5 (SDK Frames 0-4) rehydrated from local WAL cache in {cached_replay_ms:.2f}ms{Style.RESET}", 0.08)
     await stream(f"    Replay LLM Calls: {Style.BOLD}{Style.GREEN}0{Style.RESET} (Empirically verified: zero external LLM invocations)", 0.08)
     await stream(f"    Values Verified : {Style.GREEN}100% byte-identical to Pass 1 outputs{Style.RESET}", 0.1)
 
@@ -479,6 +512,8 @@ async def main():
     await stream(f"  Step Index Context    : {Style.DIM}SDK WAL Frame Index: 5 (0-indexed) | Pipeline Node: Step 6 (SAR Draft){Style.RESET}", 0.08)
     await stream(f"  New LLM Call Executed : {Style.BOLD}1 (Only for mutated Step 6){Style.RESET}", 0.08)
     await stream(f"  Forked Verdict Output : {Style.DIM}{r6_forked['sar_report'][:110]}...{Style.RESET}\n", 0.3)
+
+    await beat("Execute Pass 3: Prove Canonical Timeline Invariance")
 
     # PASS 3: PROOF OF CANONICAL TIMELINE INVARIANCE
     await stream(f"{Style.BOLD}▶ PASS 3: CANONICAL TIMELINE INVARIANCE PROOF{Style.RESET}", 0.1)
@@ -499,6 +534,8 @@ async def main():
     assert pass3_llm_calls == 0, f"Expected 0 LLM calls for canonical replay, got {pass3_llm_calls}"
     assert r6_canonical["sar_report"] == p6["sar_report"], "Canonical branch was modified by divergence fork!"
     await stream(f"  {Style.GREEN}✔ Canonical branch output verified: 100% identical to Pass 1 ({pass3_llm_calls} LLM calls){Style.RESET}\n", 0.5)
+
+    await beat("Display System Verification Scorecard")
 
     # --------------------------------------------------------------------------
     # VERIFICATION SCORECARD (EMPIRICALLY COMPUTED VALUES ONLY)
