@@ -15,6 +15,7 @@ pub mod registry;
 pub mod state;
 pub mod utils;
 
+pub mod cold_store;
 pub mod hot_memory;
 pub mod otel;
 pub mod witness;
