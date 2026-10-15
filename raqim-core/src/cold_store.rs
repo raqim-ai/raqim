@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::{api::TimelineNode, OpLog};
+use crate::{api::TimelineNode, OpLog, SystemEvent};
 // RAQIM COLD STORAGE ABSTRACTION & BINARY SEGMENT ARCHIVE
 // Decouples 2PC wal compactor & time-travel Resurrection Engine from heavy
 // vector dbs (lancedb) and ML embedding models (ONNX). By default, compacted
