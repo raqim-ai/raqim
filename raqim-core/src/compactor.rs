@@ -2,6 +2,7 @@ use crate::{
     aegis::AegisGateKeeper,
     axon::AxonGateKeeper,
     checkpoint::{CheckpointEngine, StateCheckpoint},
+    cold_store::ColdStore,
     lancedb_store::LanceEngine,
     memory_router::MemoryRouter,
     nucleus::WalCommand,
@@ -41,7 +42,7 @@ pub struct WalCompactor {
     manifest_path: String,
     checkpoint_path: String,
     control_journal_path: String,
-    lance_engine: Arc<LanceEngine>,
+    cold_store: Arc<dyn ColdStore>,
     axon: Arc<AxonGateKeeper>,
     brain: Arc<SwarmStateRegistry>,
     aegis: Arc<AegisGateKeeper>,
@@ -57,7 +58,7 @@ impl WalCompactor {
         manifest_path: &str,
         checkpoint_path: &str,
         control_journal_path: &str,
-        lance_engine: Arc<LanceEngine>,
+        cold_store: Arc<dyn ColdStore>,
         axon: Arc<AxonGateKeeper>,
         brain: Arc<SwarmStateRegistry>,
         aegis: Arc<AegisGateKeeper>,
@@ -71,7 +72,7 @@ impl WalCompactor {
             manifest_path: manifest_path.to_string(),
             checkpoint_path: checkpoint_path.to_string(),
             control_journal_path: control_journal_path.to_string(),
-            lance_engine,
+            cold_store,
             axon,
             brain,
             aegis,
@@ -219,7 +220,7 @@ impl WalCompactor {
         Ok(count)
     }
 
-    /// The 2PC Ingestion Engine: Decode batches, embed text, archives to LanceDB, and clean up
+    /// The 2PC Ingestion Engine: Decodes batches, archieve to coldStore, write Checkpoint, and cleans up
     async fn execute_compaction(&self, processing_path: &str) -> usize {
         // 2PC State 1: write PENDING manifest
         let pending_manifest = CompactionManifest {
@@ -250,10 +251,9 @@ impl WalCompactor {
 
         let mut offset = 0;
         let mut logs_to_archive: Vec<OpLog> = Vec::new();
-        let mut semantic_payloads: Vec<String> = Vec::new();
         let mut aligned_buf = rkyv::util::AlignedVec::<16>::new();
 
-        // 16-Byte Aligned Batchh Parser with CRC32 Verification
+        // 16-Byte Aligned Batch Parser with CRC32 verification
         while offset + 8 <= buffer.len() {
             let entry_len =
                 u32::from_le_bytes(buffer[offset..offset + 4].try_into().unwrap()) as usize;
@@ -263,43 +263,32 @@ impl WalCompactor {
 
             if offset + frame_total > buffer.len() {
                 eprintln!(
-                    "[COMPACTOR WARN] Truncated tail frame at offset {}. Halting scan.",
+                    "[COMPAPCTOR WARN] Truncated tail frame at offset {}. Halting scan.",
                     offset
                 );
                 break;
             }
 
             let entry_slice = &buffer[offset + 8..offset + frame_total];
-
             if crc32fast::hash(entry_slice) != expected_crc {
                 eprintln!(
-                    "[COMPACTOR CORRUPTION] CRC32 mismatch at offset {}. Skipping frame.",
+                    "[COMPACTOR CORRUPTION] CRC32 mismatch at offset {}. Skipping the frame.",
                     offset
                 );
                 offset += frame_total;
                 continue;
             }
 
-            // Copy slice to 16 bytes aligned buffer
             aligned_buf.clear();
             aligned_buf.extend_from_slice(entry_slice);
 
-            // Decode batch
             if let Ok(archived_batch) =
                 rkyv::access::<<Vec<OpLog> as Archive>::Archived, rkyv::rancor::Error>(&aligned_buf)
             {
                 if let Ok(batch) =
                     rkyv::deserialize::<Vec<OpLog>, rkyv::rancor::Error>(archived_batch)
                 {
-                    for log in batch {
-                        let payload = format!(
-                            "[{:?}] Agent in {} stated {} ",
-                            log.state.status, log.state.namespace, log.state.text
-                        );
-
-                        semantic_payloads.push(payload);
-                        logs_to_archive.push(log);
-                    }
+                    logs_to_archive.extend(batch);
                 }
             }
 
@@ -307,47 +296,29 @@ impl WalCompactor {
         }
 
         if logs_to_archive.is_empty() {
-            println!(
-                "[COMPACTOR] SEGMENT {} contained zero valid logs. Removing. ",
-                &processing_path,
-            );
             let _ = fs::remove_file(processing_path);
             Self::clear_manifest(&self.manifest_path);
             return 0;
         }
 
-        // Compute batch vector embedding
-        let vectors = match self
-            .lance_engine
-            .embedder
-            .embed_batch(&semantic_payloads)
-            .await
-        {
-            Ok(vecs) => vecs,
-            Err(e) => {
-                // Prevent amnesia: If embedding fails, the wal file is not deleted
-                eprintln!(
-                    "[COMPACTOR CRITICAL ERROR] Batch embedding failed for segment {}: {}. Segment preserved for retry.",
-                    processing_path, e
-                );
-                return 0;
-            }
-        };
-
-        // extract max tx_id
         let max_compacted_tx = logs_to_archive
             .iter()
             .map(|l| l.state.transaction_id)
             .max()
             .unwrap_or(0);
 
-        let archived_count = logs_to_archive.len();
+        // Archive directly via the ColdStore trait (Zero ML, dependency in the compactor!)
+        let archived_count = match self.cold_store.archive_batch(&logs_to_archive).await {
+            Ok(count) => count,
+            Err(e) => {
+                eprintln!(
+                    "[COMPACTOR CRITICAL] ColdStore archive failed for '{}': {}. Segement Preserved.", processing_path, e
+                );
+                return 0;
+            }
+        };
 
-        self.lance_engine
-            .archive_batch(&logs_to_archive, &vectors)
-            .await;
-
-        // Capture State Checkpoint before committing and deleting the rotated segment
+        // Crystallize atomic StateCheckpointt before committing and deleting the rotated segment
         let checkpoint = StateCheckpoint {
             version: 1,
             timestamp: SystemTime::now()
@@ -371,32 +342,17 @@ impl WalCompactor {
                 e
             );
         } else {
-            println!(
-                "[COMPACTOR] State checkpoint successfully crystallized to '{}'",
-                self.checkpoint_path
-            );
             CheckpointEngine::truncate_control_journal(Path::new(&self.control_journal_path));
         }
 
-        // 2PC State 2: COMMITTED
+        // 2PC State 2: COMMITED
         let commited_manifest = CompactionManifest {
             target_file: processing_path.to_string(),
             state: CompactionState::Committed,
         };
         Self::write_manifest_atomically(&self.manifest_path, &commited_manifest);
 
-        println!(
-            "[COMPACTOR] Successfully archived {} thoughts from {} to lanceDB.",
-            archived_count, processing_path
-        );
-
-        // Safe cleanup and Broadcast
-        if let Err(e) = fs::remove_file(processing_path) {
-            eprintln!(
-                "[COMPACTOR WARRNING] Failed to remove processed WAL segment {}: {} ",
-                processing_path, e
-            );
-        }
+        let _ = fs::remove_file(processing_path);
         Self::clear_manifest(&self.manifest_path);
 
         let _ = self.tx.send(SystemEvent::CompactionTriggered {

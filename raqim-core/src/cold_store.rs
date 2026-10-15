@@ -4,6 +4,7 @@ use std::{path::PathBuf, sync::atomic::AtomicUsize};
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 
+use crate::AgentStatus;
 use crate::{api::TimelineNode, OpLog, SystemEvent};
 
 use memmap2::MmapOptions;
@@ -11,8 +12,8 @@ use rkyv::{to_bytes, Archive};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // RAQIM COLD STORAGE ABSTRACTION & BINARY SEGMENT ARCHIVE
@@ -184,7 +185,7 @@ impl ColdStore for SegmentColdStore {
         &self,
         agent_hex: &str,
     ) -> Result<Vec<TimelineNode>, anyhow::Error> {
-        let mut node = Vec::new();
+        let mut nodes = Vec::new();
         let target_bytes = hex::decode(agent_hex).unwrap_or_default();
 
         Self::scan_segment_file(&self.history_file_path, |archived_batch| {
