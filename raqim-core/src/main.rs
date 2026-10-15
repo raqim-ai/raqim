@@ -7,6 +7,7 @@ use raqim_core::axon::AxonGateKeeper;
 use raqim_core::checkpoint::{CheckpointEngine, ControlMutation};
 
 use axum::http::Method;
+use raqim_core::cold_store::SegmentColdStore;
 use raqim_core::compactor::WalCompactor;
 use raqim_core::config::RaqimConfig;
 use raqim_core::embedding::{EmbeddingProvider, LocalBgeProvider, OpenAIProvider};
@@ -39,8 +40,10 @@ use uuid::Uuid;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("==================================================================");
-    println!("Bismillah. Booting Hardened Raqim Sovereign Core Daemon v.1.0.0");
+    println!("Bismillah. Booting Hardened Raqim Core Daemon v.1.0.0");
     println!("==================================================================");
+
+    let boot_start = std::time::Instant::now();
 
     // =================================
     // SIGNAL INTERCEPTION (Graceful OS shutdown Handlers)
@@ -74,6 +77,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "[CONFIG] Active Port: {} | WAL Path: {} ",
         &config.port, &config.wal_path,
     );
+
+    let cold_store: Arc<dyn ColdStore> = Arc::new(SegmentColdStore::new(",.vault/cold_segments"));
 
     // THE INTERNAL EVENT BUS
     let (event_tx, _event_rx) = broadcast::channel::<SystemEvent>(50_000);
@@ -262,22 +267,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await,
     );
     let hot_buffer = Arc::new(HotVectorBuffer::new(10_0000));
-
-    let embedder: Arc<dyn EmbeddingProvider> = match config.embedder_type.as_str() {
-        "openai" => {
-            let key =
-                std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| config.openai_api_key.clone());
-            if key.is_empty() {
-                panic!("OPENAI_API_KEY environment variable or config entry is required");
-            }
-            Arc::new(OpenAIProvider::new(key))
-        }
-
-        _ => Arc::new(LocalBgeProvider::new()),
-    };
-
-    let lance_engine =
-        Arc::new(LanceEngine::new(&config.lance_path, &config.table_name, embedder.clone()).await);
 
     // 1. Boot global Quarantine network subscriber
     global_net.listen_for_global_quarantine(aegis.clone()).await;
@@ -480,52 +469,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         uncompacted_count
     );
 
-    if !recovered_logs.is_empty() {
-        // Trailing 250 thoughts
-        let cache_limit = 250.min(recovered_logs.len());
-        let recent_logs_slice = &recovered_logs[recovered_logs.len() - cache_limit..];
-
-        println!(
-            " [PHOENIX] Batch-embedding trailing {} thoughts to warm uo HotVectorBuffer...",
-            recent_logs_slice.len()
-        );
-
-        // Batch embed all recovered WAL texts to restore hot vector memory
-        let texts: Vec<String> = recent_logs_slice
-            .iter()
-            .map(|l| {
-                format!(
-                    "[{:?}] Agent in {} stated {}",
-                    l.state.status, l.state.namespace, l.state.text
-                )
-            })
-            .collect();
-
-        // Recompute the vector space asynchronouly to bypass short-term amnesia gaps
-        // Simulated blocks, maps out directly to fastembed / OpenAI endpoints
-        // let mock_embed_vectors = vec![vec![0.0f32; 768]; recent_logs_slice.len()];
-
-        if let Ok(vectors) = embedder.embed_batch(&texts).await {
-            let mut hot_entries = Vec::with_capacity(recent_logs_slice.len());
-            for (i, log) in recent_logs_slice.into_iter().enumerate() {
-                hot_entries.push(HotVectorEntry {
-                    tx_id: log.state.transaction_id,
-                    agent_hex: hex::encode(log.agent_id),
-                    namespace: log.state.namespace.clone(),
-                    text: log.state.text.clone(),
-                    timestamp: log.state.timestamp,
-                    vector: vectors[i].clone(),
-                });
-            }
-            let entry_count = hot_entries.len();
-            hot_buffer.push_batch(hot_entries);
-            println!(
-                "[INITIALIZATION] Phoenix Boot Hydration complete. Restored {} hot vectors in RAM.",
-                entry_count
-            );
-        }
-    }
-
     // Load un-tamperable chronological WORM roots and assert execution matrix match
     let anchored_witness = witness_engine.load_local_witness();
     if !anchored_witness.is_empty() {
@@ -615,7 +558,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         global_net: global_net.clone(),
         axon: axon.clone(),
         brain: brain_shard.clone(),
-        lance: lance_engine.clone(),
+        cold_store: cold_store.clone(),
         wal: wal.clone(),
         event_tx: event_tx.clone(),
 
@@ -646,7 +589,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = socket.set_reuseport(true);
         socket.bind(addr).unwrap();
         let listener = socket.listen(1024).unwrap();
-        println!("[SYSTEM] Axum control plane live on {}:{} ", host_for_api, api_port);
+        println!(
+            "[SYSTEM] Axum control plane live on {}:{} ",
+            host_for_api, api_port
+        );
         axum::serve(listener, axum_app).await.unwrap();
     });
 
@@ -658,7 +604,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = socket.set_reuseport(true);
     socket.bind(addr).unwrap();
     let listener = socket.listen(1024).unwrap();
-    println!("Organism live on {}:{}. Awaiting LLM Agent TCP Connections...", config.host, config.port);
+    println!(
+        "Organism live on {}:{}. Awaiting LLM Agent TCP Connections...",
+        config.host, config.port
+    );
+
+    println!(
+        "[BOOT TELEMETRY] Total Integrity Hydration & Socket Bind: {:.2}ms",
+        boot_start.elapsed().as_secs_f64() * 1000.0
+    );
 
     // JoinSet automatically tracks all spawned TCP worker tasks.
     let mut tcp_workers = JoinSet::new();

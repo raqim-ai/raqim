@@ -38,7 +38,6 @@ use crate::cold_store::ColdStore;
 use crate::compactor::WalCompactor;
 use crate::health::SystemHealth;
 use crate::hot_memory::HotVectorBuffer;
-use crate::lancedb_store::LanceEngine;
 use crate::nucleus::WalEngine;
 use crate::otel::{self, OtelExportRequest};
 use crate::registry::SwarmRegistry;
@@ -915,15 +914,11 @@ pub async fn vault_telemetry_endpoint(
 ) -> Result<Json<VaultTelemetry>, ApiError> {
     let wal_pending_count = state.axon.get_total_leaves() as u64;
 
-    let total_vectors = state.lance.get_total_vector_count().await.unwrap_or(0);
+    let total_vectors = state.cold_store.get_total_record_count().await;
 
-    let index_size_mb = state.lance.get_index_size_mb().await;
+    let index_size_mb = state.cold_store.get_storage_size_mb().await;
 
-    let densest_namespace = state
-        .lance
-        .get_densest_namespace()
-        .await
-        .unwrap_or_else(|_| "Empty (0%)".to_string());
+    let densest_namespace = state.cold_store.get_densest_namespace().await;
 
     let telemetry = VaultTelemetry {
         total_vectors,
@@ -931,7 +926,7 @@ pub async fn vault_telemetry_endpoint(
         index_size_mb,
         densest_namespace,
         embedder_name: state.config.embedder_type.clone(),
-        embeder_dim: state.lance.dims as usize,
+        embeder_dim: state.cold_store.vector_dims() as usize,
     };
 
     Ok(Json(telemetry))
@@ -1217,7 +1212,7 @@ pub async fn fetch_agent_timeline(
     Path(agent_hex): Path<String>,
 ) -> Result<Json<Vec<TimelineNode>>, ApiError> {
     // The scatter: Let the engines do their native work
-    let lance_future = state.lance.fetch_historical_timeline(&agent_hex);
+    let lance_future = state.cold_store.fetch_historical_timeline(&agent_hex);
     let wal_future = async {
         state
             .wal
@@ -1271,7 +1266,7 @@ pub async fn dashboard_cards_endpoint(
         })
         .count();
 
-    let cold_count = state.lance.get_total_vector_count().await.unwrap_or(0) as u64;
+    let cold_count = state.cold_store.get_total_record_count().await as u64;
     let _hot_batches = state.wal.get_pending_count().await as u64;
 
     // Hot buffer leaves + cold storage
@@ -1288,7 +1283,7 @@ pub async fn dashboard_cards_endpoint(
         hot_thoughts_count: hot_count,
         cold_thoughts_count: cold_count,
         latest_tx_hex: latest_tx_hex,
-        embedder_dims: state.lance.dims,
+        embedder_dims: state.cold_store.vector_dims(),
         embedder_name: state.config.embedder_type.clone(),
         ingress_pause: *state.pause_tx.borrow(),
     }))
@@ -1938,7 +1933,7 @@ pub async fn export_agent_timeline_otel(
     Path(agent_hex): Path<String>,
 ) -> Result<Json<OtelExportRequest>, ApiError> {
     // Scatter-gather historical timeline from lanceDB and WAL
-    let lance_future = state.lance.fetch_historical_timeline(&agent_hex);
+    let lance_future = state.cold_store.fetch_historical_timeline(&agent_hex);
     let wal_future = async {
         state
             .wal
