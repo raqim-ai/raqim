@@ -19,6 +19,7 @@ use tokio::sync::broadcast::Sender;
 use crate::api::ForkConfig;
 use crate::api::UiEvent;
 use crate::axon::AxonGateKeeper;
+use crate::cold_store::ColdStore;
 use crate::generate_uuidv7_txid;
 use crate::hot_memory::HotVectorBuffer;
 use crate::state::SwarmStateRegistry;
@@ -26,9 +27,7 @@ use crate::AgentState;
 use crate::AgentStatus;
 use crate::EffectKey;
 use crate::EffectRecord;
-use crate::{
-    config::RaqimConfig, lancedb_store::LanceEngine, nucleus::WalEngine, OpLog, SystemEvent,
-};
+use crate::{config::RaqimConfig, nucleus::WalEngine, OpLog, SystemEvent};
 use serde::Serialize;
 
 pub enum RebuildMode {
@@ -40,7 +39,7 @@ pub struct MemoryRouter {
     config: Arc<RaqimConfig>,
     axon: Arc<AxonGateKeeper>,
     brain: Arc<SwarmStateRegistry>,
-    lance_engine: Arc<LanceEngine>,
+    cold_store: Arc<dyn ColdStore>,
     wal_engine: Arc<WalEngine>,
     event_tx: Sender<SystemEvent>,
     effect_index: DashMap<EffectKey, EffectRecord>,
@@ -62,7 +61,7 @@ impl MemoryRouter {
         config: Arc<RaqimConfig>,
         axon: Arc<AxonGateKeeper>,
         brain: Arc<SwarmStateRegistry>,
-        lance_engine: Arc<LanceEngine>,
+        cold_store: Arc<dyn ColdStore>,
         wal_engine: Arc<WalEngine>,
         event_tx: Sender<SystemEvent>,
     ) -> Self {
@@ -70,7 +69,7 @@ impl MemoryRouter {
             config,
             axon,
             brain,
-            lance_engine,
+            cold_store,
             wal_engine,
             event_tx,
             effect_index: DashMap::new(),
@@ -163,67 +162,6 @@ impl MemoryRouter {
         final_context.append(&mut deep_memories);
 
         Ok(final_context)
-    }
-
-    /// FORENSIC TIME MACHINE
-    pub async fn fetch_by_txid(&self, target_tx_id: u128) -> Result<String, anyhow::Error> {
-        let mut result = None;
-
-        // 1. Hot Memory ( Zero-copy WAL scan )
-        self.scan_wal_zero_copy(|archievd| {
-            // We read directly from the archeived bytes!
-            if archievd.state.transaction_id == target_tx_id {
-                result = Some(format!(
-                    "[HOT MEMORY] TxID: {} | Text: {} ",
-                    archievd.state.transaction_id,
-                    archievd.state.text.as_str()
-                ))
-            }
-        })
-        .map_err(|e| anyhow::anyhow!("Error scanning wal file: {}", e))?;
-
-        if let Some(res) = result {
-            return Ok(res);
-        }
-
-        // 2. Cold Memory ( REAL LanceDB SQL Filter )
-        let table = self
-            .lance_engine
-            .db
-            .open_table(&self.config.table_name)
-            .execute()
-            .await?;
-
-        // LanceDB allows SQL-style filtering directly on the Arrow columns
-        let mut stream = table
-            .query()
-            .only_if(format!("tx_id = {}", target_tx_id))
-            .limit(1)
-            .execute()
-            .await?;
-
-        if let Some(batch_result) = stream.next().await {
-            let batch = batch_result?;
-            let text_col = batch
-                .column_by_name("text")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<arrow_array::StringArray>()
-                .expect("FATAL: text column isn't StringArray");
-
-            if text_col.len() > 0 {
-                return Ok(format!(
-                    "[COLD STORAGE] TxID: {} | Text: {} ",
-                    target_tx_id,
-                    text_col.value(0)
-                ));
-            }
-        }
-
-        Err(anyhow::anyhow!(
-            "TxID {} not found in WAL or LanceDB.",
-            target_tx_id
-        ))
     }
 
     /// THE RESURRECTION ENGINE
@@ -448,6 +386,36 @@ impl MemoryRouter {
             actual_target_transaction,
             snapshot_timestamp,
         ))
+    }
+
+    /// FORENSIC TIME MACHINE
+    pub async fn fetch_by_txid(&self, target_tx_id: u128) -> Result<String, anyhow::Error> {
+        let mut result = None;
+
+        // 1. Hot Memory ( Zero-copy WAL scan )
+        self.scan_wal_zero_copy(|archievd| {
+            // We read directly from the archeived bytes!
+            if archievd.state.transaction_id == target_tx_id {
+                result = Some(format!(
+                    "[HOT MEMORY] TxID: {} | Text: {} ",
+                    archievd.state.transaction_id,
+                    archievd.state.text.as_str()
+                ))
+            }
+        })
+        .map_err(|e| anyhow::anyhow!("Error scanning wal file: {}", e))?;
+
+        if let Some(res) = result {
+            return Ok(res);
+        }
+
+        let resp = self.cold_store.fetch_by_txid(target_tx_id).await?;
+
+        if let Some(res) = resp {
+            Ok(res)
+        } else {
+            Err(anyhow::anyhow!("Not found"))
+        }
     }
 
     /// The Unified Engine for both Resurrection (Live) and Time Travel (Isolated)
@@ -775,7 +743,10 @@ impl MemoryRouter {
 
     /// Exports all cached effect records for checkpointing
     pub fn export_effects(&self) -> Vec<EffectRecord> {
-        self.effect_index.iter().map(|e| e.value().clone()).collect()
+        self.effect_index
+            .iter()
+            .map(|e| e.value().clone())
+            .collect()
     }
 
     /// Hydrates effect records from checkpoint

@@ -34,6 +34,7 @@ use uuid::Uuid;
 
 use crate::aegis::{CapabilityCertificate, QuarantineRecord};
 use crate::axon::{AxonGateKeeper, InclusionProof};
+use crate::cold_store::ColdStore;
 use crate::compactor::WalCompactor;
 use crate::health::SystemHealth;
 use crate::hot_memory::HotVectorBuffer;
@@ -177,7 +178,7 @@ pub struct ApiState {
     pub aegis: Arc<AegisGateKeeper>,
     pub global_net: Arc<GlobalNetworkBridge>,
     pub wal: Arc<WalEngine>,
-    pub lance: Arc<LanceEngine>,
+    pub cold_store: Arc<dyn ColdStore>,
 
     pub event_tx: Sender<SystemEvent>,
     pub ui_tx: Sender<UiEvent>,
