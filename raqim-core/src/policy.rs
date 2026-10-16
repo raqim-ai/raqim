@@ -149,11 +149,11 @@ pub struct GroupPolicyConfig {
 
 /// Deserialization schema for aegis.toml
 #[derive(Deserialize, Debug, Clone, Serialize)]
-pub struct AegisConfigFile {
+pub struct PolicyConfigFile {
     pub groups: HashMap<String, GroupPolicyConfig>,
 }
 
-impl AegisConfigFile {
+impl PolicyConfigFile {
     pub fn to_group_policies(&self) -> HashMap<String, GroupPolicy> {
         let mut map = HashMap::new();
         for (group_name, cfg) in &self.groups {
@@ -171,7 +171,7 @@ impl AegisConfigFile {
     }
 }
 
-pub struct AegisGateKeeper {
+pub struct PolicyEngine {
     pub group_policies: Arc<RwLock<HashMap<String, GroupPolicy>>>,
     pub quarantine_blocklist: DashMap<String, QuarantineRecord>,
     pub master_public_key: VerifyingKey,
@@ -180,7 +180,7 @@ pub struct AegisGateKeeper {
     pub control_journal_path: String,
 }
 
-impl AegisGateKeeper {
+impl PolicyEngine {
     pub fn new(
         initial_policies: HashMap<String, GroupPolicy>,
         master_pub_bytes: &[u8; 32],
