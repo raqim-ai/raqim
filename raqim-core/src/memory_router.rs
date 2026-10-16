@@ -1,8 +1,3 @@
-use arrow_array::Array;
-use dashmap::DashMap;
-use futures::StreamExt;
-use lancedb::query::ExecutableQuery;
-use lancedb::query::QueryBase;
 use memmap2::MmapOptions;
 use rkyv::{Archive, Archived};
 use std::collections::HashMap;

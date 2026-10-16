@@ -10,7 +10,6 @@ use axum::http::Method;
 use raqim_core::cold_store::SegmentColdStore;
 use raqim_core::compactor::WalCompactor;
 use raqim_core::config::RaqimConfig;
-use raqim_core::embedding::{EmbeddingProvider, LocalBgeProvider, OpenAIProvider};
 use raqim_core::health::{HealthMonitor, SystemHealth};
 use raqim_core::hot_memory::{HotVectorBuffer, HotVectorEntry};
 use raqim_core::lancedb_store::LanceEngine;
@@ -78,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &config.port, &config.wal_path,
     );
 
-    let cold_store: Arc<dyn ColdStore> = Arc::new(SegmentColdStore::new(",.vault/cold_segments"));
+    let cold_store: Arc<dyn ColdStore> = Arc::new(SegmentColdStore::new("./vault/cold_segments"));
 
     // THE INTERNAL EVENT BUS
     let (event_tx, _event_rx) = broadcast::channel::<SystemEvent>(50_000);
@@ -275,7 +274,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.clone(),
         axon.clone(),
         brain_shard.clone(),
-        lance_engine.clone(),
+        cold_store.clone(),
         wal.clone(),
         event_tx.clone(),
     ));
@@ -493,7 +492,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // We spawn the Audit Vault Sinker. This OS thread's ONLY job is to listen to the internal event bus
     let mut valut_rx = event_tx.subscribe();
-    let lance_vault_clone = lance_engine.clone();
+    let cold_store_vault = cold_store.clone();
     let lance_net = global_net.clone();
 
     tokio::spawn(async move {
@@ -501,7 +500,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         while let Ok(event) = valut_rx.recv().await {
             if !matches!(event, SystemEvent::ThoughtCommitted { .. }) {
-                lance_vault_clone.log_system_events(&event).await;
+                cold_store_vault.log_system_events(&event).await;
             }
 
             match event {
@@ -661,7 +660,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let task_mem_router = mem_router.clone();
                     let task_pause_rx = pause_rx.clone();
                     let task_hot_buffer = hot_buffer.clone();
-                    let task_embedder = embedder.clone();
 
                 // Spawn into the joinset
             tcp_workers.spawn(async move {
@@ -874,31 +872,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 intent_path: path_intent.to_string(),
                                 tx_id: format!("{:032x}", tx_id),
                                 text: text.clone(),
-                            });
-
-                            // Async hot-memory insersion
-                            let hot_buf = task_hot_buffer.clone();
-                            let embedder = task_embedder.clone();
-                            let text_bg = text.clone();
-                            let ns_bg = path_intent.to_string();
-                            let agent_bg = agent_hex.clone();
-                            let ts_bg: i64 = archived_state.timestamp.into();
-
-                            tokio::spawn(async move{
-
-                             if let Ok(vector) = embedder.embed(&text_bg).await {
-                                let entry = HotVectorEntry {
-                                    tx_id,
-                                    agent_hex: agent_bg,
-                                    namespace: ns_bg.to_string(),
-                                    text: text_bg,
-                                    timestamp: ts_bg,
-                                    vector
-
-                                };
-
-                                    hot_buf.push(entry);
-                                }
                             });
 
                      }

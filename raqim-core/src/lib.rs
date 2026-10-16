@@ -275,9 +275,6 @@ pub enum SystemEvent {
         archived_count: usize,
         max_compacted_tx: u128,
     },
-    PluginLoaded {
-        plugin_name: String,
-    },
 
     SystemBoot {
         message: String,

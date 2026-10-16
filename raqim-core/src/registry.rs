@@ -53,7 +53,10 @@ impl SwarmRegistry {
 
     /// Exports all live agent processes for checkpointing
     pub fn export_agents(&self) -> Vec<AgentProcess> {
-        self.active_agents.iter().map(|e| e.value().clone()).collect()
+        self.active_agents
+            .iter()
+            .map(|e| e.value().clone())
+            .collect()
     }
 
     /// Hydrates agent processes from a checkpoint
