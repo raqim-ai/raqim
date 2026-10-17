@@ -1,5 +1,5 @@
 use crate::{
-    aegis::QuarantineRecord, axon::MarkleBatch, registry::AgentProcess, EffectRecord, OpLog,
+    merkle::MarkleBatch, policy::QuarantineRecord, registry::AgentProcess, EffectRecord, OpLog,
 };
 use crc32fast::Hasher as Crc32Hasher;
 use serde::{Deserialize, Serialize};
@@ -199,7 +199,9 @@ impl CheckpointEngine {
             let mut hasher = Crc32Hasher::new();
             hasher.update(&payload);
             if hasher.finalize() != expected_crc {
-                eprintln!("[CONTROL JOURNAL CORRUPTION] CRC32 mismatch in journal entry. Skipping.");
+                eprintln!(
+                    "[CONTROL JOURNAL CORRUPTION] CRC32 mismatch in journal entry. Skipping."
+                );
                 continue;
             }
 
@@ -218,4 +220,3 @@ impl CheckpointEngine {
         }
     }
 }
-

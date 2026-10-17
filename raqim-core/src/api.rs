@@ -32,21 +32,21 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::{timeout, Duration};
 use uuid::Uuid;
 
-use crate::aegis::{CapabilityCertificate, QuarantineRecord};
-use crate::axon::{AxonGateKeeper, InclusionProof};
 use crate::cold_store::ColdStore;
 use crate::compactor::WalCompactor;
 use crate::health::SystemHealth;
 use crate::hot_memory::HotVectorBuffer;
-use crate::nucleus::WalEngine;
+use crate::merkle::{AxonGateKeeper, InclusionProof};
 use crate::otel::{self, OtelExportRequest};
+use crate::policy::{CapabilityCertificate, QuarantineRecord};
 use crate::registry::SwarmRegistry;
 use crate::state::SwarmStateRegistry;
+use crate::wal::WalEngine;
 use crate::{
-    aegis::AegisGateKeeper,
     config::RaqimConfig,
     memory_router::{MemoryRouter, UnifiedSearchResult},
     network::GlobalNetworkBridge,
+    policy::AegisGateKeeper,
     A2AEnvelope,
 };
 use crate::{execute_raqim_cascade, AgentState, IngressEnvelope, RecentThought, SystemEvent};

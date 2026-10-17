@@ -2,6 +2,7 @@ use std::{format, matches};
 use std::{path::PathBuf, sync::atomic::AtomicUsize};
 
 use async_trait::async_trait;
+use dashmap::DashMap;
 use tokio::sync::Mutex;
 
 use crate::AgentStatus;
@@ -20,6 +21,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // Decouples 2PC wal compactor & time-travel Resurrection Engine from heavy
 // vector dbs (lancedb) and ML embedding models (ONNX). By default, compacted
 // WAL segments are sealed into CRC32-vefified, 16-byte aligned rkyv binary seg files (`SegmentColdStore`) in <1ms.
+
+// Coordinate of a single serialized Oplog frame inside `cold_store.seg`
+#[derive(Debug, Clone, Copy)]
+pub struct FramePointer {
+    pub tx_id: u128,
+    pub offset: u64,
+    pub total_frame_bytes: u32,
+}
 
 /// The Unified Cold Storage Contract: Any long-term archive (local bin seg, S3, lancedb) implement
 /// this trait so the kernel never blocks on ML interference during compaction
@@ -70,6 +79,13 @@ pub struct SegmentColdStore {
     history_file_path: PathBuf,
     audit_file_path: PathBuf,
     write_lock: Mutex<()>,
+
+    /// 0(1) in-mem map: tx_id -> exact byte offset & length on disk
+    tx_idx: DashMap<u128, FramePointer>,
+    agent_idx: DashMap<[u8; 16], Vec<FramePointer>>,
+
+    /// 0(1) namespace freq counter for instant tele without scanning disk
+    namespace_counts: DashMap<String, usize>,
     cached_record_count: AtomicUsize,
 }
 
@@ -88,9 +104,17 @@ impl SegmentColdStore {
             history_file_path,
             audit_file_path,
             write_lock: Mutex::new(()),
+
+            tx_idx: DashMap::new(),
+            agent_idx: DashMap::new(),
+            namespace_counts: DashMap::new(),
+
             cached_record_count: AtomicUsize::new(initial_count),
         }
     }
+
+    /// Loads the compact 44-byte-per-record `.idx` file into RAM on startup.  
+    /// If `.idx` is missing but `.seg` exists, rebuilds the `.idx` automatically.
 
     fn count_records_on_disk(path: &Path) -> usize {
         let mut count = 0;

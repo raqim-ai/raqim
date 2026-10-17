@@ -1,13 +1,13 @@
 use crate::{
-    aegis::AegisGateKeeper,
-    axon::AxonGateKeeper,
     checkpoint::{CheckpointEngine, StateCheckpoint},
     cold_store::ColdStore,
     lancedb_store::LanceEngine,
     memory_router::MemoryRouter,
-    nucleus::WalCommand,
+    merkle::AxonGateKeeper,
+    policy::AegisGateKeeper,
     registry::SwarmRegistry,
     state::SwarmStateRegistry,
+    wal::WalCommand,
     OpLog, SystemEvent,
 };
 use rkyv::Archive;

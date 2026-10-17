@@ -1,3 +1,4 @@
+use dashmap::DashMap;
 use memmap2::MmapOptions;
 use rkyv::{Archive, Archived};
 use std::collections::HashMap;
@@ -13,16 +14,16 @@ use tokio::sync::broadcast::Sender;
 
 use crate::api::ForkConfig;
 use crate::api::UiEvent;
-use crate::axon::AxonGateKeeper;
 use crate::cold_store::ColdStore;
 use crate::generate_uuidv7_txid;
 use crate::hot_memory::HotVectorBuffer;
+use crate::merkle::AxonGateKeeper;
 use crate::state::SwarmStateRegistry;
 use crate::AgentState;
 use crate::AgentStatus;
 use crate::EffectKey;
 use crate::EffectRecord;
-use crate::{config::RaqimConfig, nucleus::WalEngine, OpLog, SystemEvent};
+use crate::{config::RaqimConfig, wal::WalEngine, OpLog, SystemEvent};
 use serde::Serialize;
 
 pub enum RebuildMode {
@@ -127,36 +128,6 @@ impl MemoryRouter {
         F: FnMut(&Archived<OpLog>),
     {
         Self::scan_wal_file(&self.config.wal_path, callback)
-    }
-    // RAG CONTEXT: Prioritize the hot WAL, fills the rest with semantic lanceDB
-    pub async fn semantic_search_with_context(
-        &self,
-        query: &str,
-        namespace: &str,
-        limit: usize,
-    ) -> Result<Vec<String>, anyhow::Error> {
-        let mut final_context = Vec::new();
-
-        // 1. HOT MEMORY (WAL): Zero-Copy Semantic Filtering
-        self.scan_wal_zero_copy(|archived| {
-            // PHYSICS: We read the name_space as a string slice without allocating mem
-            let log_namespace = archived.state.namespace.as_str();
-
-            if log_namespace.starts_with(namespace) {
-                final_context.push(format!("[Recent] {} ", archived.state.text.as_str()));
-            }
-        })
-        .map_err(|e| anyhow::anyhow!("Error scanning wal file: {}", e))?;
-
-        // 2. Supplement with Deep Semantic search
-        let mut deep_memories = self
-            .lance_engine
-            .search_memory(query, namespace, limit)
-            .await?;
-
-        final_context.append(&mut deep_memories);
-
-        Ok(final_context)
     }
 
     /// THE RESURRECTION ENGINE
@@ -509,128 +480,6 @@ impl MemoryRouter {
         self.brain.purge_phantom_shards();
 
         Ok(())
-    }
-
-    /// Unified hybrid search engine: Scatters query to Cold LanceDB and Hot RAM Vector Buffer concurrently,
-    /// performs Reciprocal Rank Fusion (RRF) and Time-Decay Scoring, and returns structured results.
-    pub async fn query_hybrid_memory(
-        &self,
-        query: &str,
-        namespace: Option<&str>,
-        limit: usize,
-        include_hot_wal: bool,
-        hot_buffer: &HotVectorBuffer,
-    ) -> Result<Vec<UnifiedSearchResult>, anyhow::Error> {
-        // Embed query once
-        let query_vector = self.lance_engine.embedder.embed(query).await?;
-
-        // PARALLEL SCATTER-GATHER (Cold LanceDB + optional Hot RAM)
-        let cold_future = self
-            .lance_engine
-            .search_cold_vector(&query_vector, namespace, limit * 2);
-
-        let (cold_result, hot_result) = if include_hot_wal {
-            let hot_res = hot_buffer.search_hot(&query_vector, namespace, limit * 2);
-            let cold_res = cold_future.await.unwrap_or_default();
-            (cold_res, hot_res)
-        } else {
-            let cold_res = cold_future.await.unwrap_or_default();
-            (cold_res, vec![])
-        };
-
-        // RECIPROCAL RANK FUSION (RRF) & DEDUPLICATION BY UUIDv7 tx_id
-        let mut fused_map: HashMap<u128, UnifiedSearchResult> = HashMap::new();
-        let k = 60.0f32; // std RRF smoothing constant
-        let current_ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-
-        // Process Cold Results
-        for (rank, cold) in cold_result.into_iter().enumerate() {
-            let rrf_score = 1.0 / (k + (rank + 1) as f32);
-
-            // Time decay multiplier: e^(-lambda * delta_t_hours)
-            let age_hours = ((current_ts - cold.timestamp).max(0) as f32) / 3600.0;
-            let time_decay = (-0.05 * age_hours).exp();
-            let sim_score = (1.0 - cold.distance).clamp(0.0, 1.0);
-            let final_score = ((rrf_score + sim_score) * time_decay).min(1.0);
-
-            fused_map.insert(
-                cold.tx_id,
-                UnifiedSearchResult {
-                    tx_id: cold.tx_id,
-                    agent_hex: cold.agent_hex,
-                    namespace: cold.namespace,
-                    text: cold.text,
-                    timestamp: cold.timestamp,
-                    score: final_score,
-                    source: "COLD_LANCEDB",
-                },
-            );
-        }
-
-        // Process Hot RAM Results (Boosted by recency)
-        for (rank, (hot, sim_score)) in hot_result.into_iter().enumerate() {
-            let rrf_score = 1.0 / (k + (rank + 1) as f32);
-            let age_hours = ((current_ts - hot.timestamp).max(0) as f32) / 3600.0;
-            let time_decay = (-0.01 * age_hours).exp(); // Slower decay for hot memory
-            let final_score = ((rrf_score + sim_score) * time_decay * 1.25).min(1.0); // 25% Hot Recency Boost
-
-            fused_map
-                .entry(hot.tx_id)
-                .and_modify(|existing| {
-                    if final_score > existing.score {
-                        existing.score = final_score;
-                        existing.source = "HOT_WAL";
-                    }
-                })
-                .or_insert(UnifiedSearchResult {
-                    tx_id: hot.tx_id,
-                    agent_hex: hot.agent_hex,
-                    namespace: hot.namespace,
-                    text: hot.text,
-                    timestamp: hot.timestamp,
-                    score: final_score,
-                    source: "HOT_WAL",
-                });
-        }
-
-        // SORT BY HYBRID RRF SCORE
-        let mut final_list: Vec<UnifiedSearchResult> = fused_map.into_values().collect();
-        final_list.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        final_list.truncate(limit);
-
-        Ok(final_list)
-    }
-
-    /// Formats the hybrid search results into rich context strings for RAG / LLM prompt window
-    pub async fn query_hybrid_context_strings(
-        &self,
-        query: &str,
-        namespace: Option<&str>,
-        limit: usize,
-        hot_buffer: &HotVectorBuffer,
-    ) -> Result<Vec<String>, anyhow::Error> {
-        let results = self
-            .query_hybrid_memory(query, namespace, limit, true, hot_buffer)
-            .await?;
-
-        let formatted_memories: Vec<String> = results
-            .into_iter()
-            .map(|res| {
-                format!(
-                    "[Time: {}] [TxID: {:032x}] [Source: {}] Namespace: '{}' -> {}",
-                    res.timestamp, res.tx_id, res.source, res.namespace, res.text
-                )
-            })
-            .collect();
-
-        Ok(formatted_memories)
     }
 
     /// Record Effect (Record mode) : captures a live side-effect, writes it to the wal & merkle DAG and updates the RAM

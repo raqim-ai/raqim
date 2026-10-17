@@ -1,10 +1,10 @@
 use ed25519_dalek::SigningKey;
 use notify::{Event, Watcher};
 use rand_core::OsRng;
-use raqim_core::aegis::{AegisConfigFile, AegisGateKeeper};
 use raqim_core::api::{build_admin_router, ApiState, UiEvent};
-use raqim_core::axon::AxonGateKeeper;
 use raqim_core::checkpoint::{CheckpointEngine, ControlMutation};
+use raqim_core::merkle::AxonGateKeeper;
+use raqim_core::policy::{AegisConfigFile, AegisGateKeeper};
 
 use axum::http::Method;
 use raqim_core::cold_store::SegmentColdStore;
@@ -15,9 +15,9 @@ use raqim_core::hot_memory::{HotVectorBuffer, HotVectorEntry};
 use raqim_core::lancedb_store::LanceEngine;
 use raqim_core::memory_router::MemoryRouter;
 use raqim_core::network::GlobalNetworkBridge;
-use raqim_core::nucleus::{WalCommand, WalEngine};
 use raqim_core::registry::SwarmRegistry;
 use raqim_core::state::SwarmStateRegistry;
+use raqim_core::wal::{WalCommand, WalEngine};
 use raqim_core::witness::WormWitnessEngine;
 use raqim_core::{
     execute_raqim_cascade, AgentState, IngressEnvelope, OpLog, RuntimeSecurityFlags, SystemEvent,

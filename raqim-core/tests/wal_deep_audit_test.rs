@@ -1,4 +1,4 @@
-use raqim_core::{AgentState, AgentStatus, OpLog, memory_router::MemoryRouter, nucleus::WalEngine};
+use raqim_core::{memory_router::MemoryRouter, wal::WalEngine, AgentState, AgentStatus, OpLog};
 use std::path::Path;
 
 #[tokio::test]

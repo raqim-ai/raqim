@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{eprintln, format, println};
 
-use crate::axon::AxonGateKeeper;
+use crate::merkle::AxonGateKeeper;
 use crate::state::SwarmStateRegistry;
 use crate::{A2AEnvelope, OpLog, SystemEvent};
 use rkyv::{to_bytes, Archive};
@@ -11,7 +11,7 @@ use tokio::sync::broadcast::Sender;
 use tokio::sync::mpsc;
 use zenoh::Session;
 
-use crate::aegis::{AegisGateKeeper, QuarantineRecord};
+use crate::policy::{AegisGateKeeper, QuarantineRecord};
 use tokio::time::{timeout, Duration};
 
 pub struct GlobalNetworkBridge {

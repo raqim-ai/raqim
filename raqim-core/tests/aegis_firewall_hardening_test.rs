@@ -1,4 +1,4 @@
-use raqim_core::aegis::AtomicTokenBucket;
+use raqim_core::policy::AtomicTokenBucket;
 use std::sync::Arc;
 
 #[test]

@@ -10,7 +10,7 @@ use std::{
 use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 
-use crate::{OpLog, axon::MarkleBatch};
+use crate::{merkle::MarkleBatch, OpLog};
 
 #[derive(
     Debug, Clone, Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
@@ -103,7 +103,13 @@ impl WormWitnessEngine {
             .create_new(true)
             .write(true)
             .open(&witness_file_path)
-            .map_err(|e| anyhow::anyhow!("WORM Violation: Cannot overwrite exiisting witness file '{}': {} ", witness_file_path, e) )?;
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "WORM Violation: Cannot overwrite exiisting witness file '{}': {} ",
+                    witness_file_path,
+                    e
+                )
+            })?;
 
         file.write_all(&bundle_bytes)?;
         file.sync_all()?;
@@ -111,10 +117,8 @@ impl WormWitnessEngine {
         // Apply Linux Kernel Immutable Attribute
         #[cfg(unix)]
         {
-            
             use std::os::unix::fs::PermissionsExt;
             let _ = fs::set_permissions(&witness_file_path, fs::Permissions::from_mode(0o400));
-
         }
 
         println!(
@@ -171,7 +175,7 @@ impl WormWitnessEngine {
         if !path.exists() {
             return witnesses;
         }
-        
+
         if let Ok(entries) = fs::read_dir(&self.witness_dir) {
             for entry in entries.flatten() {
                 if entry.path().extension().and_then(|s| s.to_str()) == Some("json") {

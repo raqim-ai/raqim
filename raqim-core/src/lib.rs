@@ -1,8 +1,8 @@
-pub mod aegis;
 pub mod api;
-pub mod axon;
 pub mod checkpoint;
 pub mod compactor;
+pub mod merkle;
+pub mod policy;
 
 pub mod config;
 pub mod embedding;
@@ -10,10 +10,10 @@ pub mod health;
 pub mod lancedb_store;
 pub mod memory_router;
 pub mod network;
-pub mod nucleus;
 pub mod registry;
 pub mod state;
 pub mod utils;
+pub mod wal;
 
 pub mod cold_store;
 pub mod hot_memory;
@@ -29,10 +29,10 @@ use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast::Sender;
 
-use crate::aegis::QuarantineRecord;
-use crate::axon::MarkleBatch;
+use crate::merkle::MarkleBatch;
+use crate::policy::QuarantineRecord;
 use crate::state::SwarmStateRegistry;
-use crate::{axon::AxonGateKeeper, network::GlobalNetworkBridge, nucleus::WalEngine};
+use crate::{merkle::AxonGateKeeper, network::GlobalNetworkBridge, wal::WalEngine};
 
 // The fundamental unit of our Flight Recorder.
 #[derive(
