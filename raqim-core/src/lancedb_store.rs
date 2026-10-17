@@ -246,12 +246,6 @@ impl LanceEngine {
                 format!(" {{ \"message\": \"{}\" }} ", message),
             ),
 
-            SystemEvent::PluginLoaded { plugin_name } => (
-                "PluginLoaded",
-                "SYSTEM".to_string(),
-                format!(" {{ \"plugin_name\": \"{}\" }} ", plugin_name),
-            ),
-
             SystemEvent::SecurityBreach {
                 agent_id,
                 reason,

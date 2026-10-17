@@ -48,7 +48,7 @@ pub trait ColdStore: Send + Sync {
         &self,
         agent_hex: &str,
         min_tx_id: u128,
-        min_tx_id: u128,
+        max_tx_id: u128,
     ) -> Result<Vec<OpLog>, anyhow::Error>;
 
     /// Point-Lookup of a historical transaction by its UUIDv7 TxID.

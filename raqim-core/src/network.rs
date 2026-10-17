@@ -11,13 +11,13 @@ use tokio::sync::broadcast::Sender;
 use tokio::sync::mpsc;
 use zenoh::Session;
 
-use crate::policy::{AegisGateKeeper, QuarantineRecord};
+use crate::policy::{PolicyEngine, QuarantineRecord};
 use tokio::time::{timeout, Duration};
 
 pub struct GlobalNetworkBridge {
     session: Arc<Session>,
     workspace_prefix: String,
-    aegis: Arc<AegisGateKeeper>,
+    policy: Arc<PolicyEngine>,
     pub os_node_id: String,
     egress_tx: mpsc::Sender<Vec<u8>>,
 }
@@ -33,7 +33,7 @@ impl GlobalNetworkBridge {
     pub async fn new(
         tenant_id: &str,
         swarm_name: &str,
-        aegis: Arc<AegisGateKeeper>,
+        policy: Arc<PolicyEngine>,
         os_node_id: String,
     ) -> Self {
         println!("Bismillah. Initialializing Zenoh Global Network Bridge with Dynamic Atomic...");
@@ -71,7 +71,7 @@ impl GlobalNetworkBridge {
         Self {
             session: Arc::new(session),
             workspace_prefix,
-            aegis,
+            policy,
             os_node_id,
             egress_tx,
         }
@@ -91,12 +91,12 @@ impl GlobalNetworkBridge {
     pub async fn execute_a2a_rpc(
         &self,
         envelope: A2AEnvelope,
-        aegis: Arc<AegisGateKeeper>,
+        policy: Arc<PolicyEngine>,
     ) -> Result<(Vec<u8>, String), anyhow::Error> {
         let sender_hex = hex::encode(envelope.sender_id.clone());
 
         // Verify sender sesssion lineage certificate
-        let (agent_hex, group_name) = match aegis.verify_session_lineage(
+        let (agent_hex, group_name) = match policy.verify_session_lineage(
             &envelope.sender_capability_cert.as_slice(),
             &envelope.sender_public_key,
         ) {
@@ -112,7 +112,7 @@ impl GlobalNetworkBridge {
         };
 
         // Enforce fast Aegis Packet Authorization & Anti-Replay Timestamp check
-        if let Err(e) = aegis.authorize_packet_fast(
+        if let Err(e) = policy.authorize_packet_fast(
             &agent_hex,
             &group_name,
             &envelope.sender_public_key,
@@ -206,7 +206,7 @@ impl GlobalNetworkBridge {
     }
 
     /// Listens for global quarantine signals broadcast by peer nodes over zenoh
-    pub async fn listen_for_global_quarantine(&self, aegis: Arc<AegisGateKeeper>) {
+    pub async fn listen_for_global_quarantine(&self, policy: Arc<PolicyEngine>) {
         let key_exp = format!("{}/system/quarantine", self.workspace_prefix);
         let session_clone = self.session.clone();
         let node_clone = self.os_node_id.clone();
@@ -244,8 +244,8 @@ impl GlobalNetworkBridge {
                         wire_msg.origin_node_id, wire_msg.record.agent_hex
                     );
 
-                    // Assimilate directly into local aegis blocklist
-                    aegis.assimilate_remote_quarantine(wire_msg.record);
+                    // Assimilate directly into local policy blocklist
+                    policy.assimilate_remote_quarantine(wire_msg.record);
                 } else {
                     eprintln!(
                         "[NETWORK WARN] Received malformed QuarantineRecord on system channel "
@@ -336,7 +336,7 @@ impl GlobalNetworkBridge {
     {
         let key_expr = format!("{}/a2a/{}", self.workspace_prefix, capability_path);
         let session = self.session.clone();
-        let aegis = self.aegis.clone();
+        let policy = self.policy.clone();
         tokio::spawn(async move {
             // A Queryable tells the global network: "I can answer questions for this topic"
             let queryable = match session.declare_queryable(&key_expr).await {
@@ -388,7 +388,7 @@ impl GlobalNetworkBridge {
 
                 // UNIFIED PERIMETER AUDIT: Validates lineage token, proved the signature authenticity and checks path
 
-                let (agent_hex, group_name) = match aegis.verify_session_lineage(
+                let (agent_hex, group_name) = match policy.verify_session_lineage(
                     &archievd_envelope.sender_capability_cert.as_slice(),
                     &agent_public_key,
                 ) {
@@ -405,7 +405,7 @@ impl GlobalNetworkBridge {
 
                 let packet_timestamp: i64 = archievd_envelope.timestamp.into();
 
-                if let Err(e) = aegis.authorize_packet_fast(
+                if let Err(e) = policy.authorize_packet_fast(
                     &agent_hex,
                     &group_name,
                     &agent_public_key,

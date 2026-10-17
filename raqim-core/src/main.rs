@@ -4,7 +4,7 @@ use rand_core::OsRng;
 use raqim_core::api::{build_admin_router, ApiState, UiEvent};
 use raqim_core::checkpoint::{CheckpointEngine, ControlMutation};
 use raqim_core::merkle::AxonGateKeeper;
-use raqim_core::policy::{AegisConfigFile, AegisGateKeeper};
+use raqim_core::policy::{PolicyConfigFile, PolicyEngine};
 
 use axum::http::Method;
 use raqim_core::cold_store::SegmentColdStore;
@@ -170,7 +170,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // THE KERNEL AEGIS.TOML HOT-RELOAD WATCHER
-    let policy_path_str = "aegis.toml";
+    let policy_path_str = "policy.toml";
 
     // Ensure policy manifest target exists beofre running file watcher
     if !Path::new(policy_path_str).exists() {
@@ -189,16 +189,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         burst_capacity = 20
         "#;
         fs::write(policy_path_str, default_toml)?;
-        println!("[AEGIS] Auto-generated default aegis.toml configuration file.");
+        println!("[AEGIS] Auto-generated default policy.toml configuration file.");
     }
 
     let initial_content = fs::read_to_string(policy_path_str)?;
-    let parsed_cfg = toml::from_str::<AegisConfigFile>(&initial_content)
-        .expect("FATAL: Failed to parse initial aegis.toml configuration file");
+    let parsed_cfg = toml::from_str::<PolicyConfigFile>(&initial_content)
+        .expect("FATAL: Failed to parse initial policy.toml configuration file");
 
     let initial_policies = parsed_cfg.to_group_policies();
 
-    let aegis = Arc::new(AegisGateKeeper::new(
+    let policy = Arc::new(PolicyEngine::new(
         initial_policies,
         &master_public_key,
         event_tx.clone(),
@@ -206,7 +206,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.control_journal_path.clone(),
     ));
 
-    let aegis_clone = aegis.clone();
+    let aegis_clone = policy.clone();
     let (watch_tx, mut watch_rx) = tokio::sync::mpsc::channel::<Result<Event, notify::Error>>(10);
 
     // Spawn synchronous notify loop hooked directly to OS virtual filesystem events
@@ -231,7 +231,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("[KERNEL WATCHER] Change detected on policy file. Re-parsing metrics... ");
 
                 // Read and re-parse file delta safely
-                if let Ok(content) = fs::read_to_string("aegis.toml") {
+                if let Ok(content) = fs::read_to_string("policy.toml") {
                     match toml::from_str::<AegisConfigFile>(&content) {
                         Ok(parsed_cfg) => {
                             let fresh_policies = parsed_cfg.to_group_policies();
@@ -240,7 +240,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Err(e) => {
                             // FAIL-SAFE
                             eprintln!(
-                                "[AEGIS CONFIG ERROR] Invalid aegis.toml syntax: {}. Retaining previous security policies in RAM.",
+                                "[AEGIS CONFIG ERROR] Invalid policy.toml syntax: {}. Retaining previous security policies in RAM.",
                                 e
                             );
                         }
@@ -260,7 +260,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         GlobalNetworkBridge::new(
             &security_flags.tenant_id.clone().read().unwrap(),
             &config.topic,
-            aegis.clone(),
+            policy.clone(),
             os_node_id,
         )
         .await,
@@ -268,7 +268,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let hot_buffer = Arc::new(HotVectorBuffer::new(10_0000));
 
     // 1. Boot global Quarantine network subscriber
-    global_net.listen_for_global_quarantine(aegis.clone()).await;
+    global_net
+        .listen_for_global_quarantine(policy.clone())
+        .await;
 
     let mem_router = Arc::new(MemoryRouter::new(
         config.clone(),
@@ -305,12 +307,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         brain_shard.import_snapshots(checkpoint.crdt_snapshots);
         axon.hydrate_from_checkpoint(checkpoint.axon_state);
         mem_router.hydrate_effects(checkpoint.effects);
-        aegis.hydrate_quarantines(checkpoint.quarantines);
+        policy.hydrate_quarantines(checkpoint.quarantines);
         registry.hydrate_agents(checkpoint.active_agents);
         println!("[PHOENIX] Checkpoint core hydration successful.");
     } else {
         // Fallback for legacy quarantine.json if migrating from pre-checkpoint versions
-        aegis.hydrate_quarantine_from_disk();
+        policy.hydrate_quarantine_from_disk();
     }
 
     // 2. Stage 2: Control Journal Replay (Mutations occurring after last checkpoint)
@@ -324,12 +326,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         for mutation in control_mutations {
             match mutation {
                 ControlMutation::Quarantine(record) => {
-                    aegis
+                    policy
                         .quarantine_blocklist
                         .insert(record.agent_hex.clone(), record);
                 }
                 ControlMutation::LiftQuarantine { agent_hex } => {
-                    aegis.quarantine_blocklist.remove(&agent_hex);
+                    policy.quarantine_blocklist.remove(&agent_hex);
                 }
                 ControlMutation::RecordEffect(record) => {
                     mem_router.record_effect_direct(record);
@@ -522,7 +524,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         lance_engine.clone(),
         axon.clone(),
         brain_shard.clone(),
-        aegis.clone(),
+        policy.clone(),
         registry.clone(),
         mem_router.clone(),
         event_tx.clone(),
@@ -552,7 +554,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let api_state = ApiState {
         config: config.clone(),
-        aegis: aegis.clone(),
+        policy: policy.clone(),
         mem_router: mem_router.clone(),
         global_net: global_net.clone(),
         axon: axon.clone(),
@@ -653,7 +655,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let task_wal = wal.clone();
                     let global_publisher = global_net.clone();
                     let task_event_tx = event_tx.clone();
-                    let task_aegis = aegis.clone();
+                    let task_aegis = policy.clone();
                     let task_ui_tx = ui_tx.clone();
                     let task_registry = registry.clone();
                     let task_brain = brain_shard.clone();

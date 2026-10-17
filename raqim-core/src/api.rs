@@ -46,7 +46,7 @@ use crate::{
     config::RaqimConfig,
     memory_router::{MemoryRouter, UnifiedSearchResult},
     network::GlobalNetworkBridge,
-    policy::AegisGateKeeper,
+    policy::PolicyEngine,
     A2AEnvelope,
 };
 use crate::{execute_raqim_cascade, AgentState, IngressEnvelope, RecentThought, SystemEvent};
@@ -174,7 +174,7 @@ pub struct ApiState {
     pub mem_router: Arc<MemoryRouter>,
     pub axon: Arc<AxonGateKeeper>,
     pub brain: Arc<SwarmStateRegistry>,
-    pub aegis: Arc<AegisGateKeeper>,
+    pub policy: Arc<PolicyEngine>,
     pub global_net: Arc<GlobalNetworkBridge>,
     pub wal: Arc<WalEngine>,
     pub cold_store: Arc<dyn ColdStore>,
@@ -457,7 +457,7 @@ async fn process_ws_message(msg: WsMessage, conn: Arc<WsConnectionstate>, os_sta
 
                 // Verify Aegis Lineage Certificate
                 let (agent_hex, group_name) = match os_state_clone
-                    .aegis
+                    .policy
                     .verify_session_lineage(&cert_bytes, &public_key_bytes)
                 {
                     Ok((agent, group)) => (agent, group),
@@ -479,7 +479,7 @@ async fn process_ws_message(msg: WsMessage, conn: Arc<WsConnectionstate>, os_sta
                     .unwrap_or_default()
                     .as_secs() as i64;
 
-                if let Err(e) = os_state_clone.aegis.authorize_packet_fast(
+                if let Err(e) = os_state_clone.policy.authorize_packet_fast(
                     agent_hex.as_str(),
                     group_name.as_str(),
                     &public_key_bytes,
@@ -556,7 +556,7 @@ async fn process_ws_message(msg: WsMessage, conn: Arc<WsConnectionstate>, os_sta
                 // Dispatch verified RPC across Zenoh Mesh
                 match os_state_clone
                     .global_net
-                    .execute_a2a_rpc(envelope, os_state_clone.aegis.clone())
+                    .execute_a2a_rpc(envelope, os_state_clone.policy.clone())
                     .await
                 {
                     Ok((answer, responder_hex)) => {
@@ -788,85 +788,6 @@ pub async fn agent_alias_endpoint(
     axum::Json(map)
 }
 
-#[derive(Deserialize)]
-pub struct UnifiedSearchQuery {
-    pub query: String,
-    pub namespace: Option<String>,
-    pub include_wal: Option<bool>,
-    pub limit: Option<usize>,
-}
-
-pub async fn unified_vault_search(
-    _auth: ValidatedIdentity,
-    State(state): State<ApiState>,
-    Query(params): Query<UnifiedSearchQuery>,
-) -> Result<Json<Vec<VaultSearchResult>>, ApiError> {
-    let include_wal = params.include_wal.unwrap_or(true);
-    let limit = params.limit.unwrap_or(50);
-
-    let ns_filter = match params.namespace.as_deref() {
-        Some(ns) if ns.is_empty() || ns == "ALL" => None,
-        Some(ns) => Some(ns),
-        None => None,
-    };
-
-    let results = state
-        .mem_router
-        .query_hybrid_memory(
-            &params.query,
-            ns_filter,
-            limit,
-            include_wal,
-            &state.hot_buffer,
-        )
-        .await
-        .map_err(|e| {
-            eprintln!("[Vault Search ERROR] {}", e);
-            ApiError::InternalServerError(format!("Vault search failed: {}", e))
-        })?;
-
-    let vault_results: Vec<VaultSearchResult> =
-        results.into_iter().map(VaultSearchResult::from).collect();
-
-    Ok(Json(vault_results))
-}
-
-// 2. THE RAG SEMANTIC SEARCH ENDPOINT
-#[derive(Deserialize)]
-pub struct RagQuery {
-    namespace: String,
-    query: String,
-    limit: Option<usize>,
-}
-
-pub async fn semantic_search_endpoint(
-    _auth: ValidatedIdentity,
-    State(state): State<ApiState>,
-    Query(params): Query<RagQuery>,
-) -> Result<Json<Vec<String>>, ApiError> {
-    let limit = params.limit.unwrap_or(5);
-
-    let ns_filter = if params.namespace.is_empty() || params.namespace == "ALL" {
-        None
-    } else {
-        Some(params.namespace.as_str())
-    };
-
-    match state
-        .mem_router
-        .query_hybrid_context_strings(&params.query, ns_filter, limit, &state.hot_buffer)
-        .await
-    {
-        Ok(memories) => Ok(Json(memories)),
-        Err(e) => {
-            eprintln!("[RAG Hybrid ERROR] {}", e);
-            Err(ApiError::InternalServerError(
-                format!("RAG search failed: {}", e).to_string(),
-            ))
-        }
-    }
-}
-
 #[derive(Serialize, Clone, Debug)]
 pub struct VaultSearchResult {
     pub tx_id: u128,
@@ -939,7 +860,7 @@ pub async fn active_qurantine_endpoint(
     let mut quarantined_agents = Vec::new();
 
     // Iterate over Dashmap Shards safely.
-    for entry in state.aegis.quarantine_blocklist.iter() {
+    for entry in state.policy.quarantine_blocklist.iter() {
         quarantined_agents.push(entry.value().clone());
     }
 
@@ -972,7 +893,7 @@ async fn lift_qurantine_and_resurrect(
 
     // Unfreeze the Agent (Remove from RAM)
     if state
-        .aegis
+        .policy
         .quarantine_blocklist
         .remove(&payload.agent_hex)
         .is_some()
@@ -1062,10 +983,10 @@ async fn time_travel_endpoint(
         payload.agent_hex, payload.target_tx_id
     );
 
-    // 1. Lift aegis Quarantine so that the agent can actually boot
+    // 1. Lift policy Quarantine so that the agent can actually boot
     // Unfreeze the Agent (Remove from DashhMap)
     if state
-        .aegis
+        .policy
         .quarantine_blocklist
         .remove(&payload.agent_hex)
         .is_some()
@@ -1135,13 +1056,13 @@ pub async fn http_ingress_endpoint(
     packet_sig.copy_from_slice(archived_ingress.signature.as_slice());
 
     let (agent_hex, group_name) = state
-        .aegis
+        .policy
         .verify_session_lineage(&archived_ingress.capability_cert.as_slice(), &agent_pub_key)
         .map_err(|e| ApiError::Unauthorized(format!("Lineage Verification failed: {}", e)))?;
 
     let packet_timestamp: i64 = archived_state.timestamp.into();
     state
-        .aegis
+        .policy
         .authorize_packet_fast(
             agent_hex.as_str(),
             group_name.as_str(),
@@ -1354,7 +1275,7 @@ pub async fn aegis_metics_endpoint(
     let ten_minutes_ago = now.saturating_sub(600);
 
     // Safely iterate the dashmap shards.
-    for entry in state.aegis.quarantine_blocklist.iter() {
+    for entry in state.policy.quarantine_blocklist.iter() {
         metrics.total_quarantined += 1;
         let record = entry.value();
 
@@ -1373,7 +1294,7 @@ pub async fn aegis_metics_endpoint(
     }
 
     // Query live Atomic token bucket across active policies
-    let policies_guard = state.aegis.group_policies.read();
+    let policies_guard = state.policy.group_policies.read();
     for (group_name, policy) in policies_guard.iter() {
         let current_tokens = policy
             .rate_limiter
@@ -1627,7 +1548,7 @@ pub async fn preflight_effect_handler(
 
     // Aegis barrier 1: Lineage Verification
     let (verified_agent_hex, group_name) = state
-        .aegis
+        .policy
         .verify_session_lineage(&capability_cert, &pub_key)
         .map_err(|e| ApiError::Unauthorized(format!("Aegis lineage rejection: {}", e)))?;
 
@@ -1637,7 +1558,7 @@ pub async fn preflight_effect_handler(
         ));
     }
 
-    if state.aegis.is_quarantined(&payload.agent_hex) {
+    if state.policy.is_quarantined(&payload.agent_hex) {
         return Err(ApiError::Forbidden(
             "Agent is actively quarantined by Aegis firewall".to_string(),
         ));
@@ -1650,7 +1571,7 @@ pub async fn preflight_effect_handler(
 
     // Aegis Barrier 2: Fast-path policy audit (anti-replay, signature, rate-limiting, and namespace ACL)
     state
-        .aegis
+        .policy
         .authorize_packet_fast(
             &payload.agent_hex,
             &group_name,
@@ -1710,7 +1631,7 @@ pub async fn record_effect_handler(
 
     // Aegis barrier 1: Lineage Verification
     let (verified_agent_hex, group_name) = state
-        .aegis
+        .policy
         .verify_session_lineage(&capability_cert, &pub_key)
         .map_err(|e| ApiError::Unauthorized(format!("Aegis lineage rejection: {}", e)))?;
 
@@ -1731,7 +1652,7 @@ pub async fn record_effect_handler(
 
     // Aegis Barrier 2: Fast-path policy audit
     state
-        .aegis
+        .policy
         .authorize_packet_fast(
             &payload.agent_hex,
             &group_name,
@@ -1992,12 +1913,12 @@ pub fn build_admin_router(state: ApiState) -> axum::Router {
         .route("/v1/effect/record", post(record_effect_handler))
         .route("/v1/effect/get", post(get_effect_handler))
         // Aegis Firewall & Governance
-        .route("/v1/aegis/quarantine_list", get(active_qurantine_endpoint))
+        .route("/v1/policy/quarantine_list", get(active_qurantine_endpoint))
         .route(
             "/v1/admin/quarantine/lift",
             post(lift_qurantine_and_resurrect),
         )
-        .route("/v1/aegis/metrics", get(aegis_metics_endpoint))
+        .route("/v1/policy/metrics", get(aegis_metics_endpoint))
         .route("/v1/admin/ca/mint", post(handle_ca_mint))
         // Time Machine & Reality Forking
         .route("/v1/admin/time_travel", post(time_travel_endpoint))
@@ -2026,8 +1947,6 @@ pub fn build_admin_router(state: ApiState) -> axum::Router {
         // Swarm & A2A Ingress
         .route("/v1/mcp/ws", get(mcp_ws_handler))
         .route("/v1/swarm/ingress", post(http_ingress_endpoint))
-        .route("/v1/swarm/memory", get(semantic_search_endpoint))
-        .route("/v1/vault/search", get(unified_vault_search))
         .route("/v1/vault/telemetry", get(vault_telemetry_endpoint))
         .route(
             "/v1/session/timeline/:agent_hex/export/otel",

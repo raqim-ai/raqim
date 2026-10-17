@@ -1,7 +1,6 @@
 use dashmap::DashMap;
 use memmap2::MmapOptions;
 use rkyv::{Archive, Archived};
-use std::collections::HashMap;
 use std::eprintln;
 use std::format;
 use std::println;
@@ -16,7 +15,6 @@ use crate::api::ForkConfig;
 use crate::api::UiEvent;
 use crate::cold_store::ColdStore;
 use crate::generate_uuidv7_txid;
-use crate::hot_memory::HotVectorBuffer;
 use crate::merkle::AxonGateKeeper;
 use crate::state::SwarmStateRegistry;
 use crate::AgentState;
