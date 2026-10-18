@@ -1,24 +1,26 @@
 pub mod api;
 pub mod checkpoint;
+pub mod cold_store;
 pub mod compactor;
-pub mod merkle;
-pub mod policy;
-
 pub mod config;
-pub mod embedding;
 pub mod health;
-pub mod lancedb_store;
 pub mod memory_router;
+pub mod merkle;
 pub mod network;
+pub mod otel;
+pub mod policy;
 pub mod registry;
 pub mod state;
 pub mod utils;
 pub mod wal;
-
-pub mod cold_store;
-pub mod hot_memory;
-pub mod otel;
 pub mod witness;
+
+#[cfg(feature = "vector-memory")]
+pub mod embedding;
+#[cfg(feature = "vector-memory")]
+pub mod hot_memory;
+#[cfg(feature = "vector-memory")]
+pub mod lancedb_store;
 
 use blake3::Hasher;
 use rkyv::{Archive, Deserialize, Serialize};

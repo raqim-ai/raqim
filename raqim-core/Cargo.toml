@@ -28,7 +28,7 @@ uuid = { version = "1.10", features = ["v7", "serde"] }
 
 lancedb = {version = "0.9", optional = true}
 arrow-array = {version = "52.2", optional = true}
-arrow-schema = {version = "52.2", optional true}
+arrow-schema = {version = "52.2", optional = true}
 
 anyhow = "1.0"
 

@@ -3,7 +3,7 @@ use notify::{Event, Watcher};
 use rand_core::OsRng;
 use raqim_core::api::{build_admin_router, ApiState, UiEvent};
 use raqim_core::checkpoint::{CheckpointEngine, ControlMutation};
-use raqim_core::merkle::AxonGateKeeper;
+use raqim_core::merkle::MerkleEngine;
 use raqim_core::policy::{PolicyConfigFile, PolicyEngine};
 
 use axum::http::Method;
@@ -11,8 +11,7 @@ use raqim_core::cold_store::{ColdStore, SegmentColdStore};
 use raqim_core::compactor::WalCompactor;
 use raqim_core::config::RaqimConfig;
 use raqim_core::health::{HealthMonitor, SystemHealth};
-use raqim_core::hot_memory::{HotVectorBuffer, HotVectorEntry};
-use raqim_core::lancedb_store::LanceEngine;
+
 use raqim_core::memory_router::MemoryRouter;
 use raqim_core::network::GlobalNetworkBridge;
 use raqim_core::registry::SwarmRegistry;
@@ -28,7 +27,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::{eprintln, fs, println};
 
-use tokio::net::TcpListener;
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::broadcast;
@@ -147,7 +145,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1. BOOT SEQUENCE: INIITIALIZE ALL LAYERS (Wrapped in Arc for fearless concurrency)
     let brain_shard = Arc::new(SwarmStateRegistry::new());
-    let axon = Arc::new(AxonGateKeeper::new());
+    let axon = Arc::new(MerkleEngine::new());
 
     // LEAK-PROOF BROADCAST RECEIVER LOOP: Spawn consumer loop to detect lagging and evict slow readers automatically
     let mut system_events_subscriber = event_tx.subscribe();
@@ -232,7 +230,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // Read and re-parse file delta safely
                 if let Ok(content) = fs::read_to_string("policy.toml") {
-                    match toml::from_str::<AegisConfigFile>(&content) {
+                    match toml::from_str::<PolicyConfigFile>(&content) {
                         Ok(parsed_cfg) => {
                             let fresh_policies = parsed_cfg.to_group_policies();
                             aegis_clone.reload_policies(fresh_policies);
@@ -501,7 +499,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cold_store.clone(),
         axon.clone(),
         brain_shard.clone(),
-        aegis.clone(),
+        policy.clone(),
         registry.clone(),
         mem_router.clone(),
         event_tx.clone(),

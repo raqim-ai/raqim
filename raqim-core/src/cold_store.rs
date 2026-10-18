@@ -2,11 +2,10 @@ use crate::api::TimelineNode;
 use crate::{AgentStatus, OpLog, SystemEvent};
 use async_trait::async_trait;
 use dashmap::DashMap;
-use memmap2::MmapOptions;
 use rkyv::{to_bytes, Archive};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
@@ -253,59 +252,6 @@ impl SegmentColdStore {
 
         Ok(owned)
     }
-}
-
-fn count_records_on_disk(path: &Path) -> usize {
-    let mut count = 0;
-    let _ = Self::scan_segment_file(path, |batch| {
-        count += batch.len();
-    });
-
-    count
-}
-
-/// Zero-copy mmap scanner over the cold segment file.
-/// Physics: Uses the exact [4B len] [4B crc32][rkyv Vec<OpLog>] framing as Nucleus WAL.
-fn scan_segment_file<F>(path: &Path, mut callback: F) -> Result<(), anyhow::Error>
-where
-    F: FnMut(&rkyv::Archived<Vec<OpLog>>),
-{
-    if !path.exists() {
-        return Ok(());
-    }
-
-    let file = File::open(path)?;
-    if file.metadata()?.len() < 8 {
-        return Ok(());
-    }
-
-    let mmap = unsafe { MmapOptions::new().map(&file)? };
-    let mut offset = 0;
-    let mut aligned_buf = rkyv::util::AlignedVec::<16>::new();
-
-    while offset + 8 < mmap.len() {
-        let entry_len = u32::from_le_bytes(mmap[offset..offset + 4].try_into().unwrap()) as usize;
-        let expected_crc = u32::from_le_bytes(mmap[offset + 4..offset + 8].try_into().unwrap());
-        let frame_total = 8 + entry_len;
-
-        if offset + frame_total > mmap.len() {
-            break;
-        }
-
-        let entry_slice = &mmap[offset + 8..offset + frame_total];
-        if crc32fast::hash(entry_slice) == expected_crc {
-            aligned_buf.clear();
-            aligned_buf.extend_from_slice(entry_slice);
-
-            if let Ok(archived_batch) =
-                rkyv::access::<<Vec<OpLog> as Archive>::Archived, rkyv::rancor::Error>(&aligned_buf)
-            {
-                callback(archived_batch);
-            }
-        }
-        offset += frame_total;
-    }
-    Ok(())
 }
 
 #[async_trait]
