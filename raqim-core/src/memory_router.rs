@@ -15,7 +15,7 @@ use crate::api::ForkConfig;
 use crate::api::UiEvent;
 use crate::cold_store::ColdStore;
 use crate::generate_uuidv7_txid;
-use crate::merkle::AxonGateKeeper;
+use crate::merkle::MerkleEngine;
 use crate::state::SwarmStateRegistry;
 use crate::AgentState;
 use crate::AgentStatus;
@@ -31,7 +31,7 @@ pub enum RebuildMode {
 
 pub struct MemoryRouter {
     config: Arc<RaqimConfig>,
-    axon: Arc<AxonGateKeeper>,
+    axon: Arc<MerkleEngine>,
     brain: Arc<SwarmStateRegistry>,
     cold_store: Arc<dyn ColdStore>,
     wal_engine: Arc<WalEngine>,
@@ -53,7 +53,7 @@ pub struct UnifiedSearchResult {
 impl MemoryRouter {
     pub fn new(
         config: Arc<RaqimConfig>,
-        axon: Arc<AxonGateKeeper>,
+        axon: Arc<MerkleEngine>,
         brain: Arc<SwarmStateRegistry>,
         cold_store: Arc<dyn ColdStore>,
         wal_engine: Arc<WalEngine>,
@@ -129,257 +129,84 @@ impl MemoryRouter {
     }
 
     /// THE RESURRECTION ENGINE
-    /// Rebuild the LORO CRDT Hive Mind from Cold storage and Hot Memory.
+    /// Rebuild the agent's causal Oplog titmeline from ColdStore + Hot WAL
     pub async fn rebuild_agent_timeline(
         &self,
         agent_hex: &str,
         target_tx_id: u128,
         wal_engine: Arc<WalEngine>,
     ) -> Result<(Vec<u8>, Vec<OpLog>, u128, u64), anyhow::Error> {
-        // RESOLVE THE TARGET INFINITY HACK
         // Find the highest known tx_id for this agent.
-        let actual_target_transaction = if target_tx_id == u128::MAX {
+        let actual_target_tx = if target_tx_id == u128::MAX {
             // Checking the WAL Index first
             let wal_max = {
-                let idex = wal_engine.index.read().await;
-                idex.keys().copied().filter(|&k| k > 0).max()
+                let idx = wal_engine.index.read().await;
+                idx.keys().copied().filter(|&k| k > 0).max()
             };
 
             if let Some(max_tx) = wal_max {
                 max_tx
             } else {
-                // If WAL is empty/ compacted, ask lanceDB for the absolute highest recorded tx_id
-                let (max_lance_tx, _, _) = self
-                    .lance_engine
-                    .fetch_closest_snapshot(agent_hex, u128::MAX)
-                    .await
-                    .unwrap_or((0, 0, Vec::new()));
-                max_lance_tx
+                self.cold_store.get_max_tx_id_for_agent(agent_hex).await
             }
         } else {
             target_tx_id
         };
 
-        // 1. O(1) COLD MEMORY JUMP (LanceDB)
-        let (snapshot_txid, snapshot_timestamp, memory_blob) = self
-            .lance_engine
-            .fetch_closest_snapshot(agent_hex, target_tx_id)
+        // 1. Fetch compacted historical OpLogs from O(1) indexed ColdStore
+        let mut historical_oplogs = self
+            .cold_store
+            .fetch_historical_oplogs(agent_hex, 0, actual_target_tx)
             .await
-            .unwrap_or((0, 0, Vec::new()));
+            .unwrap_or_default();
 
-        if actual_target_transaction == 0 {
-            println!(
-                "[TIME MACHINE] Agent {} active at Genesis state (Zero prior transactions). ",
-                agent_hex
-            );
-            return Ok((memory_blob, Vec::new(), 0, snapshot_timestamp));
-        }
-
-        // Determine if we need deep discovery (LanceDB) or Hot Recoverey (WAL)
-        let oldest_wal_tx = {
-            let idx = wal_engine.index.read().await;
-            idx.keys().next().cloned().unwrap_or(u128::MAX) // Get the current smallest TxID currently in the WAL
-        };
-
-        println!(
-            "[TIME MACHINE] Loaded Base Snapshot at TxID: {} ",
-            snapshot_txid
-        );
-
-        let mut historical_oplogs = Vec::new();
-
-        // 2. O(1) WAL INDEX SEEK
-        // We calculate the very next TxID we need to read
-        let next_txid = snapshot_txid;
-
-        if actual_target_transaction < oldest_wal_tx {
-            let table_names = self
-                .lance_engine
-                .db
-                .table_names()
-                .execute()
-                .await
-                .unwrap_or_default();
-            if !table_names.contains(&self.lance_engine.history_table) {
-                println!(
-                    "[TIME MACHINE] Cold table '{}' not yet initialized. Agent is at Genesis.",
-                    self.lance_engine.history_table
-                );
-                return Ok((memory_blob, Vec::new(), 0, snapshot_timestamp));
-            }
-
-            // DEEP TIME TRAVEL: The WAL has been compacted. We must read from LanceDB.
-            println!(
-                "[TIME MACHINE] Target is deep in history. Engaging LanceDB Deep Discovery... "
-            );
-            let table = self
-                .lance_engine
-                .db
-                .open_table(&self.lance_engine.history_table)
-                .execute()
-                .await?;
-
-            // Query all the snapshots btw snapshot and target
-            let mut stream = table
-                .query()
-                .only_if(format!(
-                    "agent_id = '{}' AND tx_id >= '{}' AND tx_id <= '{}'",
-                    agent_hex,
-                    format!("{:032x}", next_txid),
-                    format!("{:032x}", target_tx_id)
-                ))
-                .execute()
-                .await?;
-
-            while let Some(batch_result) = stream.next().await {
-                let batch = batch_result?;
-
-                let tx_id_col = batch
-                    .column_by_name("transaction_id")
-                    .unwrap()
-                    .as_any()
-                    .downcast_ref::<arrow_array::StringArray>()
-                    .expect(" FATAL: trasaction_id column isn't an Int64Array");
-                let text_col = batch
-                    .column_by_name("text")
-                    .unwrap()
-                    .as_any()
-                    .downcast_ref::<arrow_array::StringArray>()
-                    .expect(" FATAL: text column isn't a StringArray ");
-                let timestamp_col = batch
-                    .column_by_name("timestamp")
-                    .unwrap()
-                    .as_any()
-                    .downcast_ref::<arrow_array::Int64Array>()
-                    .expect(" FATAL: timestamp column isn't an IntArray");
-                let status_col = batch
-                    .column_by_name("status")
-                    .unwrap()
-                    .as_any()
-                    .downcast_ref::<arrow_array::StringArray>()
-                    .expect(" FATAL: status column is not a StringArrray");
-                let seed_col = batch
-                    .column_by_name("entropy_seeds")
-                    .unwrap()
-                    .as_any()
-                    .downcast_ref::<arrow_array::StringArray>()
-                    .expect(" FATAL: seeds column isn't a StringArray");
-                let net_col = batch
-                    .column_by_name("network_responses")
-                    .unwrap()
-                    .as_any()
-                    .downcast_ref::<arrow_array::StringArray>()
-                    .expect(" FATAL: network_reponse isn't a StringArray");
-                let namespace_col = batch
-                    .column_by_name("namespace")
-                    .unwrap()
-                    .as_any()
-                    .downcast_ref::<arrow_array::StringArray>()
-                    .expect("namespace is not a StringArray");
-                let delta_col = batch
-                    .column_by_name("payload")
-                    .unwrap()
-                    .as_any()
-                    .downcast_ref::<arrow_array::BinaryArray>()
-                    .expect(" FATAL: payload isn't a BinaryArray");
-
-                for i in 0..timestamp_col.len() {
-                    let status = match status_col.value(i) {
-                        "IDLE" => AgentStatus::Idle,
-                        "REASONING" => AgentStatus::Reasoning,
-                        "HALTED" => AgentStatus::Halted,
-                        "TOOL_EXEC" => AgentStatus::ToolExecution,
-                        _ => {
-                            // Log the currection and default to a safe state
-                            eprintln!(
-                                "[WARNING] Unknown status '{}' in LanceDB for TxID {}. Defaulting to Halted.",
-                                status_col.value(i),
-                                tx_id_col.value(i)
-                            );
-                            AgentStatus::Halted
-                        }
-                    };
-
-                    let recovered_seed: Vec<u64> = serde_json::from_str(seed_col.value(i))?;
-                    let recovered_res: Vec<String> = serde_json::from_str(net_col.value(i))?;
-
-                    let reconstruct_log = OpLog {
-                        agent_id: [0; 16],
-                        delta: delta_col.value(i).to_vec(),
-                        previous_hash: [0; 32],
-                        current_hash: [0; 32],
-                        state: crate::AgentState {
-                            agent_id: Some([0; 16]),
-                            namespace: namespace_col.value(i).to_string(),
-                            transaction_id: u128::from_str_radix(
-                                &tx_id_col.value(i).to_string().as_str(),
-                                16,
-                            )
-                            .unwrap_or(0),
-                            timestamp: timestamp_col.value(i),
-                            status,
-                            text: text_col.value(i).to_string(),
-                        },
-                        entropy_seeds: recovered_seed,
-                        network_responses: recovered_res,
-                    };
-                    historical_oplogs.push(reconstruct_log);
-                }
-            }
-        } else {
-            // HOT RECORVERY: For data still in the WAL.
-            let target_hex_owned = agent_hex.to_string();
-            let _ = Self::scan_wal_file(&self.config.wal_path, |archived_log| {
-                let tx = archived_log.state.transaction_id.to_native();
-                if tx > next_txid && tx <= actual_target_transaction {
-                    let log_agent_hex = hex::encode(archived_log.agent_id.as_slice());
-                    if log_agent_hex == target_hex_owned {
-                        if let Ok(owned_log) =
-                            rkyv::deserialize::<OpLog, rkyv::rancor::Error>(archived_log)
-                        {
-                            historical_oplogs.push(owned_log);
-                        }
+        // 2. Append any uncompacted trailing OpLogs from the hot WAL
+        let target_hex_owned = agent_hex.to_string();
+        let _ = Self::scan_wal_file(&self.config.wal_path, |archived_log| {
+            let tx = archived_log.state.transaction_id.to_native();
+            if tx <= actual_target_tx {
+                let log_agent_hex = hex::encode(archived_log.agent_id.as_slice());
+                if log_agent_hex == target_hex_owned {
+                    if let Ok(owned_log) =
+                        rkyv::deserialize::<OpLog, rkyv::rancor::Error>(archived_log)
+                    {
+                        historical_oplogs.push(owned_log);
                     }
                 }
-            });
-        }
+            }
+        });
 
-        Ok((
-            memory_blob,
-            historical_oplogs,
-            actual_target_transaction,
-            snapshot_timestamp,
-        ))
+        // Deduplicate and order monotonically by UUIDv7 transaction_id
+        historical_oplogs.sort_by_key(|l| l.state.transaction_id);
+        historical_oplogs.dedup_by_key(|l| l.state.transaction_id);
+
+        Ok((Vec::new(), historical_oplogs, actual_target_tx, 0))
     }
 
-    /// FORENSIC TIME MACHINE
-    pub async fn fetch_by_txid(&self, target_tx_id: u128) -> Result<String, anyhow::Error> {
-        let mut result = None;
+    /// FORENSIC POINT LOOKUP: Returns the typed OpLog struct from Hot WAL or O(1) ColdStore
+    pub async fn fetch_by_txid(&self, target_tx_id: u128) -> Result<OpLog, anyhow::Error> {
+        let mut hot_found: Option<OpLog> = None;
 
-        // 1. Hot Memory ( Zero-copy WAL scan )
-        self.scan_wal_zero_copy(|archievd| {
-            // We read directly from the archeived bytes!
-            if archievd.state.transaction_id == target_tx_id {
-                result = Some(format!(
-                    "[HOT MEMORY] TxID: {} | Text: {} ",
-                    archievd.state.transaction_id,
-                    archievd.state.text.as_str()
-                ))
+        self.scan_wal_zero_copy(|archived| {
+            if hot_found.is_none() && archived.state.transaction_id.to_native() == target_tx_id {
+                if let Ok(owned) = rkyv::deserialize::<OpLog, rkyv::rancor::Error>(archived) {
+                    hot_found = Some(owned);
+                }
             }
-        })
-        .map_err(|e| anyhow::anyhow!("Error scanning wal file: {}", e))?;
+        })?;
 
-        if let Some(res) = result {
-            return Ok(res);
+        if let Some(log) = hot_found {
+            return Ok(log);
         }
 
-        let resp = self.cold_store.fetch_by_txid(target_tx_id).await?;
-
-        if let Some(res) = resp {
-            Ok(res)
-        } else {
-            Err(anyhow::anyhow!("Not found"))
+        if let Some(cold_log) = self.cold_store.fetch_by_txid(target_tx_id).await? {
+            return Ok(cold_log);
         }
+
+        Err(anyhow::anyhow!(
+            "Transaction ID {:032x} not found in Hot WAL or ColdStore",
+            target_tx_id
+        ))
     }
 
     /// The Unified Engine for both Resurrection (Live) and Time Travel (Isolated)
@@ -406,7 +233,6 @@ impl MemoryRouter {
 
         let real_namespace = &historical_oplog[0].state.namespace;
 
-        // Deterministic Phantom Salt Derivation
         let original_bytes =
             hex::decode(agent_hex).map_err(|e| anyhow::anyhow!("Invalid agent hex: {}", e))?;
         let mut phantom_bytes = [0u8; 16];
@@ -417,8 +243,8 @@ impl MemoryRouter {
         if is_isolated_debug {
             let tx_id_bytes = target_tx_id.unwrap_or(0).to_be_bytes();
             let mut salt = [0u8; 16];
-            salt[0..8].copy_from_slice(&tx_id_bytes);
-            salt[8..16].copy_from_slice(&tx_id_bytes);
+            salt[0..8].copy_from_slice(&tx_id_bytes[0..8]);
+            salt[8..16].copy_from_slice(&tx_id_bytes[8..16]);
 
             for i in 0..16 {
                 phantom_bytes[i] ^= salt[i];
@@ -428,30 +254,17 @@ impl MemoryRouter {
 
         let sandbox_agent_hex = hex::encode(phantom_bytes);
 
-        // Resolve Target CRDT Hive-Mind Shard
         let target_brain = if is_isolated_debug {
             let phantom_namespace = format!("phantom_{}_{}", real_namespace, sandbox_agent_hex);
-            println!(
-                "[TIME MACHINE] Branching into isolated CRDT shard: {}",
-                phantom_namespace
-            );
             self.brain.get_or_create_brain(&phantom_namespace)
         } else {
-            println!(
-                "[RESURRECTION] Re-synchronizing canonical CRDT shard: {}",
-                real_namespace
-            );
             self.brain.get_or_create_brain(real_namespace)
         };
 
-        // Replay historical deltas into the CRDT Hive-Mind
         for log in &historical_oplog {
-            if let Err(e) = target_brain.assimilate_foreign_thought(&log.delta) {
-                eprintln!("[WARNING] Failed to assimilate historical delta: {}", e);
-            }
+            let _ = target_brain.assimilate_foreign_thought(&log.delta);
         }
 
-        // Apply reality fork overrides if specified
         if let Some(fork) = &fork_config {
             println!(
                 "[TIME MACHINE] Applied {} reality fork overrides",
@@ -459,7 +272,6 @@ impl MemoryRouter {
             );
         }
 
-        // Broadcast glass UI event for the temporal scrubber
         let _ = phantom_ui_tx.send(UiEvent::ThoughtCommitted {
             agent_hex: if is_isolated_debug {
                 sandbox_agent_hex
@@ -474,12 +286,9 @@ impl MemoryRouter {
             ),
         });
 
-        // Cleanup dead simulation shards
         self.brain.purge_phantom_shards();
-
         Ok(())
     }
-
     /// Record Effect (Record mode) : captures a live side-effect, writes it to the wal & merkle DAG and updates the RAM
     pub async fn record_effect(
         &self,

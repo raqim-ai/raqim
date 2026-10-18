@@ -1,21 +1,15 @@
-use std::{format, matches};
-use std::{path::PathBuf, sync::atomic::AtomicUsize};
-
+use crate::api::TimelineNode;
+use crate::{AgentStatus, OpLog, SystemEvent};
 use async_trait::async_trait;
 use dashmap::DashMap;
-use tokio::sync::Mutex;
-
-use crate::AgentStatus;
-use crate::{api::TimelineNode, OpLog, SystemEvent};
-
 use memmap2::MmapOptions;
 use rkyv::{to_bytes, Archive};
-use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
-use std::path::Path;
-use std::sync::atomic::Ordering;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::Mutex;
 
 // RAQIM COLD STORAGE ABSTRACTION & BINARY SEGMENT ARCHIVE
 // Decouples 2PC wal compactor & time-travel Resurrection Engine from heavy
@@ -52,10 +46,12 @@ pub trait ColdStore: Send + Sync {
     ) -> Result<Vec<OpLog>, anyhow::Error>;
 
     /// Point-Lookup of a historical transaction by its UUIDv7 TxID.
-    async fn fetch_by_txid(&self, target_tx_id: u128) -> Result<Option<String>, anyhow::Error>;
+    async fn fetch_by_txid(&self, target_tx_id: u128) -> Result<Option<OpLog>, anyhow::Error>;
 
     /// Appends a system/security audit event to the cold forensic ledger
     async fn log_system_event(&self, event: &SystemEvent);
+
+    async fn get_max_tx_id_for_agent(&self, agent_hex: &str) -> u128;
 
     async fn get_total_record_count(&self) -> usize;
     async fn get_storage_size_mb(&self) -> f64;
@@ -75,14 +71,15 @@ pub trait ColdStore: Send + Sync {
 // =============================================================
 
 pub struct SegmentColdStore {
-    storage_dir: PathBuf,
     history_file_path: PathBuf,
     audit_file_path: PathBuf,
+    index_file_path: PathBuf,
+    /// Serializes concurrent file appends across Tokio worker threads.
     write_lock: Mutex<()>,
 
     /// 0(1) in-mem map: tx_id -> exact byte offset & length on disk
-    tx_idx: DashMap<u128, FramePointer>,
-    agent_idx: DashMap<[u8; 16], Vec<FramePointer>>,
+    tx_index: DashMap<u128, FramePointer>,
+    agent_index: DashMap<[u8; 16], Vec<FramePointer>>,
 
     /// 0(1) namespace freq counter for instant tele without scanning disk
     namespace_counts: DashMap<String, usize>,
@@ -95,27 +92,23 @@ impl SegmentColdStore {
         let _ = fs::create_dir_all(&dir);
 
         let history_file_path = dir.join("cold_history.seg");
+        let index_file_path = dir.join("cold_history.idx");
         let audit_file_path = dir.join("system_audit.jsonl");
 
-        let initial_count = Self::count_records_on_disk(&history_file_path);
-
         let store = Self {
-            storage_dir: dir,
             history_file_path,
+            index_file_path,
             audit_file_path,
             write_lock: Mutex::new(()),
-
-            tx_idx: DashMap::new(),
-            agent_idx: DashMap::new(),
+            tx_index: DashMap::new(),
+            agent_index: DashMap::new(),
             namespace_counts: DashMap::new(),
-
-            cached_record_count: AtomicUsize::new(initial_count),
+            cached_record_count: AtomicUsize::new(0),
         };
 
         store.load_or_rebuild_index_on_boot();
         store
     }
-
     /// Loads the compact 44-byte-per-record `.idx` file into RAM on startup.  
     /// If `.idx` is missing but `.seg` exists, rebuilds the `.idx` automatically.
     fn load_or_rebuild_index_on_boot(&self) {
@@ -322,28 +315,71 @@ impl ColdStore for SegmentColdStore {
             return Ok(0);
         }
 
+        // Acquire async MutexGuard.
         let _guard = self.write_lock.lock().await;
 
-        let payload_bytes = to_bytes::<rkyv::rancor::Error>(&logs.to_vec())
-            .map_err(|e| anyhow::anyhow!("rkyv cold serialization failed: {}", e))?
-            .into_vec();
-
-        let len_bytes = (payload_bytes.len() as u32).to_le_bytes();
-        let crc_bytes = crc32fast::hash(&payload_bytes).to_le_bytes();
-
-        let mut file = OpenOptions::new()
+        let mut seg_file = OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(&self.history_file_path)?;
 
-        file.write_all(&len_bytes)?;
-        file.write_all(&crc_bytes)?;
-        file.write_all(&payload_bytes)?;
-        file.sync_data()?;
+        let mut idx_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.index_file_path)?;
+
+        let mut current_offset = seg_file.metadata()?.len();
+        let mut seg_write_buf = Vec::with_capacity(logs.len() * 256);
+        let mut idx_write_buf = Vec::with_capacity(logs.len() * 44);
+        let mut new_pointers = Vec::with_capacity(logs.len());
+
+        // Write each OpLog as an individually addressable, CRC32-verified frame
+        // so point lookups only read a few hundred bytes instead of a massive batch!
+        for log in logs {
+            let payload_bytes = to_bytes::<rkyv::rancor::Error>(log)
+                .map_err(|e| anyhow::anyhow!("rkyv serialization failed: {}", e))?;
+
+            let payload_len = payload_bytes.len() as u32;
+            let crc = crc32fast::hash(&payload_bytes);
+            let frame_total = 8 + payload_len;
+
+            seg_write_buf.extend_from_slice(&payload_len.to_le_bytes());
+            seg_write_buf.extend_from_slice(&crc.to_le_bytes());
+            seg_write_buf.extend_from_slice(&payload_bytes);
+
+            let tx_id = log.state.transaction_id;
+            idx_write_buf.extend_from_slice(&tx_id.to_le_bytes());
+            idx_write_buf.extend_from_slice(&log.agent_id);
+            idx_write_buf.extend_from_slice(&current_offset.to_le_bytes());
+            idx_write_buf.extend_from_slice(&frame_total.to_le_bytes());
+
+            let ptr = FramePointer {
+                tx_id,
+                offset: current_offset,
+                total_frame_bytes: frame_total,
+            };
+            new_pointers.push((log.agent_id, log.state.namespace.clone(), ptr));
+
+            current_offset += frame_total as u64;
+        }
+
+        // Single contiguous write + fdatasync for the entire batch
+        seg_file.write_all(&seg_write_buf)?;
+        seg_file.sync_data()?;
+
+        idx_file.write_all(&idx_write_buf)?;
+        idx_file.sync_data()?;
+
+        // Update O(1) in-memory DashMaps after disk durability is confirmed
+        for (agent_id, ns, ptr) in new_pointers {
+            self.tx_index.insert(ptr.tx_id, ptr);
+            self.agent_index.entry(agent_id).or_default().push(ptr);
+            *self.namespace_counts.entry(ns).or_insert(0) += 1;
+        }
 
         let count = logs.len();
         self.cached_record_count.fetch_add(count, Ordering::Relaxed);
-
         Ok(count)
     }
 
@@ -351,28 +387,34 @@ impl ColdStore for SegmentColdStore {
         &self,
         agent_hex: &str,
     ) -> Result<Vec<TimelineNode>, anyhow::Error> {
-        let mut nodes = Vec::new();
-        let target_bytes = hex::decode(agent_hex).unwrap_or_default();
+        let Ok(target_vec) = hex::decode(agent_hex) else {
+            return Ok(Vec::new());
+        };
+        let Ok(agent_id): Result<[u8; 16], _> = target_vec.try_into() else {
+            return Ok(Vec::new());
+        };
 
-        Self::scan_segment_file(&self.history_file_path, |archived_batch| {
-            for log in archived_batch.as_slice() {
-                if log.agent_id.as_slice() == target_bytes.as_slice() {
-                    let status_str = match &log.state.status {
-                        rkyv::Archived::<AgentStatus>::Idle => "IDLE",
-                        rkyv::Archived::<AgentStatus>::Reasoning => "REASONING",
-                        rkyv::Archived::<AgentStatus>::Halted => "HALTED",
-                        rkyv::Archived::<AgentStatus>::ToolExecution => "TOOL_EXEC",
-                    };
-                    nodes.push(TimelineNode {
-                        tx_id: log.state.transaction_id.to_native(),
-                        timestamp: log.state.timestamp.to_native().to_string(),
-                        agent_status: status_str.to_string(),
-                        payload_preview: log.state.text.as_str().to_string(),
-                    });
-                }
+        let Some(pointers) = self.agent_index.get(&agent_id) else {
+            return Ok(Vec::new());
+        };
+
+        let mut nodes = Vec::with_capacity(pointers.len());
+        for &ptr in pointers.value() {
+            if let Ok(log) = self.read_single_frame_at(ptr) {
+                let status_str = match log.state.status {
+                    AgentStatus::Idle => "IDLE",
+                    AgentStatus::Reasoning => "REASONING",
+                    AgentStatus::Halted => "HALTED",
+                    AgentStatus::ToolExecution => "TOOL_EXEC",
+                };
+                nodes.push(TimelineNode {
+                    tx_id: log.state.transaction_id,
+                    timestamp: log.state.timestamp.to_string(),
+                    agent_status: status_str.to_string(),
+                    payload_preview: log.state.text,
+                });
             }
-        })?;
-
+        }
         Ok(nodes)
     }
 
@@ -382,54 +424,55 @@ impl ColdStore for SegmentColdStore {
         min_tx_id: u128,
         max_tx_id: u128,
     ) -> Result<Vec<OpLog>, anyhow::Error> {
-        let mut logs = Vec::new();
-        let target_bytes = hex::decode(agent_hex).unwrap_or_default();
+        let Ok(target_vec) = hex::decode(agent_hex) else {
+            return Ok(Vec::new());
+        };
+        let Ok(agent_id): Result<[u8; 16], _> = target_vec.try_into() else {
+            return Ok(Vec::new());
+        };
 
-        Self::scan_segment_file(&self.history_file_path, |archived_batch| {
-            for archived_log in archived_batch.as_slice() {
-                let tx = archived_log.state.transaction_id.to_native();
-                if tx >= min_tx_id
-                    && tx <= max_tx_id
-                    && archived_log.agent_id.as_slice() == target_bytes.as_slice()
-                {
-                    if let Ok(owned) = rkyv::deserialize::<OpLog, rkyv::rancor::Error>(archived_log)
-                    {
-                        logs.push(owned);
-                    }
+        let Some(pointers) = self.agent_index.get(&agent_id) else {
+            return Ok(Vec::new());
+        };
+
+        let mut logs = Vec::new();
+        for &ptr in pointers.value() {
+            if ptr.tx_id >= min_tx_id && ptr.tx_id <= max_tx_id {
+                if let Ok(log) = self.read_single_frame_at(ptr) {
+                    logs.push(log);
                 }
             }
-        })?;
-
+        }
         Ok(logs)
     }
 
-    async fn fetch_by_txid(&self, target_tx_id: u128) -> Result<Option<String>, anyhow::Error> {
-        let mut found = None;
-        Self::scan_segment_file(&self.history_file_path, |archived_batch| {
-            if found.is_some() {
-                return;
-            }
+    async fn fetch_by_txid(&self, target_tx_id: u128) -> Result<Option<OpLog>, anyhow::Error> {
+        // O(1) RAM hash lookup -> single disk seek!
+        let Some(ptr_ref) = self.tx_index.get(&target_tx_id) else {
+            return Ok(None);
+        };
+        let ptr = *ptr_ref.value();
+        let log = self.read_single_frame_at(ptr)?;
+        Ok(Some(log))
+    }
 
-            for log in archived_batch.as_slice() {
-                if log.state.transaction_id.to_native() == target_tx_id {
-                    found = Some(format!(
-                        "[COLD SEGMENT] TxID: {:032x} | Text: {} ",
-                        target_tx_id,
-                        log.state.text.as_str()
-                    ));
-                    break;
-                }
-            }
-        })?;
-
-        Ok(found)
+    async fn get_max_tx_id_for_agent(&self, agent_hex: &str) -> u128 {
+        let Ok(target_vec) = hex::decode(agent_hex) else {
+            return 0;
+        };
+        let Ok(agent_id): Result<[u8; 16], _> = target_vec.try_into() else {
+            return 0;
+        };
+        self.agent_index
+            .get(&agent_id)
+            .and_then(|ptrs| ptrs.iter().map(|p| p.tx_id).max())
+            .unwrap_or(0)
     }
 
     async fn log_system_event(&self, event: &SystemEvent) {
         if matches!(event, SystemEvent::ThoughtCommitted { .. }) {
             return;
         }
-
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -437,7 +480,6 @@ impl ColdStore for SegmentColdStore {
 
         if let Ok(event_json) = serde_json::to_string(event) {
             let line = format!("{{\"timestamp\":{},\"event\":{}}}\n", ts, event_json);
-
             let _guard = self.write_lock.lock().await;
             if let Ok(mut file) = OpenOptions::new()
                 .create(true)
@@ -460,30 +502,22 @@ impl ColdStore for SegmentColdStore {
     }
 
     async fn get_densest_namespace(&self) -> String {
-        let mut counts: HashMap<String, usize> = HashMap::new();
-        let mut total = 0usize;
-
-        let _ = Self::scan_segment_file(&self.history_file_path, |batch| {
-            for log in batch.as_slice() {
-                *counts
-                    .entry(log.state.namespace.as_str().to_string())
-                    .or_insert(0) += 1;
-                total += 1;
-            }
-        });
-
+        let total = self.cached_record_count.load(Ordering::Relaxed);
         if total == 0 {
             return "Empty (0%)".to_string();
         }
 
-        counts
-            .into_iter()
-            .max_by_key(|&(_, count)| count)
-            .map(|(ns, count)| format!("{} ({:.1}%)", ns, (count as f64 / total as f64) * 100.0))
+        self.namespace_counts
+            .iter()
+            .max_by_key(|entry| *entry.value())
+            .map(|entry| {
+                let pct = (*entry.value() as f64 / total as f64) * 100.0;
+                format!("{} ({:.1}%)", entry.key(), pct)
+            })
             .unwrap_or_else(|| "Empty (0%)".to_string())
     }
 
     fn engine_name(&self) -> &str {
-        "SegmentColdStore (Zero-Copy rkyv)"
+        "SegmentColdStore (0(1) Indexed rkyv)"
     }
 }

@@ -48,7 +48,7 @@ pub struct ActiveTreeBuffer {
 }
 
 /// The active Governance GateKeeper.
-pub struct AxonGateKeeper {
+pub struct MerkleEngine {
     /// Thread-safe active memory arenas partiioned per swarm namespce
     pub active_buffers: DashMap<String, Arc<RwLock<ActiveTreeBuffer>>>,
 
@@ -60,7 +60,7 @@ pub struct AxonGateKeeper {
     pub tx_to_location: DashMap<u128, (u64, usize)>,
 }
 
-impl AxonGateKeeper {
+impl MerkleEngine {
     pub fn new() -> Self {
         Self {
             active_buffers: DashMap::new(),
