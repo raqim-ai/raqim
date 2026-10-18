@@ -32,7 +32,7 @@ use tokio::sync::broadcast::Sender;
 use crate::merkle::MarkleBatch;
 use crate::policy::QuarantineRecord;
 use crate::state::SwarmStateRegistry;
-use crate::{merkle::AxonGateKeeper, network::GlobalNetworkBridge, wal::WalEngine};
+use crate::{merkle::MerkleEngine, network::GlobalNetworkBridge, wal::WalEngine};
 
 // The fundamental unit of our Flight Recorder.
 #[derive(
@@ -152,7 +152,7 @@ pub fn generate_uuidv7_txid() -> u128 {
 
 pub async fn execute_raqim_cascade(
     archive_state: &rkyv::Archived<AgentState>, // True Zero Copy
-    axon: Arc<AxonGateKeeper>,
+    axon: Arc<MerkleEngine>,
     wal: Arc<WalEngine>,
     shard_brain: Arc<SwarmStateRegistry>,
     global_net: Arc<GlobalNetworkBridge>,

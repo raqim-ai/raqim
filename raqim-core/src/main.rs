@@ -7,7 +7,7 @@ use raqim_core::merkle::AxonGateKeeper;
 use raqim_core::policy::{PolicyConfigFile, PolicyEngine};
 
 use axum::http::Method;
-use raqim_core::cold_store::SegmentColdStore;
+use raqim_core::cold_store::{ColdStore, SegmentColdStore};
 use raqim_core::compactor::WalCompactor;
 use raqim_core::config::RaqimConfig;
 use raqim_core::health::{HealthMonitor, SystemHealth};
@@ -265,7 +265,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await,
     );
-    let hot_buffer = Arc::new(HotVectorBuffer::new(10_0000));
 
     // 1. Boot global Quarantine network subscriber
     global_net
@@ -478,53 +477,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // ---  COMPACTION EVENT LISTENENR  (Watermark eviction) ----
-    let mut system_rx = event_tx.subscribe();
-    let hot_buffer_clone = hot_buffer.clone();
-
-    tokio::spawn(async move {
-        while let Ok(event) = system_rx.recv().await {
-            if let SystemEvent::CompactionTriggered {
-                max_compacted_tx, ..
-            } = event
-            {
-                hot_buffer_clone.evict_compacted_up_to(max_compacted_tx);
-            }
-        }
-    });
-
-    // We spawn the Audit Vault Sinker. This OS thread's ONLY job is to listen to the internal event bus
-    let mut valut_rx = event_tx.subscribe();
+    let mut vault_rx = event_tx.subscribe();
     let cold_store_vault = cold_store.clone();
     let lance_net = global_net.clone();
 
     tokio::spawn(async move {
-        println!("[SYSTEM] Audit Valult Telemetry Sinker Active.");
-
-        while let Ok(event) = valut_rx.recv().await {
+        println!("[SYSTEM] Audit Vault Telemetry Sinker Active.");
+        while let Ok(event) = vault_rx.recv().await {
             if !matches!(event, SystemEvent::ThoughtCommitted { .. }) {
-                cold_store_vault.log_system_events(&event).await;
+                cold_store_vault.log_system_event(&event).await;
             }
-
-            match event {
-                SystemEvent::GlobalQuarantineSync { record } => {
-                    lance_net.broadcast_quarantine_sync(record).await;
-                }
-
-                _ => {}
+            if let SystemEvent::GlobalQuarantineSync { record } = event {
+                lance_net.broadcast_quarantine_sync(record).await;
             }
         }
     });
 
-    // The Autonomous compactor (WAL reaper)
     let compactor = Arc::new(WalCompactor::new(
         &config.wal_path,
         &config.manifest_path,
         &config.checkpoint_path,
         &config.control_journal_path,
-        lance_engine.clone(),
+        cold_store.clone(),
         axon.clone(),
         brain_shard.clone(),
-        policy.clone(),
+        aegis.clone(),
         registry.clone(),
         mem_router.clone(),
         event_tx.clone(),
@@ -569,7 +546,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         swarm_registry: registry.clone(),
         master_signing_key: master_signing_key.clone(),
 
-        hot_buffer: hot_buffer.clone(),
         pause_tx: pause_tx.clone(),
         compactor: compactor.clone(),
     };
@@ -661,7 +637,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let task_brain = brain_shard.clone();
                     let task_mem_router = mem_router.clone();
                     let task_pause_rx = pause_rx.clone();
-                    let task_hot_buffer = hot_buffer.clone();
 
                 // Spawn into the joinset
             tcp_workers.spawn(async move {

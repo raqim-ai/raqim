@@ -4,8 +4,8 @@ version = "0.1.2"
 edition = "2021"
 
 [features]
-default = ["native-embedding"]
-native-embedding = ["dep:fastembed"]
+default = []
+vector_embedding = ["dep:fastembed", "dep:lancedb", "dep:arrow-array", "dep:arrow-schema"]
 mock-embedding = []
 
 [dependencies]
@@ -26,9 +26,9 @@ sysinfo = "0.30"
 hex =  "0.4"
 uuid = { version = "1.10", features = ["v7", "serde"] }
 
-lancedb = "0.9"
-arrow-array = "52.2"
-arrow-schema = "52.2"
+lancedb = {version = "0.9", optional = true}
+arrow-array = {version = "52.2", optional = true}
+arrow-schema = {version = "52.2", optional true}
 
 anyhow = "1.0"
 

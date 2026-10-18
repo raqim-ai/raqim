@@ -35,8 +35,7 @@ use uuid::Uuid;
 use crate::cold_store::ColdStore;
 use crate::compactor::WalCompactor;
 use crate::health::SystemHealth;
-use crate::hot_memory::HotVectorBuffer;
-use crate::merkle::{AxonGateKeeper, InclusionProof};
+use crate::merkle::{InclusionProof, MerkleEngine};
 use crate::otel::{self, OtelExportRequest};
 use crate::policy::{CapabilityCertificate, QuarantineRecord};
 use crate::registry::SwarmRegistry;
@@ -172,7 +171,7 @@ pub struct ApiState {
     pub config: Arc<RaqimConfig>,
 
     pub mem_router: Arc<MemoryRouter>,
-    pub axon: Arc<AxonGateKeeper>,
+    pub axon: Arc<MerkleEngine>,
     pub brain: Arc<SwarmStateRegistry>,
     pub policy: Arc<PolicyEngine>,
     pub global_net: Arc<GlobalNetworkBridge>,
@@ -186,7 +185,6 @@ pub struct ApiState {
     pub swarm_registry: Arc<SwarmRegistry>,
     pub master_signing_key: SigningKey,
 
-    pub hot_buffer: Arc<HotVectorBuffer>,
     pub pause_tx: Arc<watch::Sender<bool>>,
 
     pub compactor: Arc<WalCompactor>,

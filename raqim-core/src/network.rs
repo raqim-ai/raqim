@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{eprintln, format, println};
 
-use crate::merkle::AxonGateKeeper;
+use crate::merkle::MerkleEngine;
 use crate::state::SwarmStateRegistry;
 use crate::{A2AEnvelope, OpLog, SystemEvent};
 use rkyv::{to_bytes, Archive};
@@ -259,7 +259,7 @@ impl GlobalNetworkBridge {
     pub async fn listen_for_foreign_thoughts(
         &self,
         brain_registry: Arc<SwarmStateRegistry>,
-        axon: Arc<AxonGateKeeper>,
+        axon: Arc<MerkleEngine>,
         tx: Sender<SystemEvent>,
     ) {
         // We subscribe to a wildcard to catch thoughts from ALL other nodes on the planet
