@@ -99,7 +99,7 @@ impl SegmentColdStore {
 
         let initial_count = Self::count_records_on_disk(&history_file_path);
 
-        Self {
+        let store = Self {
             storage_dir: dir,
             history_file_path,
             audit_file_path,
@@ -110,67 +110,209 @@ impl SegmentColdStore {
             namespace_counts: DashMap::new(),
 
             cached_record_count: AtomicUsize::new(initial_count),
-        }
+        };
+
+        store.load_or_rebuild_index_on_boot();
+        store
     }
 
     /// Loads the compact 44-byte-per-record `.idx` file into RAM on startup.  
     /// If `.idx` is missing but `.seg` exists, rebuilds the `.idx` automatically.
+    fn load_or_rebuild_index_on_boot(&self) {
+        if self.index_file_path.exists() {
+            if let Ok(idx_bytes) = fs::read(&self.index_file_path) {
+                let mut cursor = 0;
+                let mut count = 0;
+                // Each index record is 44 bytes: [16B tx_id][16B agent_id][8B offset][4B total_len]
+                while cursor + 44 <= idx_bytes.len() {
+                    let tx_id =
+                        u128::from_le_bytes(idx_bytes[cursor..cursor + 16].try_into().unwrap());
+                    let agent_id: [u8; 16] =
+                        idx_bytes[cursor + 16..cursor + 32].try_into().unwrap();
+                    let offset =
+                        u64::from_le_bytes(idx_bytes[cursor + 32..cursor + 40].try_into().unwrap());
+                    let total_frame_bytes =
+                        u32::from_le_bytes(idx_bytes[cursor + 40..cursor + 44].try_into().unwrap());
 
-    fn count_records_on_disk(path: &Path) -> usize {
-        let mut count = 0;
-        let _ = Self::scan_segment_file(path, |batch| {
-            count += batch.len();
-        });
+                    let ptr = FramePointer {
+                        tx_id,
+                        offset,
+                        total_frame_bytes,
+                    };
+                    self.tx_index.insert(tx_id, ptr);
+                    self.agent_index.entry(agent_id).or_default().push(ptr);
 
-        count
-    }
-
-    /// Zero-copy mmap scanner over the cold segment file.
-    /// Physics: Uses the exact [4B len] [4B crc32][rkyv Vec<OpLog>] framing as Nucleus WAL.
-    fn scan_segment_file<F>(path: &Path, mut callback: F) -> Result<(), anyhow::Error>
-    where
-        F: FnMut(&rkyv::Archived<Vec<OpLog>>),
-    {
-        if !path.exists() {
-            return Ok(());
-        }
-
-        let file = File::open(path)?;
-        if file.metadata()?.len() < 8 {
-            return Ok(());
-        }
-
-        let mmap = unsafe { MmapOptions::new().map(&file)? };
-        let mut offset = 0;
-        let mut aligned_buf = rkyv::util::AlignedVec::<16>::new();
-
-        while offset + 8 < mmap.len() {
-            let entry_len =
-                u32::from_le_bytes(mmap[offset..offset + 4].try_into().unwrap()) as usize;
-            let expected_crc = u32::from_le_bytes(mmap[offset + 4..offset + 8].try_into().unwrap());
-            let frame_total = 8 + entry_len;
-
-            if offset + frame_total > mmap.len() {
-                break;
-            }
-
-            let entry_slice = &mmap[offset + 8..offset + frame_total];
-            if crc32fast::hash(entry_slice) == expected_crc {
-                aligned_buf.clear();
-                aligned_buf.extend_from_slice(entry_slice);
-
-                if let Ok(archived_batch) = rkyv::access::<
-                    <Vec<OpLog> as Archive>::Archived,
-                    rkyv::rancor::Error,
-                >(&aligned_buf)
-                {
-                    callback(archived_batch);
+                    cursor += 44;
+                    count += 1;
                 }
+                self.cached_record_count.store(count, Ordering::Relaxed);
+                return;
             }
-            offset += frame_total;
         }
-        Ok(())
+
+        // Fallback: If .seg exists without .idx, scan .seg once to build the index
+        if self.history_file_path.exists() {
+            if let Ok(seg_bytes) = fs::read(&self.history_file_path) {
+                let mut offset = 0usize;
+                let mut count = 0usize;
+                let mut idx_file = OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(&self.index_file_path)
+                    .ok();
+
+                let mut aligned_buf = rkyv::util::AlignedVec::<16>::new();
+
+                while offset + 8 <= seg_bytes.len() {
+                    let payload_len =
+                        u32::from_le_bytes(seg_bytes[offset..offset + 4].try_into().unwrap())
+                            as usize;
+                    let expected_crc =
+                        u32::from_le_bytes(seg_bytes[offset + 4..offset + 8].try_into().unwrap());
+                    let frame_total = 8 + payload_len;
+
+                    if offset + frame_total > seg_bytes.len() {
+                        break;
+                    }
+
+                    let payload_slice = &seg_bytes[offset + 8..offset + frame_total];
+                    if crc32fast::hash(payload_slice) == expected_crc {
+                        aligned_buf.clear();
+                        aligned_buf.extend_from_slice(payload_slice);
+
+                        if let Ok(archived_log) = rkyv::access::<
+                            <OpLog as Archive>::Archived,
+                            rkyv::rancor::Error,
+                        >(&aligned_buf)
+                        {
+                            let tx_id = archived_log.state.transaction_id.to_native();
+                            let agent_id: [u8; 16] = archived_log
+                                .agent_id
+                                .as_slice()
+                                .try_into()
+                                .unwrap_or([0; 16]);
+                            let ns = archived_log.state.namespace.as_str().to_string();
+
+                            let ptr = FramePointer {
+                                tx_id,
+                                offset: offset as u64,
+                                total_frame_bytes: frame_total as u32,
+                            };
+
+                            self.tx_index.insert(tx_id, ptr);
+                            self.agent_index.entry(agent_id).or_default().push(ptr);
+                            *self.namespace_counts.entry(ns).or_insert(0) += 1;
+                            count += 1;
+
+                            if let Some(ref mut f) = idx_file {
+                                let _ = f.write_all(&tx_id.to_le_bytes());
+                                let _ = f.write_all(&agent_id);
+                                let _ = f.write_all(&(offset as u64).to_le_bytes());
+                                let _ = f.write_all(&(frame_total as u32).to_le_bytes());
+                            }
+                        }
+                    }
+                    offset += frame_total;
+                }
+                self.cached_record_count.store(count, Ordering::Relaxed);
+            }
+        }
     }
+
+    /// Performs an O(1) disk seek to `ptr.offset`, reads exactly `ptr.total_frame_bytes`,
+    /// verifies the hardware CRC32 checksum, and deserializes that single OpLog.
+    fn read_single_frame_at(&self, ptr: FramePointer) -> Result<OpLog, anyhow::Error> {
+        let mut file = File::open(&self.history_file_path)?;
+        file.seek(SeekFrom::Start(ptr.offset))?;
+
+        let mut frame_buf = vec![0u8; ptr.total_frame_bytes as usize];
+        file.read_exact(&mut frame_buf)?;
+
+        if frame_buf.len() < 8 {
+            return Err(anyhow::anyhow!("Corrupted frame pointer: length < 8"));
+        }
+
+        let payload_len = u32::from_le_bytes(frame_buf[0..4].try_into().unwrap()) as usize;
+        let expected_crc = u32::from_le_bytes(frame_buf[4..8].try_into().unwrap());
+
+        if 8 + payload_len > frame_buf.len() {
+            return Err(anyhow::anyhow!("Corrupted frame length header"));
+        }
+
+        let payload_slice = &frame_buf[8..8 + payload_len];
+        if crc32fast::hash(payload_slice) != expected_crc {
+            return Err(anyhow::anyhow!(
+                "Cold segment CRC32 mismatch at offset {}",
+                ptr.offset
+            ));
+        }
+
+        let mut aligned_buf = rkyv::util::AlignedVec::<16>::with_capacity(payload_len);
+        aligned_buf.extend_from_slice(payload_slice);
+
+        let archived =
+            rkyv::access::<<OpLog as Archive>::Archived, rkyv::rancor::Error>(&aligned_buf)
+                .map_err(|e| anyhow::anyhow!("rkyv validation error: {}", e))?;
+
+        let owned = rkyv::deserialize::<OpLog, rkyv::rancor::Error>(archived)
+            .map_err(|e| anyhow::anyhow!("rkyv deserialize error: {}", e))?;
+
+        Ok(owned)
+    }
+}
+
+fn count_records_on_disk(path: &Path) -> usize {
+    let mut count = 0;
+    let _ = Self::scan_segment_file(path, |batch| {
+        count += batch.len();
+    });
+
+    count
+}
+
+/// Zero-copy mmap scanner over the cold segment file.
+/// Physics: Uses the exact [4B len] [4B crc32][rkyv Vec<OpLog>] framing as Nucleus WAL.
+fn scan_segment_file<F>(path: &Path, mut callback: F) -> Result<(), anyhow::Error>
+where
+    F: FnMut(&rkyv::Archived<Vec<OpLog>>),
+{
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let file = File::open(path)?;
+    if file.metadata()?.len() < 8 {
+        return Ok(());
+    }
+
+    let mmap = unsafe { MmapOptions::new().map(&file)? };
+    let mut offset = 0;
+    let mut aligned_buf = rkyv::util::AlignedVec::<16>::new();
+
+    while offset + 8 < mmap.len() {
+        let entry_len = u32::from_le_bytes(mmap[offset..offset + 4].try_into().unwrap()) as usize;
+        let expected_crc = u32::from_le_bytes(mmap[offset + 4..offset + 8].try_into().unwrap());
+        let frame_total = 8 + entry_len;
+
+        if offset + frame_total > mmap.len() {
+            break;
+        }
+
+        let entry_slice = &mmap[offset + 8..offset + frame_total];
+        if crc32fast::hash(entry_slice) == expected_crc {
+            aligned_buf.clear();
+            aligned_buf.extend_from_slice(entry_slice);
+
+            if let Ok(archived_batch) =
+                rkyv::access::<<Vec<OpLog> as Archive>::Archived, rkyv::rancor::Error>(&aligned_buf)
+            {
+                callback(archived_batch);
+            }
+        }
+        offset += frame_total;
+    }
+    Ok(())
 }
 
 #[async_trait]
