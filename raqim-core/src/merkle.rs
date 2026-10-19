@@ -284,7 +284,7 @@ impl MerkleEngine {
     }
 
     /// Exports the full cryptographic Merkle DAG state for checkpointing
-    pub fn export_checkpoint_state(&self) -> crate::checkpoint::AxonCheckpointState {
+    pub fn export_checkpoint_state(&self) -> crate::checkpoint::MerkleCheckpointState {
         let global_batch_counter = self.global_batch_counter.load(SeqCst);
         let mut active_buffers = Vec::new();
         for entry in self.active_buffers.iter() {
@@ -304,7 +304,7 @@ impl MerkleEngine {
             .iter()
             .map(|e| e.value().clone())
             .collect();
-        crate::checkpoint::AxonCheckpointState {
+        crate::checkpoint::MerkleCheckpointState {
             global_batch_counter,
             active_buffers,
             batch_archive,
@@ -312,7 +312,7 @@ impl MerkleEngine {
     }
 
     /// Hydrates the cryptographic Merkle DAG from a checkpoint
-    pub fn hydrate_from_checkpoint(&self, state: crate::checkpoint::AxonCheckpointState) {
+    pub fn hydrate_from_checkpoint(&self, state: crate::checkpoint::MerkleCheckpointState) {
         self.global_batch_counter
             .store(state.global_batch_counter, SeqCst);
         for snap in state.active_buffers {

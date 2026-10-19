@@ -16,7 +16,6 @@ use crate::api::UiEvent;
 use crate::cold_store::ColdStore;
 use crate::generate_uuidv7_txid;
 use crate::merkle::MerkleEngine;
-use crate::state::SwarmStateRegistry;
 use crate::AgentState;
 use crate::AgentStatus;
 use crate::EffectKey;
@@ -32,7 +31,6 @@ pub enum RebuildMode {
 pub struct EffectStore {
     config: Arc<RaqimConfig>,
     axon: Arc<MerkleEngine>,
-    brain: Arc<SwarmStateRegistry>,
     cold_store: Arc<dyn ColdStore>,
     wal_engine: Arc<WalEngine>,
     event_tx: Sender<SystemEvent>,
@@ -54,7 +52,6 @@ impl EffectStore {
     pub fn new(
         config: Arc<RaqimConfig>,
         axon: Arc<MerkleEngine>,
-        brain: Arc<SwarmStateRegistry>,
         cold_store: Arc<dyn ColdStore>,
         wal_engine: Arc<WalEngine>,
         event_tx: Sender<SystemEvent>,
@@ -62,7 +59,6 @@ impl EffectStore {
         Self {
             config,
             axon,
-            brain,
             cold_store,
             wal_engine,
             event_tx,
@@ -290,17 +286,6 @@ impl EffectStore {
 
         let sandbox_agent_hex = hex::encode(phantom_bytes);
 
-        let target_brain = if is_isolated_debug {
-            let phantom_namespace = format!("phantom_{}_{}", real_namespace, sandbox_agent_hex);
-            self.brain.get_or_create_brain(&phantom_namespace)
-        } else {
-            self.brain.get_or_create_brain(real_namespace)
-        };
-
-        for log in &historical_oplog {
-            let _ = target_brain.assimilate_foreign_thought(&log.delta);
-        }
-
         if let Some(fork) = &fork_config {
             println!(
                 "[TIME MACHINE] Applied {} reality fork overrides",
@@ -322,7 +307,6 @@ impl EffectStore {
             ),
         });
 
-        self.brain.purge_phantom_shards();
         Ok(())
     }
 
@@ -374,16 +358,9 @@ impl EffectStore {
             text: payload_str,
         };
 
-        let delta = self
-            .brain
-            .get_or_create_brain(namespace)
-            .append_agent_thought(&agent_hex)
-            .unwrap_or_default();
-
         let raw_oplog = OpLog {
             agent_id,
             state,
-            delta,
             previous_hash: [0u8; 32],
             current_hash: [0u8; 32],
             entropy_seeds: Vec::new(),

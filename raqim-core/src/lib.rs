@@ -78,8 +78,6 @@ pub struct OpLog {
     pub agent_id: [u8; 16],
     pub state: AgentState,
 
-    pub delta: Vec<u8>,
-
     pub previous_hash: [u8; 32],
     pub current_hash: [u8; 32],
 
@@ -180,18 +178,10 @@ pub async fn execute_raqim_cascade(
         text: archive_state.text.as_str().to_string(), // Extract text from pointer
     };
 
-    let delta = shard_brain
-        .get_or_create_brain(&enriched_state.namespace.clone())
-        .append_agent_thought(&agent_hex)
-        .map_err(|e| anyhow::anyhow!("CRDT allocation failed: {}", e))?;
-
-    // telemetry.record_crdt_merge();
-
     // Contruct the raw log
     let raw_log = OpLog {
         agent_id: final_agent_id,
         state: enriched_state.clone(),
-        delta,
         previous_hash: [0; 32],
         current_hash: [0; 32],
 

@@ -113,7 +113,6 @@ impl OtelKeyValue {
 pub fn build_otlp_trace_from_timeline(
     agent_hex: &str,
     tenant_id: &str,
-    node_id: &str,
     active_merkle_root: &str,
     nodes: &[TimelineNode],
 ) -> OtelExportRequest {
@@ -222,7 +221,6 @@ pub fn build_otlp_trace_from_timeline(
                     OtelKeyValue::string("service.name", "raqim-sovereign-agent"),
                     OtelKeyValue::string("service.version", "0.1.2"),
                     OtelKeyValue::string("raqim.tenant_id", tenant_id),
-                    OtelKeyValue::string("raqim.node_id", node_id),
                 ],
             },
             scope_spans: vec![OtelScopeSpans {

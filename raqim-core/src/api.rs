@@ -1,4 +1,3 @@
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query};
 use axum::http::header::{AUTHORIZATION, HOST, ORIGIN};
 use axum::response::{IntoResponse, Response};
@@ -120,7 +119,6 @@ pub struct ApiState {
 
     pub mem_router: Arc<EffectStore>,
     pub axon: Arc<MerkleEngine>,
-    pub brain: Arc<SwarmStateRegistry>,
     pub policy: Arc<PolicyEngine>,
     pub wal: Arc<WalEngine>,
     pub cold_store: Arc<dyn ColdStore>,
@@ -1401,7 +1399,6 @@ pub async fn export_agent_timeline_otel(
     let otlp_payload = otel::build_otlp_trace_from_timeline(
         &agent_hex,
         &state.config.tenant_id,
-        &state.global_net.os_node_id,
         &active_root,
         &nodes,
     );
@@ -1440,7 +1437,6 @@ pub fn build_admin_router(state: ApiState) -> axum::Router {
         )
         // Cluster Observervability and Diagnostics
         .route("/v1/admin/cluster/info", get(cluster_info_endpoint))
-        .route("/v1/admin/cluster/topology", get(cluster_topology_endpoint))
         .route("/v1/cluster/enclaves", get(cluster_enclaves_endpoint))
         .route("/v1/dashboard/cards", get(dashboard_cards_endpoint))
         .route("/v1/admin/ingress/toggle", post(toggle_ingress_endpoint))
@@ -1455,7 +1451,6 @@ pub fn build_admin_router(state: ApiState) -> axum::Router {
         .route("/v1/time-travel/stream", get(sse_phantom_endpoint))
         .route("/v1/system/agents/aliases", get(agent_alias_endpoint))
         // Swarm & A2A Ingress
-        .route("/v1/mcp/ws", get(mcp_ws_handler))
         .route("/v1/swarm/ingress", post(http_ingress_endpoint))
         .route("/v1/vault/telemetry", get(vault_telemetry_endpoint))
         .route(
