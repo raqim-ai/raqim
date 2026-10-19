@@ -20,7 +20,7 @@ pub struct CapabilityCertificate {
 }
 
 /// Atomic Token Bucket Rate Limiter
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 
 pub struct AtomicTokenBucket {
     pub max_tps: u64,
