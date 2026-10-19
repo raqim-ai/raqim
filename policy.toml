@@ -1,0 +1,14 @@
+
+        # Default Raqim Aegis Policy Manifest (Auto-Generated)
+        [groups.admin_group]
+        allowed_namespaces = ["*"]
+        blocked_namespaces = []
+        max_tps = 10000
+        burst_capacity = 1000
+
+        [groups.default_group]
+        allowed_namespaces = ["/default/*"]
+        blocked_namespaces = ["/admin/*", "/system/*"]
+        max_tps = 100
+        burst_capacity = 20
+        

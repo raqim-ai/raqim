@@ -15,11 +15,11 @@ pub mod utils;
 pub mod wal;
 pub mod witness;
 
-#[cfg(feature = "vector-memory")]
+#[cfg(feature = "vector_embedding")]
 pub mod embedding;
-#[cfg(feature = "vector-memory")]
+#[cfg(feature = "vector_embedding")]
 pub mod hot_memory;
-#[cfg(feature = "vector-memory")]
+#[cfg(feature = "vector_embedding")]
 pub mod lancedb_store;
 
 use blake3::Hasher;
