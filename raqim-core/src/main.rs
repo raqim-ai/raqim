@@ -13,9 +13,7 @@ use raqim_core::config::RaqimConfig;
 use raqim_core::health::{HealthMonitor, SystemHealth};
 
 use raqim_core::effect_store::EffectStore;
-use raqim_core::network::GlobalNetworkBridge;
 use raqim_core::registry::SwarmRegistry;
-use raqim_core::state::SwarmStateRegistry;
 use raqim_core::wal::{WalCommand, WalEngine};
 use raqim_core::witness::WormWitnessEngine;
 use raqim_core::{
@@ -41,6 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("==================================================================");
 
     let boot_start = std::time::Instant::now();
+
 
     // =================================
     // SIGNAL INTERCEPTION (Graceful OS shutdown Handlers)
@@ -140,11 +139,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let master_public_key = master_signing_key.verifying_key().to_bytes();
     // ===============================
-    let os_node_id = Uuid::new_v4().to_string();
     println!("[SYSTEM] Sovereign OS Node ID: {} ", os_node_id);
 
     // 1. BOOT SEQUENCE: INIITIALIZE ALL LAYERS (Wrapped in Arc for fearless concurrency)
-    let brain_shard = Arc::new(SwarmStateRegistry::new());
     let axon = Arc::new(MerkleEngine::new());
 
     // LEAK-PROOF BROADCAST RECEIVER LOOP: Spawn consumer loop to detect lagging and evict slow readers automatically
@@ -254,14 +251,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let (wal, handle) = WalEngine::start(config.wal_path.clone()).await;
-    let global_net = Arc::new(
-        GlobalNetworkBridge::new(
-            &security_flags.tenant_id.clone().read().unwrap(),
-            &config.topic,
-            policy.clone(),
-            os_node_id,
-        )
-        .await,
+
     );
 
     // 1. Boot global Quarantine network subscriber
@@ -272,7 +262,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mem_router = Arc::new(EffectStore::new(
         config.clone(),
         axon.clone(),
-        brain_shard.clone(),
         cold_store.clone(),
         wal.clone(),
         event_tx.clone(),
@@ -280,15 +269,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Wire SystemEvent subscriber loop for outbound local quarantine events
     let mut system_rx = event_tx.subscribe();
-    let net_clone = global_net.clone();
 
-    tokio::spawn(async move {
-        while let Ok(event) = system_rx.recv().await {
-            if let SystemEvent::GlobalQuarantineSync { record } = event {
-                net_clone.broadcast_quarantine_sync(record).await;
-            }
-        }
-    });
 
     // ============================
     // THE PHOENIX HYDRATION PROTOCOL: Unified Checkpoint + Control Journal + WAL Replay
@@ -301,7 +282,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "[PHOENIX] State checkpoint detected from timestamp {}. Hydrating system core...",
             checkpoint.timestamp
         );
-        brain_shard.import_snapshots(checkpoint.crdt_snapshots);
         axon.hydrate_from_checkpoint(checkpoint.axon_state);
         mem_router.hydrate_effects(checkpoint.effects);
         policy.hydrate_quarantines(checkpoint.quarantines);
@@ -441,15 +421,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         for recovered_log in batch {
                             axon.hydrate_from_recovery(&recovered_log);
 
-                            // Fetch crdt shard for this namespace and apply historical delta
-                            let brain =
-                                brain_shard.get_or_create_brain(&recovered_log.state.namespace);
-                            if let Err(e) = brain.assimilate_foreign_thought(&recovered_log.delta) {
-                                eprintln!(
-                                    "[PHOENIX WARN] Failed to assimilate CRDT delta during recovery: {},",
-                                    e
-                                );
-                            }
+
 
                             recovered_logs.push(recovered_log);
                             uncompacted_count += 1
