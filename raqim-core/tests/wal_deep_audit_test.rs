@@ -1,4 +1,4 @@
-use raqim_core::{memory_router::MemoryRouter, wal::WalEngine, AgentState, AgentStatus, OpLog};
+use raqim_core::{effect_store::EffectStore, wal::WalEngine, AgentState, AgentStatus, OpLog};
 use std::path::Path;
 
 #[tokio::test]
@@ -33,7 +33,7 @@ async fn test_wal_scanner_reads_batch_frames_without_ub() {
     let mut scanned_count = 0;
     let mut tx_ids = Vec::new();
 
-    let scan_res = MemoryRouter::scan_wal_file(test_wal, |archived_log| {
+    let scan_res = EffectStore::scan_wal_file(test_wal, |archived_log| {
         scanned_count += 1;
         let tx = archived_log.state.transaction_id.to_native();
         tx_ids.push(tx);

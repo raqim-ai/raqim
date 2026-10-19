@@ -29,7 +29,7 @@ pub enum RebuildMode {
     TimeTravel(u64), //
 }
 
-pub struct MemoryRouter {
+pub struct EffectStore {
     config: Arc<RaqimConfig>,
     axon: Arc<MerkleEngine>,
     brain: Arc<SwarmStateRegistry>,
@@ -50,7 +50,7 @@ pub struct UnifiedSearchResult {
     pub source: &'static str,
 }
 
-impl MemoryRouter {
+impl EffectStore {
     pub fn new(
         config: Arc<RaqimConfig>,
         axon: Arc<MerkleEngine>,
