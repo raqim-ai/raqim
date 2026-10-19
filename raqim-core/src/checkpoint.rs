@@ -23,7 +23,7 @@ pub struct ActiveTreeBufferSnapshot {
 
 /// Consolidated state of the Axon Merkle DAG at checkpoint time
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AxonCheckpointState {
+pub struct MerkleCheckpointState {
     pub global_batch_counter: u64,
     pub active_buffers: Vec<ActiveTreeBufferSnapshot>,
     pub batch_archive: Vec<MarkleBatch>,
@@ -35,10 +35,9 @@ pub struct StateCheckpoint {
     pub version: u32,
     pub timestamp: i64,
     pub last_tx_id: u128,
-    /// Loro CRDT binary snapshots keyed by namespace
-    pub crdt_snapshots: HashMap<String, Vec<u8>>,
+
     /// Cryptographic Merkle DAG state
-    pub axon_state: AxonCheckpointState,
+    pub merkle_state: MerkleCheckpointState,
     /// Deterministic $0 replay cache
     pub effects: Vec<EffectRecord>,
     /// Active quarantine blocklist

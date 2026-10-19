@@ -6,11 +6,9 @@ pub mod config;
 pub mod effect_store;
 pub mod health;
 pub mod merkle;
-pub mod network;
 pub mod otel;
 pub mod policy;
 pub mod registry;
-pub mod state;
 pub mod utils;
 pub mod wal;
 pub mod witness;
@@ -33,8 +31,7 @@ use tokio::sync::broadcast::Sender;
 
 use crate::merkle::MarkleBatch;
 use crate::policy::QuarantineRecord;
-use crate::state::SwarmStateRegistry;
-use crate::{merkle::MerkleEngine, network::GlobalNetworkBridge, wal::WalEngine};
+use crate::{merkle::MerkleEngine, wal::WalEngine};
 
 // The fundamental unit of our Flight Recorder.
 #[derive(
@@ -156,8 +153,6 @@ pub async fn execute_raqim_cascade(
     archive_state: &rkyv::Archived<AgentState>, // True Zero Copy
     axon: Arc<MerkleEngine>,
     wal: Arc<WalEngine>,
-    shard_brain: Arc<SwarmStateRegistry>,
-    global_net: Arc<GlobalNetworkBridge>,
     tx: Sender<SystemEvent>,
     seeds: Vec<u64>,
     responses: Vec<String>,
@@ -227,8 +222,6 @@ pub async fn execute_raqim_cascade(
     wal.append(sealed_log.clone())
         .await
         .map_err(|e| anyhow::anyhow!("Durability Breach / WAL Saturated: {}", e))?;
-
-    global_net.broadcast_to_world(&sealed_log).await;
 
     // Convert u128 to hex string for human-readable sse event
     let tx_id_hex = format!("{:032x}", tx_id);
