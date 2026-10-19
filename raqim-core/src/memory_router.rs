@@ -77,7 +77,7 @@ impl MemoryRouter {
     {
         let file = match File::open(wal_path) {
             Ok(f) => f,
-            Err(_) => return Ok(()), // File not created yet; clean return
+            Err(_) => return Ok(()),
         };
 
         let mmap = unsafe { MmapOptions::new().map(&file)? };
@@ -91,12 +91,10 @@ impl MemoryRouter {
             let frame_total = 8 + entry_len;
 
             if offset + frame_total > mmap.len() {
-                break; // Incomplete or torn frame at EOF
+                break;
             }
 
             let entry_slice = &mmap[offset + 8..offset + frame_total];
-
-            // Hardware CRC32 verification
             if crc32fast::hash(entry_slice) != expected_crc {
                 offset += frame_total;
                 continue;
@@ -105,7 +103,6 @@ impl MemoryRouter {
             aligned_buf.clear();
             aligned_buf.extend_from_slice(entry_slice);
 
-            // Safe, verified deserialization of Vec<OpLog> batch
             if let Ok(archived_batch) =
                 rkyv::access::<<Vec<OpLog> as Archive>::Archived, rkyv::rancor::Error>(&aligned_buf)
             {
@@ -120,12 +117,48 @@ impl MemoryRouter {
         Ok(())
     }
 
-    /// Scans the active WAL path configured on the router
-    pub fn scan_wal_zero_copy<F>(&self, callback: F) -> Result<(), anyhow::Error>
+    pub fn scan_wal_file_until<F>(wal_path: &str, mut callback: F) -> Result<(), anyhow::Error>
     where
-        F: FnMut(&Archived<OpLog>),
+        F: FnMut(&Archived<OpLog>) -> bool,
     {
-        Self::scan_wal_file(&self.config.wal_path, callback)
+        let file = match File::open(wal_path) {
+            Ok(f) => f,
+            Err(_) => return Ok(()),
+        };
+        let mmap = unsafe { MmapOptions::new().map(&file)? };
+        let mut offset = 0;
+        let mut aligned_buf = rkyv::util::AlignedVec::<16>::new();
+
+        while offset + 8 <= mmap.len() {
+            let entry_len =
+                u32::from_le_bytes(mmap[offset..offset + 4].try_into().unwrap()) as usize;
+            let expected_crc = u32::from_le_bytes(mmap[offset + 4..offset + 8].try_into().unwrap());
+            let frame_total = 8 + entry_len;
+
+            if offset + frame_total > mmap.len() {
+                break;
+            }
+
+            let entry_slice = &mmap[offset + 8..offset + frame_total];
+            if crc32fast::hash(entry_slice) == expected_crc {
+                aligned_buf.clear();
+                aligned_buf.extend_from_slice(entry_slice);
+
+                if let Ok(archived_batch) = rkyv::access::<
+                    <Vec<OpLog> as Archive>::Archived,
+                    rkyv::rancor::Error,
+                >(&aligned_buf)
+                {
+                    for log in archived_batch.as_slice() {
+                        if !callback(log) {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            offset += frame_total;
+        }
+        Ok(())
     }
 
     /// THE RESURRECTION ENGINE
@@ -135,7 +168,7 @@ impl MemoryRouter {
         agent_hex: &str,
         target_tx_id: u128,
         wal_engine: Arc<WalEngine>,
-    ) -> Result<(Vec<u8>, Vec<OpLog>, u128, u64), anyhow::Error> {
+    ) -> Result<Vec<OpLog>, anyhow::Error> {
         // Find the highest known tx_id for this agent.
         let actual_target_tx = if target_tx_id == u128::MAX {
             // Checking the WAL Index first
@@ -180,19 +213,22 @@ impl MemoryRouter {
         historical_oplogs.sort_by_key(|l| l.state.transaction_id);
         historical_oplogs.dedup_by_key(|l| l.state.transaction_id);
 
-        Ok((Vec::new(), historical_oplogs, actual_target_tx, 0))
+        Ok(historical_oplogs)
     }
 
     /// FORENSIC POINT LOOKUP: Returns the typed OpLog struct from Hot WAL or O(1) ColdStore
     pub async fn fetch_by_txid(&self, target_tx_id: u128) -> Result<OpLog, anyhow::Error> {
         let mut hot_found: Option<OpLog> = None;
 
-        self.scan_wal_zero_copy(|archived| {
-            if hot_found.is_none() && archived.state.transaction_id.to_native() == target_tx_id {
+        Self::scan_wal_file_until(&self.config.wal_path, |archived| {
+            if archived.state.transaction_id.to_native() == target_tx_id {
                 if let Ok(owned) = rkyv::deserialize::<OpLog, rkyv::rancor::Error>(archived) {
                     hot_found = Some(owned);
+                    return false;
                 }
             }
+
+            true // keep scanning
         })?;
 
         if let Some(log) = hot_found {
@@ -220,7 +256,7 @@ impl MemoryRouter {
     ) -> Result<(), anyhow::Error> {
         let fetch_target = target_tx_id.unwrap_or(u128::MAX);
 
-        let (_memory_blob, historical_oplog, _snapshot_tx, _snapshot_timestamp) = self
+        let historical_oplog = self
             .rebuild_agent_timeline(agent_hex, fetch_target, self.wal_engine.clone())
             .await?;
 
@@ -289,6 +325,7 @@ impl MemoryRouter {
         self.brain.purge_phantom_shards();
         Ok(())
     }
+
     /// Record Effect (Record mode) : captures a live side-effect, writes it to the wal & merkle DAG and updates the RAM
     pub async fn record_effect(
         &self,
@@ -340,7 +377,7 @@ impl MemoryRouter {
         let delta = self
             .brain
             .get_or_create_brain(namespace)
-            .append_agent_thought(&agent_hex, &state)
+            .append_agent_thought(&agent_hex)
             .unwrap_or_default();
 
         let raw_oplog = OpLog {

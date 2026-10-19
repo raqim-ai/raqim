@@ -1365,12 +1365,7 @@ pub async fn cluster_info_endpoint(
 
     let highest_tx = state.axon.get_latest_tx_id();
 
-    let cumulative_crdt_ops: usize = state
-        .brain
-        .shards
-        .iter()
-        .map(|e| e.value().doc.read().len_ops())
-        .sum();
+    let cumulative_ops: usize = state.brain.shards.iter().map(|e| e.value().len_ops()).sum();
 
     let total_shards = state.brain.shards.len();
 
@@ -1381,7 +1376,7 @@ pub async fn cluster_info_endpoint(
         "wal_size_mb": (wal_size as f64 ) / (1024.0 * 1024.0),
         "buffer_load": pending_wal_items,
         "allocated_shards": total_shards,
-        "cumulative_crdt_ops": cumulative_crdt_ops,
+        "cumulative_ops": cumulative_ops,
         "active_timelines": state.brain.shards.len(),
     });
 
@@ -1400,19 +1395,8 @@ pub async fn cluster_topology_endpoint(
         let namespace = entry.key();
         let brain = entry.value();
 
-        // Acquire a brief read lock on the Loro CRDT to extract topology metrics
-        let doc_lock = brain.doc.read();
-
-        // Count how many unique agent timelines exist within this specific shard
-        let active_timelines = brain.root_timeline_map.len();
-
-        // we measure the length of the underlying operations log.
-        let ops_count = doc_lock.len_ops();
-
-        // Calculate dynamic in-memoy footprint for this CRDT shard
-
-        let estimated_ram_kb = (ops_count * 64) as f64 / 1024.0;
-        let estimated_ram_mb = estimated_ram_kb / 1024.0;
+        let active_timelines = brain.active_timeline_count();
+        let ops_count = brain.len_ops();
 
         // Fetch agents associated with this namespace
         let attached_agents: Vec<String> = state
@@ -1423,7 +1407,7 @@ pub async fn cluster_topology_endpoint(
             .map(|a| a.key().clone())
             .collect();
 
-        shards.push(json!({ "namespace": namespace, "active_timelines": active_timelines, "total_crdt_operation": ops_count, "estimated_ram_mb": (estimated_ram_mb * 100.0).round() / 100.0, "attached_agents": attached_agents, "status": "ACTIVE"  }));
+        shards.push(json!({ "namespace": namespace, "active_timelines": active_timelines, "total_operations": ops_count,  "attached_agents": attached_agents, "status": "ACTIVE"  }));
     }
 
     Ok(Json(json!(shards)))

@@ -6,6 +6,7 @@
 use crate::AgentState;
 use dashmap::{DashMap, DashSet};
 use std::collections::HashMap;
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -24,13 +25,11 @@ impl SwarmState {
         }
     }
 
-    pub fn append_agent_thought(
-        &self,
-        agent_id_hex: &str,
-        _state: AgentState,
-    ) -> Result<Vec<u8>, anyhow::Error> {
+    pub fn append_agent_thought(&self, agent_id_hex: &str) -> Result<Vec<u8>, anyhow::Error> {
         self.active_agents.insert(agent_id_hex.to_string());
-        self.op_count.fet
+        self.op_count.fetch_add(1, Relaxed);
+
+        Ok(Vec::new())
     }
 
     pub fn assimillate_foreign_thought(&self, _delta: &[u8]) -> Result<(), anyhow::Error> {
@@ -40,6 +39,11 @@ impl SwarmState {
 
     pub fn len_ops(&self) -> usize {
         self.op_count.load(Ordering::Relaxed)
+    }
+
+    pub fn assimilate_foreign_thought(&self, _delta: &[u8]) -> Result<(), anyhow::Error> {
+        self.op_count.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 
     pub fn active_timeline_count(&self) -> usize {
