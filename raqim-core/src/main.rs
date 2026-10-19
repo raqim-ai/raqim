@@ -12,7 +12,7 @@ use raqim_core::compactor::WalCompactor;
 use raqim_core::config::RaqimConfig;
 use raqim_core::health::{HealthMonitor, SystemHealth};
 
-use raqim_core::memory_router::MemoryRouter;
+use raqim_core::effect_store::EffectStore;
 use raqim_core::network::GlobalNetworkBridge;
 use raqim_core::registry::SwarmRegistry;
 use raqim_core::state::SwarmStateRegistry;
@@ -269,7 +269,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .listen_for_global_quarantine(policy.clone())
         .await;
 
-    let mem_router = Arc::new(MemoryRouter::new(
+    let mem_router = Arc::new(EffectStore::new(
         config.clone(),
         axon.clone(),
         brain_shard.clone(),

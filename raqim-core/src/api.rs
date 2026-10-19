@@ -43,7 +43,7 @@ use crate::state::SwarmStateRegistry;
 use crate::wal::WalEngine;
 use crate::{
     config::RaqimConfig,
-    memory_router::{MemoryRouter, UnifiedSearchResult},
+    effect_store::{EffectStore, UnifiedSearchResult},
     network::GlobalNetworkBridge,
     policy::PolicyEngine,
     A2AEnvelope,
@@ -170,7 +170,7 @@ pub enum UiEvent {
 pub struct ApiState {
     pub config: Arc<RaqimConfig>,
 
-    pub mem_router: Arc<MemoryRouter>,
+    pub mem_router: Arc<EffectStore>,
     pub axon: Arc<MerkleEngine>,
     pub brain: Arc<SwarmStateRegistry>,
     pub policy: Arc<PolicyEngine>,

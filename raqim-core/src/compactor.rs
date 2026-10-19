@@ -1,7 +1,7 @@
 use crate::{
     checkpoint::{CheckpointEngine, StateCheckpoint},
     cold_store::ColdStore,
-    memory_router::MemoryRouter,
+    effect_store::EffectStore,
     merkle::MerkleEngine,
     policy::PolicyEngine,
     registry::SwarmRegistry,
@@ -46,7 +46,7 @@ pub struct WalCompactor {
     brain: Arc<SwarmStateRegistry>,
     aegis: Arc<PolicyEngine>,
     registry: Arc<SwarmRegistry>,
-    memory_router: Arc<MemoryRouter>,
+    memory_router: Arc<EffectStore>,
     tx: Sender<SystemEvent>,
     cmd_tx: mpsc::Sender<WalCommand>,
 }
@@ -62,7 +62,7 @@ impl WalCompactor {
         brain: Arc<SwarmStateRegistry>,
         aegis: Arc<PolicyEngine>,
         registry: Arc<SwarmRegistry>,
-        memory_router: Arc<MemoryRouter>,
+        memory_router: Arc<EffectStore>,
         tx: Sender<SystemEvent>,
         cmd_tx: mpsc::Sender<WalCommand>,
     ) -> Self {
