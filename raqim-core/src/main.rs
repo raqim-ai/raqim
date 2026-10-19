@@ -30,16 +30,14 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::broadcast;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("==================================================================");
-    println!("Bismillah. Booting Hardened Raqim Core Daemon v.1.0.0");
+    println!("Bismillah. Booting Hardened Raqim Core Daemon v.0.1.2");
     println!("==================================================================");
 
     let boot_start = std::time::Instant::now();
-
 
     // =================================
     // SIGNAL INTERCEPTION (Graceful OS shutdown Handlers)
@@ -139,7 +137,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let master_public_key = master_signing_key.verifying_key().to_bytes();
     // ===============================
-    println!("[SYSTEM] Sovereign OS Node ID: {} ", os_node_id);
 
     // 1. BOOT SEQUENCE: INIITIALIZE ALL LAYERS (Wrapped in Arc for fearless concurrency)
     let axon = Arc::new(MerkleEngine::new());
@@ -252,12 +249,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (wal, handle) = WalEngine::start(config.wal_path.clone()).await;
 
-    );
-
     // 1. Boot global Quarantine network subscriber
-    global_net
-        .listen_for_global_quarantine(policy.clone())
-        .await;
 
     let mem_router = Arc::new(EffectStore::new(
         config.clone(),
@@ -270,7 +262,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 2. Wire SystemEvent subscriber loop for outbound local quarantine events
     let mut system_rx = event_tx.subscribe();
 
-
     // ============================
     // THE PHOENIX HYDRATION PROTOCOL: Unified Checkpoint + Control Journal + WAL Replay
     // ============================
@@ -282,7 +273,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "[PHOENIX] State checkpoint detected from timestamp {}. Hydrating system core...",
             checkpoint.timestamp
         );
-        axon.hydrate_from_checkpoint(checkpoint.axon_state);
+        axon.hydrate_from_checkpoint(checkpoint.merkle_state);
         mem_router.hydrate_effects(checkpoint.effects);
         policy.hydrate_quarantines(checkpoint.quarantines);
         registry.hydrate_agents(checkpoint.active_agents);
@@ -421,8 +412,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         for recovered_log in batch {
                             axon.hydrate_from_recovery(&recovered_log);
 
-
-
                             recovered_logs.push(recovered_log);
                             uncompacted_count += 1
                         }
@@ -449,16 +438,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ---  COMPACTION EVENT LISTENENR  (Watermark eviction) ----
     let mut vault_rx = event_tx.subscribe();
     let cold_store_vault = cold_store.clone();
-    let lance_net = global_net.clone();
 
     tokio::spawn(async move {
         println!("[SYSTEM] Audit Vault Telemetry Sinker Active.");
         while let Ok(event) = vault_rx.recv().await {
             if !matches!(event, SystemEvent::ThoughtCommitted { .. }) {
                 cold_store_vault.log_system_event(&event).await;
-            }
-            if let SystemEvent::GlobalQuarantineSync { record } = event {
-                lance_net.broadcast_quarantine_sync(record).await;
             }
         }
     });
@@ -481,15 +466,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     compactor.clone().start_daemon();
 
     // 2 Background Listeners (Zenoh Global network)
-    let global_net_clone = global_net.clone();
     let global_axon = axon.clone();
-    let global_brain = brain_shard.clone();
     let global_tx = event_tx.clone();
-    tokio::spawn(async move {
-        global_net_clone
-            .listen_for_foreign_thoughts(global_brain, global_axon, global_tx)
-            .await;
-    });
 
     let (pause_tx, pause_rx) = tokio::sync::watch::channel(false);
     let pause_tx = Arc::new(pause_tx);
@@ -596,12 +574,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     let task_axon = axon.clone();
                     let task_wal = wal.clone();
-                    let global_publisher = global_net.clone();
                     let task_event_tx = event_tx.clone();
                     let task_aegis = policy.clone();
                     let task_ui_tx = ui_tx.clone();
                     let task_registry = registry.clone();
-                    let task_brain = brain_shard.clone();
                     let task_mem_router = mem_router.clone();
                     let task_pause_rx = pause_rx.clone();
 
@@ -871,7 +847,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[SYSTEM] All active thoughts processed and sealed.");
 
     // Sever the Global Mesh
-    global_net.shutdown().await;
     let _ = wal.cmd_sender.send(WalCommand::Shutdown).await;
     // Seal the WAL safely to nvme
     drop(wal);
