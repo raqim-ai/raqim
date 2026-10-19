@@ -20,7 +20,7 @@ pub struct CapabilityCertificate {
 }
 
 /// Atomic Token Bucket Rate Limiter
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Debug)]
 
 pub struct AtomicTokenBucket {
     pub max_tps: u64,
@@ -123,7 +123,7 @@ impl AtomicTokenBucket {
     }
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct GroupPolicy {
     pub allowed_namespaces: Vec<String>,
     pub blocked_namespaces: Vec<String>,
