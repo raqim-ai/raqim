@@ -88,18 +88,6 @@ pub struct OpLog {
     pub network_responses: Vec<String>,
 }
 
-#[derive(Archive, Serialize, Deserialize, Debug, Clone)]
-#[rkyv(compare(PartialEq))]
-pub struct A2AEnvelope {
-    pub sender_id: [u8; 16],
-    pub sender_public_key: [u8; 32],
-    pub target_capability: String,
-    pub payload: Vec<u8>,
-    pub signature: [u8; 64],
-    pub sender_capability_cert: Vec<u8>,
-    pub timestamp: i64,
-}
-
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 pub struct IngressEnvelope {
     pub intent_path: String,

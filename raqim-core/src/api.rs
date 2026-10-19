@@ -14,10 +14,9 @@ use tower_http::catch_panic::CatchPanicLayer;
 
 use axum::body::Bytes;
 use axum::response::sse::{Event, KeepAlive, Sse};
-use dashmap::DashMap;
 use ed25519_dalek::{Signer, SigningKey};
 use futures_util::stream::Stream;
-use futures_util::{stream::StreamExt, SinkExt};
+use futures_util::stream::StreamExt;
 use serde_json::{json, Value};
 use std::convert::Infallible;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -28,9 +27,6 @@ use serde::{Deserialize, Serialize};
 use std::result::Result::{Err, Ok};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::broadcast::Sender;
-use tokio::sync::{mpsc, oneshot};
-use tokio::time::{timeout, Duration};
-use uuid::Uuid;
 
 use crate::cold_store::ColdStore;
 use crate::compactor::WalCompactor;
@@ -44,7 +40,6 @@ use crate::{
     config::RaqimConfig,
     effect_store::{EffectStore, UnifiedSearchResult},
     policy::PolicyEngine,
-    A2AEnvelope,
 };
 use crate::{execute_raqim_cascade, AgentState, IngressEnvelope, RecentThought, SystemEvent};
 
@@ -666,8 +661,6 @@ pub async fn http_ingress_endpoint(
     let task_event = state.event_tx.clone();
     let task_axon = state.axon.clone();
     let task_wal = state.wal.clone();
-    let task_net = state.global_net.clone();
-    let task_brain = state.brain.clone();
 
     let body_clone = body.clone();
 
@@ -686,8 +679,6 @@ pub async fn http_ingress_endpoint(
             &state,
             task_axon,
             task_wal,
-            task_brain,
-            task_net,
             task_event,
             Vec::new(),
             Vec::new(),
@@ -952,56 +943,16 @@ pub async fn cluster_info_endpoint(
         .map(|m| m.len())
         .unwrap_or(0);
 
-    let node_id = state.global_net.os_node_id.clone();
-
     let highest_tx = state.axon.get_latest_tx_id();
 
-    let cumulative_ops: usize = state.brain.shards.iter().map(|e| e.value().len_ops()).sum();
-
-    let total_shards = state.brain.shards.len();
-
     let payload = json!({
-        "node_id": node_id,
         "highest_tx_id": format!("0x{:032x}", highest_tx),
         "wal_bytes": wal_size,
         "wal_size_mb": (wal_size as f64 ) / (1024.0 * 1024.0),
         "buffer_load": pending_wal_items,
-        "allocated_shards": total_shards,
-        "cumulative_ops": cumulative_ops,
-        "active_timelines": state.brain.shards.len(),
     });
 
     Ok(Json(payload))
-}
-
-/// Maps to  `raqim cluster topology`
-pub async fn cluster_topology_endpoint(
-    _auth: ValidatedIdentity,
-    State(state): State<ApiState>,
-) -> Result<Json<Value>, ApiError> {
-    let mut shards = Vec::new();
-
-    // Iterate through the DashMap of the active swarmbrain document
-    for entry in state.brain.shards.iter() {
-        let namespace = entry.key();
-        let brain = entry.value();
-
-        let active_timelines = brain.active_timeline_count();
-        let ops_count = brain.len_ops();
-
-        // Fetch agents associated with this namespace
-        let attached_agents: Vec<String> = state
-            .swarm_registry
-            .active_agents
-            .iter()
-            .filter(|a| a.namespace == *namespace)
-            .map(|a| a.key().clone())
-            .collect();
-
-        shards.push(json!({ "namespace": namespace, "active_timelines": active_timelines, "total_operations": ops_count,  "attached_agents": attached_agents, "status": "ACTIVE"  }));
-    }
-
-    Ok(Json(json!(shards)))
 }
 
 pub async fn cluster_enclaves_endpoint(
@@ -1021,20 +972,6 @@ pub async fn cluster_enclaves_endpoint(
             "last_seen_ts": agent.last_seen_ts
 
         }));
-    }
-
-    // If no live agents are connected, populate from indexed shard namespace
-    if enclaves.is_empty() {
-        for (i, entry) in state.brain.shards.iter().enumerate() {
-            let namespace = entry.key();
-            enclaves.push(json!({
-                "alias": format!("agent_shard_{:02}", i),
-                "identity_hex": format!("0x{:032x}", i + 1),
-                "home_shard": namespace,
-                "status": "IDLE_IN_RAM",
-                "last_seen_ts": 0
-            }));
-        }
     }
 
     Ok(Json(json!(enclaves)))
