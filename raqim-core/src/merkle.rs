@@ -1,6 +1,6 @@
 use crate::{
     witness::{AnchoredRootWitness, WormWitnessEngine},
-    OpLog,
+    ExecutionRecord,
 };
 use blake3::Hasher;
 use dashmap::DashMap;
@@ -36,6 +36,7 @@ pub struct InclusionProof {
     pub parent_batch_root_hex: String,
     pub batch_id: u64,
     pub is_active_buffer: bool,
+    pub payload_hash_hex: String,
 }
 
 /// Thread-safe active workspace buffer for a single namespace
@@ -43,7 +44,7 @@ pub struct ActiveTreeBuffer {
     pub current_batch_id: u64,
     pub parent_batch_root: [u8; 32],
     pub accumulated_leaves: Vec<[u8; 32]>,
-    pub accumulated_logs: Vec<OpLog>,
+    pub accumulated_records: Vec<ExecutionRecord>,
     pub accumulated_tx_ids: Vec<u128>,
 }
 
@@ -70,8 +71,16 @@ impl MerkleEngine {
         }
     }
 
-    /// Ingest a raw thought, cryptographically seals its position ans triggers automatic Markle Tree crystallization when chunk capacity hits 1,024
-    pub fn seal_record(&self, mut log: OpLog) -> (OpLog, Option<MarkleBatch>) {
+    /// Computed discrete leaf hash from `payload_hash` and `agent_id`.
+    pub fn compute_leaf_hash(payload_hash: &[u8; 32], agent_id: &[u8; 16]) -> [u8; 32] {
+        let mut leaf_hasher = Hasher::new_derive_key("raqim.merkle.v1.leaf");
+        leaf_hasher.update(payload_hash);
+        leaf_hasher.update(agent_id);
+        leaf_hasher.finalize().into()
+    }
+
+    /// Cryptographically seals an `ExecutionRecord` into the namespace's Merkle tree. Triggers automatic batch crystallization when leaf capacity reaches 1,024
+    pub fn seal_record(&self, mut log: ExecutionRecord) -> (ExecutionRecord, Option<MarkleBatch>) {
         let namespace = log.state.namespace.clone();
 
         // Compute the discrete leaf cryptographic hash using domain separation
