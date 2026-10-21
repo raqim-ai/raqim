@@ -23,10 +23,10 @@ pub mod lancedb_store;
 use blake3::Hasher;
 use rkyv::{Archive, Deserialize, Serialize};
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
-use std::format;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::{eprintln, format};
 use tokio::sync::broadcast::Sender;
 
 use crate::merkle::MarkleBatch;
@@ -136,29 +136,6 @@ impl ExecutionRecord {
     }
 }
 
-/// Wire-framing structures used by the raw TCP ingress (`raqim-py` Py03 extension)
-#[derive(
-    Archive, Deserialize, Serialize, Debug, PartialEq, Clone, SerdeDeserialize, SerdeSerialize,
-)]
-pub enum AgentStatus {
-    Idle,
-    Reasoning,
-    ToolExecution,
-    Halted,
-}
-
-#[derive(
-    Archive, Deserialize, Serialize, Debug, PartialEq, Clone, SerdeDeserialize, SerdeSerialize,
-)]
-pub struct AgentState {
-    pub agent_id: Option<[u8; 16]>,
-    pub tx_id: u128,
-    pub timestamp: i64,
-    pub status: AgentStatus,
-    pub text: String,
-    pub namespace: String,
-}
-
 #[derive(Debug, PartialEq, Clone, SerdeDeserialize, SerdeSerialize)]
 pub struct RecentThought {
     pub tx_id: String,
@@ -170,16 +147,17 @@ pub struct RecentThought {
     pub timestamp: i64,
 }
 
+/// Signed wire evellope for high-throughput binary TCP / HTTP ingress
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 pub struct IngressEnvelope {
     pub intent_path: String,
     pub public_key: [u8; 32],
     pub signature: [u8; 64],
-    pub state_bytes: Vec<u8>,
+    pub record_bytes: Vec<u8>,
     pub capability_cert: Vec<u8>,
 }
 
-/// The Unique Lookup Key computed for in-memory RAM Effect matching
+/// The Unique Lookup Key computed for in-memory RAM Effect matching & In-Doubt tracking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EffectKey(pub [u8; 32]);
 
@@ -202,64 +180,70 @@ pub fn generate_uuidv7_txid() -> u128 {
     uuid::Uuid::now_v7().as_u128()
 }
 
-/// Ingests a validated zero-copy TCP "AgentState" frame into thte unified `ExecutionRecord` pipeine.  
+/// Zero-copy TCP ingress cascade: validates and seals an incoming `Archived<Execution>`
 pub async fn execute_raqim_cascade(
-    archive_state: &rkyv::Archived<AgentState>, // True Zero Copy
-    axon: Arc<MerkleEngine>,
+    archived_rec: &rkyv::Archived<ExecutionRecord>,
+    merkle: Arc<MerkleEngine>,
     wal: Arc<WalEngine>,
     tx: Sender<SystemEvent>,
 ) -> Result<u128, anyhow::Error> {
     // Security: Validate or generate agent_id
     let empty_id = [0u8; 16];
 
-    let final_agent_id = match archive_state.agent_id.as_ref() {
-        Some(id) if id.as_slice() != empty_id => id.as_slice().try_into().unwrap(),
-        _ => {
-            eprintln!("[SECURITY FATAL] Unsigned/Anonymous payload hit the cascade. Dropped.");
-            return Err(anyhow::anyhow!("Agent ID is required to merge thought"));
-        }
-    };
+    let agent_id: [u8; 16] = archived_rec
+        .agent_id
+        .as_slice()
+        .try_into()
+        .unwrap_or(empty_id);
+    if agent_id == empty_id {
+        eprintln!("[SECURITY FATAL] Anonymous Execution hit the cascade. Dropped.");
+        return Err(anyhow::anyhow!("Non-zero Agent ID is required"));
+    }
 
-    let agent_hex = hex::encode(final_agent_id);
-    let namespace = archive_state.namespace.as_str().to_string();
-    let text = archive_state.text.as_str().to_string();
-    let payload_bytes = text.as_bytes().to_vec();
+    let agent_hex = hex::encode(agent_id);
+    let namespace = archived_rec.namespace.as_str().to_string();
+    let step_ordinal = archived_rec.step_ordinal.to_native();
+    let call_signature_hash: [u8; 32] = archived_rec
+        .call_signature_hash
+        .as_slice()
+        .try_into()
+        .unwrap_or([0u8; 32]);
+    let payload_bytes = archived_rec.payload_bytes.as_slice().to_vec();
 
-    let stage = match archive_state.status {
-        rkyv::Archived::<AgentStatus>::Halted => ExecutionStage::Denied,
-        rkyv::Archived::<AgentStatus>::ToolExecution => ExecutionStage::Outcome,
-        _ => ExecutionStage::System,
+    let stage = match archived_rec.stage {
+        rkyv::Archived::<ExecutionStage>::Intent => ExecutionStage::Intent,
+        rkyv::Archived::<ExecutionStage>::Outcome => ExecutionStage::Outcome,
+        rkyv::Archived::<ExecutionStage>::Denied => ExecutionStage::Denied,
+        rkyv::Archived::<ExecutionStage>::System => ExecutionStage::System,
     };
 
     let unsealed_record = ExecutionRecord::new(
-        final_agent_id,
-        0,
+        agent_id,
+        step_ordinal,
         payload_bytes,
         stage,
         namespace.clone(),
-        [0u8; 32],
+        call_signature_hash,
     );
+    let tx_id = unsealed_record.tx_id;
+    let text_preview = unsealed_record.payload_text_preview();
 
-    // 3. Cryptographically Seal (Markle DAG)
-    let (sealed_log, optional_markle_batch) = axon.seal_thought(raw_log);
+    // 1. Cryptographically seal into BLAKE3 Merkle DAG
+    let (sealed_record, optional_batch) = merkle.seal_record(unsealed_record);
 
-    if let Some(batch) = optional_markle_batch {
+    if let Some(batch) = optional_batch {
         let _ = tx.send(SystemEvent::MarkleBatchCrystallized { batch });
     }
 
-    // 4. Fire to wal (Durability)
-    wal.append(sealed_log.clone())
+    wal.append(sealed_record)
         .await
         .map_err(|e| anyhow::anyhow!("Durability Breach / WAL Saturated: {}", e))?;
 
-    // Convert u128 to hex string for human-readable sse event
-    let tx_id_hex = format!("{:032x}", tx_id);
-
     let _ = tx.send(SystemEvent::ThoughtCommitted {
-        agent_id: agent_hex.clone(),
-        tx_id: tx_id_hex,
-        namespace: enriched_state.clone().namespace,
-        text: enriched_state.clone().text,
+        agent_id: agent_hex,
+        tx_id: format!("{:032x}", tx_id),
+        namespace,
+        text: text_preview,
     });
 
     Ok(tx_id)

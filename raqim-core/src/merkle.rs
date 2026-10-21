@@ -71,7 +71,7 @@ impl MerkleEngine {
     }
 
     /// Ingest a raw thought, cryptographically seals its position ans triggers automatic Markle Tree crystallization when chunk capacity hits 1,024
-    pub fn seal_thought(&self, mut log: OpLog) -> (OpLog, Option<MarkleBatch>) {
+    pub fn seal_record(&self, mut log: OpLog) -> (OpLog, Option<MarkleBatch>) {
         let namespace = log.state.namespace.clone();
 
         // Compute the discrete leaf cryptographic hash using domain separation
