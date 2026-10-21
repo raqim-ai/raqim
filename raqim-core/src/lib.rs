@@ -33,30 +33,56 @@ use crate::merkle::MarkleBatch;
 use crate::policy::QuarantineRecord;
 use crate::{merkle::MerkleEngine, wal::WalEngine};
 
-// The fundamental unit of our Flight Recorder.
+/// Lifecycle stage of an agent action at the control/gateway boundary
 #[derive(
-    Archive, Deserialize, Serialize, Debug, PartialEq, Clone, SerdeDeserialize, SerdeSerialize,
+    Archive,
+    Deserialize,
+    Serialize,
+    Debug,
+    PartialEq,
+    Eq,
+    Clone,
+    Copy,
+    SerdeDeserialize,
+    SerdeSerialize,
 )]
-pub struct AgentState {
-    pub agent_id: Option<[u8; 16]>,
-    pub transaction_id: u128,
-
-    pub timestamp: i64,
-    pub status: AgentStatus,
-
-    pub text: String,
-    pub namespace: String,
+pub enum ExecutionStage {
+    /// Pre-execution intent logged to WAL *before* upstream API or tool runs.
+    Intent,
+    /// Post-execution outcome sealed with output payload and Merkle leaf hash.
+    Outcome,
+    /// Action rejected pre-execution by PolicyEngine
+    Denied,
+    /// Lifecycle / system events (e.g., agent boot handshake)
+    System,
 }
 
-// The current execution state of the agent in the swarm.
+/// The Unified Crptographic Flight Record. Supports NDPA/GDPR Crypto-Shredding & Erasure without breaking Merkle proofs.
 #[derive(
-    Archive, Deserialize, Serialize, Debug, PartialEq, Clone, SerdeDeserialize, SerdeSerialize,
+    Archive,
+    Deserialize,
+    Serialize,
+    Debug,
+    PartialEq,
+    Eq,
+    Clone,
+    Copy,
+    SerdeDeserialize,
+    SerdeSerialize,
 )]
-pub enum AgentStatus {
-    Idle,
-    Reasoning,     // Waiting on LLM token generation
-    ToolExecution, // Executing an external API or tool
-    Halted,        // Interdicted by the Aegis security layer
+pub struct ExecutionRecord {
+    pub tx_id: u128,
+    pub agent_id: [u8; 16],
+    pub step_ordinal: u64,
+    pub timestamp: i64, // ms
+    pub namespace: String,
+    /// Current stage in the execution state machine
+    pub stage: ExecutionStage,
+    pub call_signature_hash: [u8; 32],
+    pub payload_hash: [u8; 32],
+    pub payload_bytes: Vec<u8>,
+    pub previous_root: [u8; 32],
+    pub leaf_hash: [u8; 32],
 }
 
 #[derive(Debug, PartialEq, Clone, SerdeDeserialize, SerdeSerialize)]
@@ -70,22 +96,6 @@ pub struct RecentThought {
     pub timestamp: i64,
 }
 
-// Every thought and action is an Op.
-#[derive(
-    Archive, Deserialize, Serialize, Debug, PartialEq, Clone, SerdeDeserialize, SerdeSerialize,
-)]
-pub struct OpLog {
-    pub agent_id: [u8; 16],
-    pub state: AgentState,
-
-    pub previous_hash: [u8; 32],
-    pub current_hash: [u8; 32],
-
-    // The deterministic flight recorder
-    pub entropy_seeds: Vec<u64>,
-    pub network_responses: Vec<String>,
-}
-
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 pub struct IngressEnvelope {
     pub intent_path: String,
@@ -93,23 +103,6 @@ pub struct IngressEnvelope {
     pub signature: [u8; 64],
     pub state_bytes: Vec<u8>,
     pub capability_cert: Vec<u8>,
-}
-
-/// The Cryptographic Boundary Representation of a Non-Deterministoc Side-Effect
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, serde::Serialize, serde::Deserialize)]
-pub struct EffectRecord {
-    pub agent_id: [u8; 16],
-    pub step_ordinal: u64,
-
-    /// 32-byte Blake3 hash of the input signature (Prompt text + model name + parameters)
-    pub call_signature_hash: [u8; 32],
-
-    pub output_payload: Vec<u8>,
-
-    /// 128-bit transaction ID binding this effect to the Merkle DAG
-    pub transaction_id: u128,
-
-    pub timestamp: i64,
 }
 
 /// The Unique Lookup Key computed fpr in-memory RAM Effect matching

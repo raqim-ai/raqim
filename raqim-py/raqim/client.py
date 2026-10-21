@@ -351,7 +351,7 @@ class RaqimClient:
                         target_ns = f"phantom_{namespace}_{self.agent_hex}_step{step}"
 
                     # Pre-flight cryptographic audit before execution
-                    await self._preflight_effect(step, call_sig_hex, target_ns)
+                    await self._authorize_intent(step, call_sig_hex, target_ns)
 
                     # Live Execution & accumulation
                     accumulated_chunks: List[Any] = []
@@ -397,7 +397,7 @@ class RaqimClient:
                         target_ns = f"phantom_{namespace}_{self.agent_hex}_step{step}"
                     
                     # Pre-flight cryptographic audit before execution
-                    await self._preflight_effect(step, call_sig_hex, target_ns)
+                    await self._authorize_intent(step, call_sig_hex, target_ns)
 
                     # Live execution
                     result = await fn(*args, **kwargs) 
@@ -448,7 +448,7 @@ class RaqimClient:
                         
                         # Pre-flight check before sync function runs inside async loop
                         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                            pool.submit(lambda: asyncio.run(self._preflight_effect(step, call_sig_hex, target_ns))).result()
+                            pool.submit(lambda: asyncio.run(self._authorize_intent(step, call_sig_hex, target_ns))).result()
 
                         result = fn(*args, **kwargs)
                         
@@ -477,7 +477,7 @@ class RaqimClient:
                             target_ns = f"phantom_{namespace}_{self.agent_hex}_step{step}"
                         
                         # Pre-flight check before sync function runs in sync context
-                        loop.run_until_complete(self._preflight_effect(step, call_sig_hex, target_ns))
+                        loop.run_until_complete(self._authorize_intent(step, call_sig_hex, target_ns))
 
                         result = fn(*args, **kwargs)
                         
@@ -497,7 +497,7 @@ class RaqimClient:
     observe_agent = trace
     flight_recorder = trace
         
-    async def _preflight_effect(self, step_ordinal: int, call_signature_hex: str, namespace: str) -> None:
+    async def _authorize_intent(self, step_ordinal: int, call_signature_hex: str, namespace: str) -> None:
         """
         Executes cryptographic zero-trust pre-flight audit before any tool executes.
         Validates timestamp freshness (anti-replay), Ed25519 signature, CAS token bucket,
