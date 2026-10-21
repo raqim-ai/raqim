@@ -57,18 +57,20 @@ pub enum ExecutionStage {
     System,
 }
 
+impl ExecutionStage {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ExecutionStage::Intent => "INTENT",
+            ExecutionStage::Outcome => "OUTCOME",
+            ExecutionStage::Denied => "DENIED",
+            ExecutionStage::System => "SYSTEMS",
+        }
+    }
+}
+
 /// The Unified Crptographic Flight Record. Supports NDPA/GDPR Crypto-Shredding & Erasure without breaking Merkle proofs.
 #[derive(
-    Archive,
-    Deserialize,
-    Serialize,
-    Debug,
-    PartialEq,
-    Eq,
-    Clone,
-    Copy,
-    SerdeDeserialize,
-    SerdeSerialize,
+    Archive, Deserialize, Serialize, Debug, PartialEq, Eq, Clone, SerdeDeserialize, SerdeSerialize,
 )]
 pub struct ExecutionRecord {
     pub tx_id: u128,
