@@ -87,6 +87,78 @@ pub struct ExecutionRecord {
     pub leaf_hash: [u8; 32],
 }
 
+impl ExecutionRecord {
+    /// computes the domain-separated 32-byte blake3 digest of a payload slice.
+    pub fn compute_payload_hash(payload_bytes: &[u8]) -> [u8; 32] {
+        let mut hasher = Hasher::new_derive_key("raqim.payload.v1");
+        hasher.update(payload_bytes);
+        hasher.finalize().into()
+    }
+
+    pub fn new(
+        agent_id: [u8; 16],
+        step_ordinal: u64,
+        payload_bytes: Vec<u8>,
+        stage: ExecutionStage,
+        namespace: String,
+        call_signature_hash: [u8; 32],
+    ) -> Self {
+        let tx_id = generate_uuidv7_txid();
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        let payload_hash = Self::compute_payload_hash(&payload_bytes);
+
+        Self {
+            tx_id,
+            agent_id,
+            timestamp,
+            namespace,
+            step_ordinal,
+            stage,
+            call_signature_hash,
+            payload_hash,
+            payload_bytes,
+            previous_root: [0u8; 32],
+            leaf_hash: [0u8; 32],
+        }
+    }
+
+    /// Helper to display payload as UTF-8 text preview
+    pub fn payload_text_preview(&self) -> String {
+        if self.payload_bytes.is_empty() && self.payload_hash != Self::compute_payload_hash(&[]) {
+            "[REDACTED_NDPA]".to_string()
+        } else {
+            String::from_utf8(self.payload_bytes.clone())
+                .unwrap_or_else(|_| format!("[BINARY_PAYLOAD: {} bytes]", self.payload_bytes.len()))
+        }
+    }
+}
+
+/// Wire-framing structures used by the raw TCP ingress (`raqim-py` Py03 extension)
+#[derive(
+    Archive, Deserialize, Serialize, Debug, PartialEq, Clone, SerdeDeserialize, SerdeSerialize,
+)]
+pub enum AgentStatus {
+    Idle,
+    Reasoning,
+    ToolExecution,
+    Halted,
+}
+
+#[derive(
+    Archive, Deserialize, Serialize, Debug, PartialEq, Clone, SerdeDeserialize, SerdeSerialize,
+)]
+pub struct AgentState {
+    pub agent_id: Option<[u8; 16]>,
+    pub tx_id: u128,
+    pub timestamp: i64,
+    pub status: AgentStatus,
+    pub text: String,
+    pub namespace: String,
+}
+
 #[derive(Debug, PartialEq, Clone, SerdeDeserialize, SerdeSerialize)]
 pub struct RecentThought {
     pub tx_id: String,
@@ -107,7 +179,7 @@ pub struct IngressEnvelope {
     pub capability_cert: Vec<u8>,
 }
 
-/// The Unique Lookup Key computed fpr in-memory RAM Effect matching
+/// The Unique Lookup Key computed for in-memory RAM Effect matching
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EffectKey(pub [u8; 32]);
 
@@ -130,18 +202,16 @@ pub fn generate_uuidv7_txid() -> u128 {
     uuid::Uuid::now_v7().as_u128()
 }
 
+/// Ingests a validated zero-copy TCP "AgentState" frame into thte unified `ExecutionRecord` pipeine.  
 pub async fn execute_raqim_cascade(
     archive_state: &rkyv::Archived<AgentState>, // True Zero Copy
     axon: Arc<MerkleEngine>,
     wal: Arc<WalEngine>,
     tx: Sender<SystemEvent>,
-    seeds: Vec<u64>,
-    responses: Vec<String>,
 ) -> Result<u128, anyhow::Error> {
     // Security: Validate or generate agent_id
     let empty_id = [0u8; 16];
 
-    // Safely extract from ArrchiveOption using .as_ref()
     let final_agent_id = match archive_state.agent_id.as_ref() {
         Some(id) if id.as_slice() != empty_id => id.as_slice().try_into().unwrap(),
         _ => {
@@ -151,38 +221,24 @@ pub async fn execute_raqim_cascade(
     };
 
     let agent_hex = hex::encode(final_agent_id);
+    let namespace = archive_state.namespace.as_str().to_string();
+    let text = archive_state.text.as_str().to_string();
+    let payload_bytes = text.as_bytes().to_vec();
 
-    // Generate globally uniique, time-ordered 128-bit UUIDv7
-    let tx_id = generate_uuidv7_txid();
-
-    let enriched_state = AgentState {
-        agent_id: Some(final_agent_id),
-        namespace: archive_state.namespace.to_string(),
-        transaction_id: tx_id,
-
-        timestamp: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64,
-        status: match archive_state.status {
-            rkyv::Archived::<AgentStatus>::Idle => AgentStatus::Idle,
-            rkyv::Archived::<AgentStatus>::Halted => AgentStatus::Halted,
-            rkyv::Archived::<AgentStatus>::ToolExecution => AgentStatus::ToolExecution,
-            rkyv::Archived::<AgentStatus>::Reasoning => AgentStatus::Reasoning,
-        },
-        text: archive_state.text.as_str().to_string(), // Extract text from pointer
+    let stage = match archive_state.status {
+        rkyv::Archived::<AgentStatus>::Halted => ExecutionStage::Denied,
+        rkyv::Archived::<AgentStatus>::ToolExecution => ExecutionStage::Outcome,
+        _ => ExecutionStage::System,
     };
 
-    // Contruct the raw log
-    let raw_log = OpLog {
-        agent_id: final_agent_id,
-        state: enriched_state.clone(),
-        previous_hash: [0; 32],
-        current_hash: [0; 32],
-
-        entropy_seeds: seeds,
-        network_responses: responses,
-    };
+    let unsealed_record = ExecutionRecord::new(
+        final_agent_id,
+        0,
+        payload_bytes,
+        stage,
+        namespace.clone(),
+        [0u8; 32],
+    );
 
     // 3. Cryptographically Seal (Markle DAG)
     let (sealed_log, optional_markle_batch) = axon.seal_thought(raw_log);
@@ -258,31 +314,4 @@ pub enum SystemEvent {
     MarkleBatchCrystallized {
         batch: MarkleBatch,
     },
-}
-
-#[derive(Debug, Clone)]
-pub struct RuntimeSecurityFlags {
-    pub allow_global_a2a: Arc<AtomicBool>,
-    pub allow_global_crdt: Arc<AtomicBool>,
-    pub allow_global_aegis: Arc<AtomicBool>,
-    pub allow_time_travel: Arc<AtomicBool>,
-    pub tenant_id: Arc<RwLock<String>>,
-}
-
-impl RuntimeSecurityFlags {
-    pub fn new() -> Self {
-        RuntimeSecurityFlags {
-            allow_global_a2a: Arc::new(AtomicBool::new(true)),
-            allow_global_aegis: Arc::new(AtomicBool::new(true)),
-            allow_global_crdt: Arc::new(AtomicBool::new(true)),
-            allow_time_travel: Arc::new(AtomicBool::new(true)),
-            tenant_id: Arc::new(RwLock::new("local_standalone".to_string())),
-        }
-    }
-}
-
-impl Default for RuntimeSecurityFlags {
-    fn default() -> Self {
-        Self::new()
-    }
 }
