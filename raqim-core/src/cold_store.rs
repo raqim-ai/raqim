@@ -1,5 +1,5 @@
 use crate::api::TimelineNode;
-use crate::{AgentStatus, OpLog, SystemEvent};
+use crate::{ExecutionRecord, SystemEvent};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use rkyv::{to_bytes, Archive};
@@ -27,8 +27,8 @@ pub struct FramePointer {
 /// this trait so the kernel never blocks on ML interference during compaction
 #[async_trait]
 pub trait ColdStore: Send + Sync {
-    /// Durably archives a slice of the compacted oplog from a rotated WAL seg
-    async fn archive_batch(&self, logs: &[OpLog]) -> Result<usize, anyhow::Error>;
+    /// Durably archives a slice of the compacted record from a rotated WAL seg
+    async fn archive_batch(&self, logs: &[ExecutionRecord]) -> Result<usize, anyhow::Error>;
 
     /// Reconstruct the chronological timeline metadata for a specific agent
     async fn fetch_historical_timeline(
@@ -36,16 +36,19 @@ pub trait ColdStore: Send + Sync {
         agent_hex: &str,
     ) -> Result<Vec<TimelineNode>, anyhow::Error>;
 
-    /// Fetches full historical Oplog for an agent within a trasaction ID window [min_tx, max_tx].
-    async fn fetch_historical_oplogs(
+    /// Fetches full historical records for an agent within a trasaction ID window [min_tx, max_tx].
+    async fn fetch_historical_records(
         &self,
         agent_hex: &str,
         min_tx_id: u128,
         max_tx_id: u128,
-    ) -> Result<Vec<OpLog>, anyhow::Error>;
+    ) -> Result<Vec<ExecutionRecord>, anyhow::Error>;
 
     /// Point-Lookup of a historical transaction by its UUIDv7 TxID.
-    async fn fetch_by_txid(&self, target_tx_id: u128) -> Result<Option<OpLog>, anyhow::Error>;
+    async fn fetch_by_txid(
+        &self,
+        target_tx_id: u128,
+    ) -> Result<Option<ExecutionRecord>, anyhow::Error>;
 
     /// Appends a system/security audit event to the cold forensic ledger
     async fn log_system_event(&self, event: &SystemEvent);
@@ -173,18 +176,18 @@ impl SegmentColdStore {
                         aligned_buf.clear();
                         aligned_buf.extend_from_slice(payload_slice);
 
-                        if let Ok(archived_log) = rkyv::access::<
-                            <OpLog as Archive>::Archived,
+                        if let Ok(archived_record) = rkyv::access::<
+                            <ExecutionRecord as Archive>::Archived,
                             rkyv::rancor::Error,
                         >(&aligned_buf)
                         {
-                            let tx_id = archived_log.state.transaction_id.to_native();
-                            let agent_id: [u8; 16] = archived_log
+                            let tx_id = archived_record.tx_id.to_native();
+                            let agent_id: [u8; 16] = archived_record
                                 .agent_id
                                 .as_slice()
                                 .try_into()
                                 .unwrap_or([0; 16]);
-                            let ns = archived_log.state.namespace.as_str().to_string();
+                            let ns = archived_record.namespace.as_str().to_string();
 
                             let ptr = FramePointer {
                                 tx_id,
@@ -213,8 +216,8 @@ impl SegmentColdStore {
     }
 
     /// Performs an O(1) disk seek to `ptr.offset`, reads exactly `ptr.total_frame_bytes`,
-    /// verifies the hardware CRC32 checksum, and deserializes that single OpLog.
-    fn read_single_frame_at(&self, ptr: FramePointer) -> Result<OpLog, anyhow::Error> {
+    /// verifies the hardware CRC32 checksum, and deserializes that single ExecutionRecord.
+    fn read_single_frame_at(&self, ptr: FramePointer) -> Result<ExecutionRecord, anyhow::Error> {
         let mut file = File::open(&self.history_file_path)?;
         file.seek(SeekFrom::Start(ptr.offset))?;
 
@@ -243,11 +246,12 @@ impl SegmentColdStore {
         let mut aligned_buf = rkyv::util::AlignedVec::<16>::with_capacity(payload_len);
         aligned_buf.extend_from_slice(payload_slice);
 
-        let archived =
-            rkyv::access::<<OpLog as Archive>::Archived, rkyv::rancor::Error>(&aligned_buf)
-                .map_err(|e| anyhow::anyhow!("rkyv validation error: {}", e))?;
+        let archived = rkyv::access::<<ExecutionRecord as Archive>::Archived, rkyv::rancor::Error>(
+            &aligned_buf,
+        )
+        .map_err(|e| anyhow::anyhow!("rkyv validation error: {}", e))?;
 
-        let owned = rkyv::deserialize::<OpLog, rkyv::rancor::Error>(archived)
+        let owned = rkyv::deserialize::<ExecutionRecord, rkyv::rancor::Error>(archived)
             .map_err(|e| anyhow::anyhow!("rkyv deserialize error: {}", e))?;
 
         Ok(owned)
@@ -256,8 +260,8 @@ impl SegmentColdStore {
 
 #[async_trait]
 impl ColdStore for SegmentColdStore {
-    async fn archive_batch(&self, logs: &[OpLog]) -> Result<usize, anyhow::Error> {
-        if logs.is_empty() {
+    async fn archive_batch(&self, records: &[ExecutionRecord]) -> Result<usize, anyhow::Error> {
+        if records.is_empty() {
             return Ok(0);
         }
 
@@ -276,14 +280,14 @@ impl ColdStore for SegmentColdStore {
             .open(&self.index_file_path)?;
 
         let mut current_offset = seg_file.metadata()?.len();
-        let mut seg_write_buf = Vec::with_capacity(logs.len() * 256);
-        let mut idx_write_buf = Vec::with_capacity(logs.len() * 44);
-        let mut new_pointers = Vec::with_capacity(logs.len());
+        let mut seg_write_buf = Vec::with_capacity(records.len() * 256);
+        let mut idx_write_buf = Vec::with_capacity(records.len() * 44);
+        let mut new_pointers = Vec::with_capacity(records.len());
 
-        // Write each OpLog as an individually addressable, CRC32-verified frame
+        // Write each ExecutionRecord as an individually addressable, CRC32-verified frame
         // so point lookups only read a few hundred bytes instead of a massive batch!
-        for log in logs {
-            let payload_bytes = to_bytes::<rkyv::rancor::Error>(log)
+        for rec in records {
+            let payload_bytes = to_bytes::<rkyv::rancor::Error>(rec)
                 .map_err(|e| anyhow::anyhow!("rkyv serialization failed: {}", e))?;
 
             let payload_len = payload_bytes.len() as u32;
@@ -294,9 +298,9 @@ impl ColdStore for SegmentColdStore {
             seg_write_buf.extend_from_slice(&crc.to_le_bytes());
             seg_write_buf.extend_from_slice(&payload_bytes);
 
-            let tx_id = log.state.transaction_id;
+            let tx_id = rec.tx_id;
             idx_write_buf.extend_from_slice(&tx_id.to_le_bytes());
-            idx_write_buf.extend_from_slice(&log.agent_id);
+            idx_write_buf.extend_from_slice(&rec.agent_id);
             idx_write_buf.extend_from_slice(&current_offset.to_le_bytes());
             idx_write_buf.extend_from_slice(&frame_total.to_le_bytes());
 
@@ -305,7 +309,7 @@ impl ColdStore for SegmentColdStore {
                 offset: current_offset,
                 total_frame_bytes: frame_total,
             };
-            new_pointers.push((log.agent_id, log.state.namespace.clone(), ptr));
+            new_pointers.push((rec.agent_id, rec.namespace.clone(), ptr));
 
             current_offset += frame_total as u64;
         }
@@ -324,7 +328,7 @@ impl ColdStore for SegmentColdStore {
             *self.namespace_counts.entry(ns).or_insert(0) += 1;
         }
 
-        let count = logs.len();
+        let count = records.len();
         self.cached_record_count.fetch_add(count, Ordering::Relaxed);
         Ok(count)
     }
@@ -346,30 +350,24 @@ impl ColdStore for SegmentColdStore {
 
         let mut nodes = Vec::with_capacity(pointers.len());
         for &ptr in pointers.value() {
-            if let Ok(log) = self.read_single_frame_at(ptr) {
-                let status_str = match log.state.status {
-                    AgentStatus::Idle => "IDLE",
-                    AgentStatus::Reasoning => "REASONING",
-                    AgentStatus::Halted => "HALTED",
-                    AgentStatus::ToolExecution => "TOOL_EXEC",
-                };
+            if let Ok(rec) = self.read_single_frame_at(ptr) {
                 nodes.push(TimelineNode {
-                    tx_id: log.state.transaction_id,
-                    timestamp: log.state.timestamp.to_string(),
-                    agent_status: status_str.to_string(),
-                    payload_preview: log.state.text,
+                    tx_id: rec.tx_id,
+                    timestamp: rec.timestamp.to_string(),
+                    agent_status: rec.stage.as_str().to_string(),
+                    payload_preview: rec.payload_text_preview(),
                 });
             }
         }
         Ok(nodes)
     }
 
-    async fn fetch_historical_oplogs(
+    async fn fetch_historical_records(
         &self,
         agent_hex: &str,
         min_tx_id: u128,
         max_tx_id: u128,
-    ) -> Result<Vec<OpLog>, anyhow::Error> {
+    ) -> Result<Vec<ExecutionRecord>, anyhow::Error> {
         let Ok(target_vec) = hex::decode(agent_hex) else {
             return Ok(Vec::new());
         };
@@ -381,25 +379,28 @@ impl ColdStore for SegmentColdStore {
             return Ok(Vec::new());
         };
 
-        let mut logs = Vec::new();
+        let mut records = Vec::new();
         for &ptr in pointers.value() {
             if ptr.tx_id >= min_tx_id && ptr.tx_id <= max_tx_id {
-                if let Ok(log) = self.read_single_frame_at(ptr) {
-                    logs.push(log);
+                if let Ok(rec) = self.read_single_frame_at(ptr) {
+                    records.push(rec);
                 }
             }
         }
-        Ok(logs)
+        Ok(records)
     }
 
-    async fn fetch_by_txid(&self, target_tx_id: u128) -> Result<Option<OpLog>, anyhow::Error> {
+    async fn fetch_by_txid(
+        &self,
+        target_tx_id: u128,
+    ) -> Result<Option<ExecutionRecord>, anyhow::Error> {
         // O(1) RAM hash lookup -> single disk seek!
         let Some(ptr_ref) = self.tx_index.get(&target_tx_id) else {
             return Ok(None);
         };
         let ptr = *ptr_ref.value();
-        let log = self.read_single_frame_at(ptr)?;
-        Ok(Some(log))
+        let rec = self.read_single_frame_at(ptr)?;
+        Ok(Some(rec))
     }
 
     async fn get_max_tx_id_for_agent(&self, agent_hex: &str) -> u128 {

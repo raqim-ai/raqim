@@ -16,11 +16,8 @@ use crate::api::UiEvent;
 use crate::cold_store::ColdStore;
 use crate::generate_uuidv7_txid;
 use crate::merkle::MerkleEngine;
-use crate::AgentState;
-use crate::AgentStatus;
 use crate::EffectKey;
-use crate::EffectRecord;
-use crate::{config::RaqimConfig, wal::WalEngine, OpLog, SystemEvent};
+use crate::{config::RaqimConfig, wal::WalEngine, ExecutionRecord, SystemEvent};
 use serde::Serialize;
 
 pub enum RebuildMode {
@@ -34,7 +31,7 @@ pub struct EffectStore {
     cold_store: Arc<dyn ColdStore>,
     wal_engine: Arc<WalEngine>,
     event_tx: Sender<SystemEvent>,
-    effect_index: DashMap<EffectKey, EffectRecord>,
+    effect_index: DashMap<EffectKey, ExecutionRecord>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -326,7 +323,7 @@ impl EffectStore {
             .unwrap_or_default()
             .as_secs() as i64;
 
-        let record = EffectRecord {
+        let record = ExecutionRecord {
             agent_id,
             step_ordinal,
             call_signature_hash,
@@ -395,7 +392,7 @@ impl EffectStore {
         agent_id: &[u8; 16],
         step_ordinal: u64,
         call_signature_hash: &[u8; 32],
-    ) -> Option<EffectRecord> {
+    ) -> Option<ExecutionRecord> {
         let record_key = EffectKey::derive(agent_id, step_ordinal, call_signature_hash);
 
         // O(1) sharded RAM lookup
@@ -407,7 +404,7 @@ impl EffectStore {
     }
 
     /// Exports all cached effect records for checkpointing
-    pub fn export_effects(&self) -> Vec<EffectRecord> {
+    pub fn export_effects(&self) -> Vec<ExecutionRecord> {
         self.effect_index
             .iter()
             .map(|e| e.value().clone())
@@ -415,7 +412,7 @@ impl EffectStore {
     }
 
     /// Hydrates effect records from checkpoint
-    pub fn hydrate_effects(&self, effects: Vec<EffectRecord>) {
+    pub fn hydrate_effects(&self, effects: Vec<ExecutionRecord>) {
         for record in effects {
             let key = EffectKey::derive(
                 &record.agent_id,
@@ -427,7 +424,7 @@ impl EffectStore {
     }
 
     /// Directly records an effect without re-journaling (used during replay/hydration)
-    pub fn record_effect_direct(&self, record: EffectRecord) {
+    pub fn record_effect_direct(&self, record: ExecutionRecord) {
         let key = EffectKey::derive(
             &record.agent_id,
             record.step_ordinal,
