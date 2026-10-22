@@ -1,22 +1,20 @@
 use dashmap::DashMap;
 use memmap2::MmapOptions;
 use rkyv::{Archive, Archived};
-use std::eprintln;
 use std::format;
 use std::println;
 
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 use std::u64;
 use std::{fs::File, sync::Arc};
 use tokio::sync::broadcast::Sender;
 
 use crate::api::ForkConfig;
 use crate::api::UiEvent;
+use crate::checkpoint::{CheckpointEngine, ControlMutation};
 use crate::cold_store::ColdStore;
-use crate::generate_uuidv7_txid;
 use crate::merkle::MerkleEngine;
 use crate::EffectKey;
+use crate::ExecutionStage;
 use crate::{config::RaqimConfig, wal::WalEngine, ExecutionRecord, SystemEvent};
 use serde::Serialize;
 
@@ -27,11 +25,15 @@ pub enum RebuildMode {
 
 pub struct EffectStore {
     config: Arc<RaqimConfig>,
-    axon: Arc<MerkleEngine>,
+    merkle: Arc<MerkleEngine>,
     cold_store: Arc<dyn ColdStore>,
     wal_engine: Arc<WalEngine>,
     event_tx: Sender<SystemEvent>,
+    /// Completed `Outcome` records indexed for 0(1) $0.00 deterministitc replay.
     effect_index: DashMap<EffectKey, ExecutionRecord>,
+
+    /// Pre-execution `Intents` records that have not yet received a matching `Outcome`
+    pending_intents: DashMap<EffectKey, ExecutionRecord>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -48,25 +50,26 @@ pub struct UnifiedSearchResult {
 impl EffectStore {
     pub fn new(
         config: Arc<RaqimConfig>,
-        axon: Arc<MerkleEngine>,
+        merkle: Arc<MerkleEngine>,
         cold_store: Arc<dyn ColdStore>,
         wal_engine: Arc<WalEngine>,
         event_tx: Sender<SystemEvent>,
     ) -> Self {
         Self {
             config,
-            axon,
+            merkle,
             cold_store,
             wal_engine,
             event_tx,
             effect_index: DashMap::new(),
+            pending_intents: DashMap::new(),
         }
     }
 
     /// STATIC ZERO-COPY SCANNER: Scans any WAL segment with 8-byte frame header validation
     pub fn scan_wal_file<F>(wal_path: &str, mut callback: F) -> Result<(), anyhow::Error>
     where
-        F: FnMut(&Archived<OpLog>),
+        F: FnMut(&Archived<ExecutionRecord>),
     {
         let file = match File::open(wal_path) {
             Ok(f) => f,
@@ -96,11 +99,13 @@ impl EffectStore {
             aligned_buf.clear();
             aligned_buf.extend_from_slice(entry_slice);
 
-            if let Ok(archived_batch) =
-                rkyv::access::<<Vec<OpLog> as Archive>::Archived, rkyv::rancor::Error>(&aligned_buf)
+            if let Ok(archived_batch) = rkyv::access::<
+                <Vec<ExecutionRecord> as Archive>::Archived,
+                rkyv::rancor::Error,
+            >(&aligned_buf)
             {
-                for log in archived_batch.as_slice() {
-                    callback(log);
+                for rec in archived_batch.as_slice() {
+                    callback(rec);
                 }
             }
 
@@ -112,7 +117,7 @@ impl EffectStore {
 
     pub fn scan_wal_file_until<F>(wal_path: &str, mut callback: F) -> Result<(), anyhow::Error>
     where
-        F: FnMut(&Archived<OpLog>) -> bool,
+        F: FnMut(&Archived<ExecutionRecord>) -> bool,
     {
         let file = match File::open(wal_path) {
             Ok(f) => f,
@@ -138,7 +143,7 @@ impl EffectStore {
                 aligned_buf.extend_from_slice(entry_slice);
 
                 if let Ok(archived_batch) = rkyv::access::<
-                    <Vec<OpLog> as Archive>::Archived,
+                    <Vec<ExecutionRecord> as Archive>::Archived,
                     rkyv::rancor::Error,
                 >(&aligned_buf)
                 {
@@ -161,7 +166,7 @@ impl EffectStore {
         agent_hex: &str,
         target_tx_id: u128,
         wal_engine: Arc<WalEngine>,
-    ) -> Result<Vec<OpLog>, anyhow::Error> {
+    ) -> Result<Vec<ExecutionRecord>, anyhow::Error> {
         // Find the highest known tx_id for this agent.
         let actual_target_tx = if target_tx_id == u128::MAX {
             // Checking the WAL Index first
@@ -180,42 +185,47 @@ impl EffectStore {
         };
 
         // 1. Fetch compacted historical OpLogs from O(1) indexed ColdStore
-        let mut historical_oplogs = self
+        let mut historical_records = self
             .cold_store
-            .fetch_historical_oplogs(agent_hex, 0, actual_target_tx)
+            .fetch_historical_records(agent_hex, 0, actual_target_tx)
             .await
             .unwrap_or_default();
 
         // 2. Append any uncompacted trailing OpLogs from the hot WAL
         let target_hex_owned = agent_hex.to_string();
-        let _ = Self::scan_wal_file(&self.config.wal_path, |archived_log| {
-            let tx = archived_log.state.transaction_id.to_native();
+        let _ = Self::scan_wal_file(&self.config.wal_path, |archived_record| {
+            let tx = archived_record.tx_id.to_native();
             if tx <= actual_target_tx {
-                let log_agent_hex = hex::encode(archived_log.agent_id.as_slice());
-                if log_agent_hex == target_hex_owned {
-                    if let Ok(owned_log) =
-                        rkyv::deserialize::<OpLog, rkyv::rancor::Error>(archived_log)
+                let record_agent_hex = hex::encode(archived_record.agent_id.as_slice());
+                if record_agent_hex == target_hex_owned {
+                    if let Ok(owned_record) =
+                        rkyv::deserialize::<ExecutionRecord, rkyv::rancor::Error>(archived_record)
                     {
-                        historical_oplogs.push(owned_log);
+                        historical_records.push(owned_record);
                     }
                 }
             }
         });
 
         // Deduplicate and order monotonically by UUIDv7 transaction_id
-        historical_oplogs.sort_by_key(|l| l.state.transaction_id);
-        historical_oplogs.dedup_by_key(|l| l.state.transaction_id);
+        historical_records.sort_by_key(|l| l.tx_id);
+        historical_records.dedup_by_key(|l| l.tx_id);
 
-        Ok(historical_oplogs)
+        Ok(historical_records)
     }
 
-    /// FORENSIC POINT LOOKUP: Returns the typed OpLog struct from Hot WAL or O(1) ColdStore
-    pub async fn fetch_by_txid(&self, target_tx_id: u128) -> Result<OpLog, anyhow::Error> {
-        let mut hot_found: Option<OpLog> = None;
+    /// FORENSIC POINT LOOKUP: Returns the typed ExecutionRecord struct from Hot WAL or O(1) ColdStore
+    pub async fn fetch_by_txid(
+        &self,
+        target_tx_id: u128,
+    ) -> Result<ExecutionRecord, anyhow::Error> {
+        let mut hot_found: Option<ExecutionRecord> = None;
 
         Self::scan_wal_file_until(&self.config.wal_path, |archived| {
-            if archived.state.transaction_id.to_native() == target_tx_id {
-                if let Ok(owned) = rkyv::deserialize::<OpLog, rkyv::rancor::Error>(archived) {
+            if archived.tx_id.to_native() == target_tx_id {
+                if let Ok(owned) =
+                    rkyv::deserialize::<ExecutionRecord, rkyv::rancor::Error>(archived)
+                {
                     hot_found = Some(owned);
                     return false;
                 }
@@ -260,7 +270,7 @@ impl EffectStore {
             ));
         }
 
-        let real_namespace = &historical_oplog[0].state.namespace;
+        let real_namespace = &historical_oplog[0].namespace;
 
         let original_bytes =
             hex::decode(agent_hex).map_err(|e| anyhow::anyhow!("Invalid agent hex: {}", e))?;
@@ -307,7 +317,50 @@ impl EffectStore {
         Ok(())
     }
 
-    /// Record Effect (Record mode) : captures a live side-effect, writes it to the wal & merkle DAG and updates the RAM
+    /// Write-Ahead Intent / Denial Recorder: Seals a pre-execution `Intent` (or `Denied` interdicion ) into the WAL & Merkle DAG BEFORE any external tool or function body runs.
+    pub async fn record_intent_or_denial(
+        &self,
+        agent_id: [u8; 16],
+        step_ordinal: u64,
+        call_signature_hash: [u8; 32],
+        namespace: &str,
+        allowed: bool,
+        reason_or_preview: Vec<u8>,
+    ) -> Result<u128, anyhow::Error> {
+        let stage = if allowed {
+            ExecutionStage::Intent
+        } else {
+            ExecutionStage::Denied
+        };
+
+        let unsealed = ExecutionRecord::new(
+            agent_id,
+            step_ordinal,
+            reason_or_preview,
+            stage,
+            namespace.to_string(),
+            call_signature_hash,
+        );
+
+        let (sealed_record, optional_batch) = self.merkle.seal_record(unsealed);
+        let tx_id = sealed_record.tx_id;
+
+        if allowed {
+            let key = EffectKey::derive(&agent_id, step_ordinal, &call_signature_hash);
+            self.pending_intents.insert(key, sealed_record.clone());
+        }
+
+        if let Some(batch) = optional_batch {
+            let _ = self
+                .event_tx
+                .send(SystemEvent::MarkleBatchCrystallized { batch });
+        }
+
+        self.wal_engine.append(sealed_record).await?;
+        Ok(tx_id)
+    }
+
+    /// Post-Execution Outcome Recorder: Resolves any pending `Intent`, seals the `Outcome` into MErkle DAG & WAL and caches the output in `effect_idx` for 0(1) $0.00 replay    
     pub async fn record_effect(
         &self,
         agent_id: [u8; 16],
@@ -316,55 +369,29 @@ impl EffectStore {
         output_payload: Vec<u8>,
         namespace: &str,
     ) -> Result<u128, anyhow::Error> {
-        let agent_hex = hex::encode(agent_id);
-        let transaction_id = generate_uuidv7_txid();
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-
-        let record = ExecutionRecord {
+        let unsealed = ExecutionRecord::new(
             agent_id,
             step_ordinal,
+            output_payload,
+            ExecutionStage::Outcome,
+            namespace.to_string(),
             call_signature_hash,
-            output_payload: output_payload.clone(),
-            transaction_id,
-            timestamp,
-        };
-
-        // Calculate RAM Lookup Key
-        let effect_key = EffectKey::derive(&agent_id, step_ordinal, &call_signature_hash.clone());
-
-        self.effect_index.insert(effect_key, record.clone());
-
-        // Durably append to control journal for reboot recovery
-        let _ = crate::checkpoint::CheckpointEngine::append_control_mutation(
-            std::path::Path::new("./vault/control_journal.bin"),
-            &crate::checkpoint::ControlMutation::RecordEffect(record.clone()),
         );
 
-        let payload_str = String::from_utf8(output_payload.clone())
-            .unwrap_or_else(|_| format!("[RAW_BYTES: {}]", output_payload.len()));
+        let (sealed_record, optional_batch) = self.merkle.seal_record(unsealed);
+        let tx_id = sealed_record.tx_id;
 
-        let state = AgentState {
-            agent_id: Some(agent_id),
-            transaction_id,
-            timestamp,
-            namespace: namespace.to_string(),
-            status: AgentStatus::ToolExecution,
-            text: payload_str,
-        };
+        // Calculate RAM Lookup Key
+        let effect_key = EffectKey::derive(&agent_id, step_ordinal, &call_signature_hash);
 
-        let raw_oplog = OpLog {
-            agent_id,
-            state,
-            previous_hash: [0u8; 32],
-            current_hash: [0u8; 32],
-            entropy_seeds: Vec::new(),
-            network_responses: Vec::new(),
-        };
+        // Resolve the write-ahead intent (no longer in-doubt!)
+        self.pending_intents.remove(&effect_key);
+        self.effect_index.insert(effect_key, sealed_record.clone());
 
-        let (sealed_log, optional_batch) = self.axon.seal_thought(raw_oplog);
+        let _ = CheckpointEngine::append_control_mutation(
+            std::path::Path::new(&self.config.control_journal_path),
+            &ControlMutation::RecordEffect(sealed_record),
+        );
 
         if let Some(batch) = optional_batch {
             let _ = self
@@ -372,18 +399,9 @@ impl EffectStore {
                 .send(SystemEvent::MarkleBatchCrystallized { batch });
         }
 
-        let scan_res = self.wal_engine.append(sealed_log).await;
+        self.wal_engine.append(sealed_record).await?;
 
-        if let Err(e) = scan_res {
-            eprintln!("[WAL ERROR] Failed to append thought to WalEngine: {}  ", e);
-        }
-
-        println!(
-            " [EFFECT ENGINE] Recorded Side-Effect for Agent: {} at Step: {} [TxID: {:032x}] ",
-            agent_hex, step_ordinal, transaction_id
-        );
-
-        Ok(transaction_id)
+        Ok(tx_id)
     }
 
     /// Get Effect (Replay mode): Perform 0(1) Ram lookup to fetch recorded payload
@@ -401,6 +419,14 @@ impl EffectStore {
         }
 
         None
+    }
+
+    /// Returns all write-ahead `Intent` records that never received a matching `Outcome` (e.g., interrupted mid-execution by a process crash or network failure).
+    pub fn get_in_doubt_intents(&self) -> Vec<ExecutionRecord> {
+        self.pending_intents
+            .iter()
+            .map(|e| e.value().clone())
+            .collect()
     }
 
     /// Exports all cached effect records for checkpointing
@@ -431,5 +457,28 @@ impl EffectStore {
             &record.call_signature_hash,
         );
         self.effect_index.insert(key, record);
+    }
+
+    /// Used during WAL crash recovery to reconstruct both `pending_intents` (In-Doubt) and `effect_index` (Outcomes).
+    pub fn hydrate_record_from_wal(&self, record: ExecutionRecord) {
+        let key = EffectKey::derive(
+            &record.agent_id,
+            record.step_ordinal,
+            &record.call_signature_hash,
+        );
+
+        match record.stage {
+            ExecutionStage::Intent => {
+                if !self.effect_index.contains_key(&key) {
+                    self.pending_intents.insert(key, record);
+                }
+            }
+            ExecutionStage::Denied => {
+                self.pending_intents.remove(&key);
+                self.effect_index.insert(key, record);
+            }
+
+            _ => {}
+        }
     }
 }
