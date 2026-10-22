@@ -9,7 +9,6 @@ use std::{fs::File, sync::Arc};
 use tokio::sync::broadcast::Sender;
 
 use crate::api::ForkConfig;
-use crate::api::UiEvent;
 use crate::checkpoint::{CheckpointEngine, ControlMutation};
 use crate::cold_store::ColdStore;
 use crate::merkle::MerkleEngine;
@@ -255,7 +254,6 @@ impl EffectStore {
         target_tx_id: Option<u128>,
         fork_config: Option<ForkConfig>,
         is_isolated_debug: bool,
-        phantom_ui_tx: tokio::sync::broadcast::Sender<UiEvent>,
     ) -> Result<(), anyhow::Error> {
         let fetch_target = target_tx_id.unwrap_or(u128::MAX);
 
@@ -269,8 +267,6 @@ impl EffectStore {
                 agent_hex
             ));
         }
-
-        let real_namespace = &historical_oplog[0].namespace;
 
         let original_bytes =
             hex::decode(agent_hex).map_err(|e| anyhow::anyhow!("Invalid agent hex: {}", e))?;
@@ -299,20 +295,6 @@ impl EffectStore {
                 fork.env_overrides.len()
             );
         }
-
-        let _ = phantom_ui_tx.send(UiEvent::ThoughtCommitted {
-            agent_hex: if is_isolated_debug {
-                sandbox_agent_hex
-            } else {
-                agent_hex.to_string()
-            },
-            intent_path: real_namespace.clone(),
-            tx_id: format!("{:032x}", fetch_target),
-            text: format!(
-                "[TEMPORAL FORK] State restored up to TxID 0x{:032x}",
-                fetch_target
-            ),
-        });
 
         Ok(())
     }

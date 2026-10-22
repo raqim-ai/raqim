@@ -12,15 +12,10 @@ use tokio::sync::watch;
 use tower_http::catch_panic::CatchPanicLayer;
 
 use axum::body::Bytes;
-use axum::response::sse::{Event, KeepAlive, Sse};
 use ed25519_dalek::{Signer, SigningKey};
-use futures_util::stream::Stream;
-use futures_util::stream::StreamExt;
 use serde_json::{json, Value};
-use std::convert::Infallible;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{eprintln, format, println};
-use tokio_stream::wrappers::BroadcastStream;
 
 use serde::{Deserialize, Serialize};
 use std::result::Result::{Err, Ok};
@@ -81,38 +76,6 @@ impl IntoResponse for ApiError {
     }
 }
 
-#[derive(serde::Serialize, Clone, Debug)]
-#[serde(tag = "event_type")]
-pub enum UiEvent {
-    ThoughtCommitted {
-        agent_hex: String,
-        intent_path: String,
-        tx_id: String,
-        text: String,
-    },
-
-    RealityForked {
-        agent_id: String,
-        original_namespace: String,
-        phantom_namespace: String,
-        step_ordinal: u64,
-        tx_id: String,
-    },
-
-    A2aMessageRouted {
-        source_hex: String,
-        target_hex: String,
-        namespace: String,
-        question_payload: String,
-        answer_payload: String,
-        latency_ms: u32,
-    },
-
-    AegisAlert {
-        record: QuarantineRecord,
-    },
-}
-
 #[derive(Clone)]
 pub struct ApiState {
     pub config: Arc<RaqimConfig>,
@@ -124,9 +87,6 @@ pub struct ApiState {
     pub cold_store: Arc<dyn ColdStore>,
 
     pub event_tx: Sender<SystemEvent>,
-    pub ui_tx: Sender<UiEvent>,
-    pub phantom_ui_tx: Sender<UiEvent>,
-    pub health_tx: Sender<SystemHealth>,
     pub swarm_registry: Arc<SwarmRegistry>,
     pub master_signing_key: SigningKey,
 
@@ -243,87 +203,12 @@ pub struct ActiveAgentNode {
     pub status: String, // Active, Quarantined, Idle
 }
 
-#[derive(Serialize, Clone)]
-pub struct UiThought {
-    pub agent_hex: String,
-    pub intent_path: String,
-    pub text: String,
-    pub tx_id: u64,
-}
-
-// 5. Rest & SSE route handlers.
-
-// The Firehose Route Handler
-pub async fn sse_firehose_endpoint(
-    _auth: ValidatedIdentity,
-    State(state): State<ApiState>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    // Subscribe to the live broadcast channel
-    let receiver = state.ui_tx.subscribe();
-
-    // Convert the Tokio Receiver into a standard async Stream.
-    let stream = BroadcastStream::new(receiver).filter_map(|msg| async move {
-        match msg {
-            Ok(ui_event) => serde_json::to_string(&ui_event)
-                .ok()
-                .map(|json| Ok(Event::default().data(json))),
-
-            Err(_) => {
-                // Lagging subscribers are skipped automatically by tokio broadcast
-                None
-            }
-        }
-    });
-
-    // Return the SSE stream to the browser.
-    Sse::new(stream).keep_alive(KeepAlive::new())
-}
-
-// The Observatiton deck ( Only used by the time machine UI )
-pub async fn sse_phantom_endpoint(
-    _auth: ValidatedIdentity,
-    State(state): State<ApiState>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let receiver = state.phantom_ui_tx.subscribe();
-
-    let stream = BroadcastStream::new(receiver).filter_map(|msg| async move {
-        match msg {
-            Ok(p_event) => serde_json::to_string(&p_event)
-                .ok()
-                .map(|json| Ok(Event::default().data(json))),
-
-            Err(_) => None,
-        }
-    });
-
-    Sse::new(stream).keep_alive(KeepAlive::new())
-}
-
-pub async fn sse_health_endpoint(
-    _auth: crate::api::ValidatedIdentity,
-    State(state): State<ApiState>,
-) -> Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>> {
-    let receiver = state.health_tx.subscribe();
-
-    let stream = BroadcastStream::new(receiver).filter_map(|msg| async move {
-        match msg {
-            Ok(health_payload) => serde_json::to_string(&health_payload)
-                .ok()
-                .map(|json| Ok(Event::default().data(json))),
-
-            Err(_) => None,
-        }
-    });
-
-    Sse::new(stream).keep_alive(KeepAlive::new())
-}
-
 #[derive(Deserialize)]
 pub struct RecentThoughtsParams {
     pub limit: Option<usize>,
 }
 
-pub async fn recent_thoughts_endpoint(
+pub async fn recent_record_endpoint(
     _auth: ValidatedIdentity,
     State(state): State<ApiState>,
     Query(params): Query<RecentThoughtsParams>,
@@ -501,7 +386,7 @@ async fn lift_qurantine_and_resurrect(
 
         match state
             .mem_router
-            .boot_historical_agent(&payload.agent_hex, None, None, false, state.phantom_ui_tx)
+            .boot_historical_agent(&payload.agent_hex, None, None, false)
             .await
         {
             Ok(()) => Ok(Json(
@@ -580,7 +465,6 @@ async fn time_travel_endpoint(
                 Some(payload.target_tx_id),
                 Some(payload.fork_config),
                 true,
-                state.phantom_ui_tx,
             )
             .await
         {
@@ -1162,21 +1046,7 @@ pub async fn record_effect_handler(
         .await
     {
         Ok(tx_id) => {
-            let tx_id_hex = format!("{:032x}", tx_id);
             let original_ns = payload.namespace.clone().replace("phantom_", "");
-
-            // Broadcast to semantic firehose
-            let _ = state.ui_tx.send(UiEvent::ThoughtCommitted {
-                agent_hex: payload.agent_hex.clone(),
-                intent_path: original_ns.clone(),
-                tx_id: tx_id_hex,
-                text: format!(
-                    "[STEP {} EFFECT] Ordinal: {} | Hash: {}...",
-                    payload.step_ordinal,
-                    payload.step_ordinal,
-                    &payload.call_signature_hex[..8]
-                ),
-            });
 
             if is_forked {
                 let tx_id = format!("{:032x}", tx_id);
@@ -1193,15 +1063,6 @@ pub async fn record_effect_handler(
                     step_ordinal: payload.step_ordinal,
                     tx_id: tx_id.clone(),
                     timestamp,
-                });
-
-                // Real-time Glass: Streamed to active SSE Firehose
-                let _ = state.ui_tx.send(UiEvent::RealityForked {
-                    agent_id: payload.agent_hex.clone(),
-                    original_namespace: original_ns,
-                    phantom_namespace: payload.namespace.clone(),
-                    step_ordinal: payload.step_ordinal,
-                    tx_id: tx_id.clone(),
                 });
             }
 
@@ -1421,10 +1282,7 @@ pub fn build_admin_router(state: ApiState) -> axum::Router {
             post(trigger_compaction_endpoint),
         )
         // System & Agent Deployment endpoints
-        .route("/v1/system/health/live", get(sse_health_endpoint))
-        .route("/v1/system/firehose", get(sse_firehose_endpoint))
-        .route("/v1/system/thoughts/recent", get(recent_thoughts_endpoint))
-        .route("/v1/time-travel/stream", get(sse_phantom_endpoint))
+        .route("/v1/system/thoughts/recent", get(recent_record_endpoint))
         .route("/v1/system/agents/aliases", get(agent_alias_endpoint))
         // Swarm & A2A Ingress
         .route("/v1/swarm/ingress", post(http_ingress_endpoint))

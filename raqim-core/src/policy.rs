@@ -1,4 +1,3 @@
-use crate::api::UiEvent;
 use crate::SystemEvent;
 use dashmap::DashMap;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
@@ -176,7 +175,6 @@ pub struct PolicyEngine {
     pub quarantine_blocklist: DashMap<String, QuarantineRecord>,
     pub master_public_key: VerifyingKey,
     pub tx: Sender<SystemEvent>,
-    pub ui_tx: Sender<UiEvent>,
     pub control_journal_path: String,
 }
 
@@ -185,7 +183,6 @@ impl PolicyEngine {
         initial_policies: HashMap<String, GroupPolicy>,
         master_pub_bytes: &[u8; 32],
         tx: Sender<SystemEvent>,
-        ui_tx: Sender<UiEvent>,
         control_journal_path: String,
     ) -> Self {
         let master_public_key = VerifyingKey::from_bytes(master_pub_bytes)
@@ -196,7 +193,6 @@ impl PolicyEngine {
             group_policies: Arc::new(RwLock::new(initial_policies)),
             master_public_key,
             tx,
-            ui_tx,
             control_journal_path,
         }
     }
@@ -301,11 +297,6 @@ impl PolicyEngine {
             payload: reason.to_string(),
         });
 
-        // Fire the SSE alert directly to the React Terminal
-        let _ = self.ui_tx.send(UiEvent::AegisAlert {
-            record: record.clone(),
-        });
-
         let _ = eprintln!(
             "\n[AEGIS RED ALERT] Unauthorized access attempts by {} on path: {}, Violation Type: {}, Reason: {} ",
             agent_hex, target, v_type, reason
@@ -331,10 +322,6 @@ impl PolicyEngine {
                 record.violation_type.clone()
             ),
             culprit_text: record.payload_preview.clone(),
-        });
-
-        let _ = self.ui_tx.send(UiEvent::AegisAlert {
-            record: record.clone(),
         });
 
         eprintln!(

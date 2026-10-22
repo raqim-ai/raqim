@@ -1,7 +1,7 @@
 use ed25519_dalek::SigningKey;
 use notify::{Event, Watcher};
 use rand_core::OsRng;
-use raqim_core::api::{build_admin_router, ApiState, UiEvent};
+use raqim_core::api::{build_admin_router, ApiState};
 use raqim_core::checkpoint::{CheckpointEngine, ControlMutation};
 use raqim_core::merkle::MerkleEngine;
 use raqim_core::policy::{PolicyConfigFile, PolicyEngine};
@@ -10,7 +10,6 @@ use axum::http::Method;
 use raqim_core::cold_store::{ColdStore, SegmentColdStore};
 use raqim_core::compactor::WalCompactor;
 use raqim_core::config::RaqimConfig;
-use raqim_core::health::{HealthMonitor, SystemHealth};
 
 use raqim_core::effect_store::EffectStore;
 use raqim_core::registry::SwarmRegistry;
@@ -77,13 +76,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // THE INTERNAL EVENT BUS
     let (event_tx, _event_rx) = broadcast::channel::<SystemEvent>(50_000);
-    let (ui_tx, _ui_rx) = broadcast::channel::<UiEvent>(10_000);
-
     let registry = Arc::new(SwarmRegistry::new());
-    let (health_tx, _health_rx) = broadcast::channel::<SystemHealth>(100);
-    let (phantom_ui_tx, _phanom_ui_rx) = broadcast::channel::<UiEvent>(100);
 
-    // Securely loads the swarm key from disk. Generate it if it doesn't exist/
+    // Securely loads the swarm key from disk. Generate it if it doesn't exist
     let key_dir = Path::new("./ca-keys");
     let key_path = key_dir.join("swarm_master.key");
 
@@ -193,7 +188,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         initial_policies,
         &master_public_key,
         event_tx.clone(),
-        ui_tx.clone(),
         config.control_journal_path.clone(),
     ));
 
@@ -471,10 +465,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (pause_tx, pause_rx) = tokio::sync::watch::channel(false);
     let pause_tx = Arc::new(pause_tx);
 
-    // Spawn the hardware interrupt loop
-    let health_pause_rx = pause_rx.clone();
-    HealthMonitor::spawn_telemetry_loop(health_tx.clone(), health_pause_rx);
-
     let api_state = ApiState {
         config: config.clone(),
         policy: policy.clone(),
@@ -484,9 +474,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         wal: wal.clone(),
         event_tx: event_tx.clone(),
 
-        ui_tx: ui_tx.clone(),
-        phantom_ui_tx: phantom_ui_tx.clone(),
-        health_tx: health_tx.clone(),
         swarm_registry: registry.clone(),
         master_signing_key: master_signing_key.clone(),
 
@@ -600,7 +587,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let task_wal = wal.clone();
                     let task_event_tx = event_tx.clone();
                     let task_aegis = policy.clone();
-                    let task_ui_tx = ui_tx.clone();
                     let task_registry = registry.clone();
                     let task_mem_router = mem_router.clone();
                     let task_pause_rx = pause_rx.clone();
@@ -805,14 +791,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 eprintln!("[TCP EDGE] Failed to deliver ACK frame: {} ", e);
                                 break;
                             }
-
-                            let _ = task_ui_tx.send(UiEvent::ThoughtCommitted {
-                                agent_hex: agent_hex.clone(),
-                                intent_path: path_intent.to_string(),
-                                tx_id: format!("{:032x}", tx_id),
-                                text: text.clone(),
-                            });
-
                      }
                      Err(e) => {
                         eprintln!("[TCP INGRESS REJECTED] Hardware Backpressure: {} ", e);
@@ -823,13 +801,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let _ = tokio::io::AsyncWriteExt::write_all(&mut write_half, &err_buf).await;
                         break;
 
-
                     }
 
 
                     }
 
-                    // Update RAM process Table (O(1) nanoseconds lock)
+
                     task_registry.touch_agent(
                         agent_hex.clone().as_str(),
                         archived_ingress.intent_path.as_str(),

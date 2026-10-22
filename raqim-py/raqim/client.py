@@ -812,7 +812,7 @@ class RaqimClient:
 def verify_state_proof_offline(payload_bytes: bytes, agent_id_str: str, proof_dict: dict) -> bool:
     agent_id_bytes = bytes.fromhex(agent_id_str)
     
-    hasher = blake3.blake3(derive_key_context="raqim.axon.v1.leaf")
+    hasher = blake3.blake3(derive_key_context="raqim.merkle.v1.leaf")
     hasher.update(payload_bytes)
     hasher.update(agent_id_bytes)
     current_hash = hasher.digest(length=32)
@@ -827,7 +827,7 @@ def verify_state_proof_offline(payload_bytes: bytes, agent_id_str: str, proof_di
     
     for sibling_hex in sibling_hashes:
         sibling_bytes = bytes.fromhex(sibling_hex)
-        node_hasher = blake3.blake3(derive_key_context="raqim.axon.v1.node")
+        node_hasher = blake3.blake3(derive_key_context="raqim.merkle.v1.node")
         
         if index % 2 == 0:
             node_hasher.update(current_hash)

@@ -18,7 +18,6 @@ arrow-schema = { version = "52.2", optional = true }
 rkyv = { version = "0.8.15", features = ["bytecheck"] }
 tokio = { version = "1.37", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal"] }
 blake3 = "1.5"
-sysinfo = "0.30"
 hex = "0.4"
 uuid = { version = "1.10", features = ["v7", "serde"] }
 anyhow = "1.0"
