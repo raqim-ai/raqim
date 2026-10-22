@@ -1,7 +1,4 @@
-use crate::{
-    AgentStatus, OpLog, RecentThought,
-    api::TimelineNode,
-};
+use crate::{api::TimelineNode, ExecutionRecord, RecentRecord};
 use memmap2::MmapOptions;
 use rkyv::to_bytes;
 
@@ -18,12 +15,12 @@ use std::{
 use tokio::io::AsyncWriteExt;
 use tokio::{
     io::AsyncSeekExt,
-    sync::{RwLock, mpsc, oneshot},
+    sync::{mpsc, oneshot, RwLock},
     time::interval,
 };
 
 pub struct WalEngine {
-    sender: mpsc::Sender<OpLog>,
+    sender: mpsc::Sender<ExecutionRecord>,
     pub cmd_sender: mpsc::Sender<WalCommand>,
 
     // The O(1) INDEX: Maps TxID -> Physical byte offset in the WAL.
@@ -67,7 +64,7 @@ pub enum WalCommand {
 
 impl WalEngine {
     pub async fn start_dummy() -> Arc<Self> {
-        let (tx, _) = mpsc::channel::<OpLog>(100);
+        let (tx, _) = mpsc::channel::<ExecutionRecord>(100);
         let (cmd_tx, _) = mpsc::channel::<WalCommand>(10);
 
         let index = Arc::new(RwLock::new(BTreeMap::new()));
@@ -87,7 +84,7 @@ impl WalEngine {
         let (clean_offset, recovered_index) = Self::recover_and_truncate_torn_frames(&file_path);
 
         // Bounded channel to prevent OOM crashes
-        let (tx, mut rx) = mpsc::channel::<OpLog>(100_000);
+        let (tx, mut rx) = mpsc::channel::<ExecutionRecord>(100_000);
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<WalCommand>(10);
 
         let index = Arc::new(RwLock::new(recovered_index));
@@ -112,7 +109,7 @@ impl WalEngine {
                 .expect("FATAL: Failed to seek WAL writes cursor to clean_offset");
 
             let mut current_offset = clean_offset;
-            let mut batch: Vec<OpLog> = Vec::with_capacity(6_000);
+            let mut batch: Vec<ExecutionRecord> = Vec::with_capacity(6_000);
 
             // Group commit timer (flushes the disk cache every 2ms if data is pending)
             let mut flush_interval = interval(Duration::from_millis(2));
@@ -215,7 +212,7 @@ impl WalEngine {
     async fn write_batch_to_disk(
         file: &mut tokio::fs::File,
         current_offset: &mut u64,
-        batch: &[OpLog],
+        batch: &[ExecutionRecord],
         index: &Arc<RwLock<BTreeMap<u128, u64>>>,
     ) {
         if batch.is_empty() {
@@ -333,12 +330,12 @@ impl WalEngine {
 
             // Zero-copy rkyv exraction to build memory index
             if let Ok(archived_batch) = rkyv::access::<
-                <Vec<OpLog> as rkyv::Archive>::Archived,
+                <Vec<ExecutionRecord> as rkyv::Archive>::Archived,
                 rkyv::rancor::Error,
             >(&payload)
             {
                 if let Ok(batch) =
-                    rkyv::deserialize::<Vec<OpLog>, rkyv::rancor::Error>(archived_batch)
+                    rkyv::deserialize::<Vec<ExecutionRecord>, rkyv::rancor::Error>(archived_batch)
                 {
                     if !batch.is_empty() {
                         index.insert(batch[0].state.transaction_id, offset);
@@ -372,7 +369,7 @@ impl WalEngine {
     }
 
     /// Fire and forget. The TCP/Agent networking layer NEVER blocks here.
-    pub async fn append(&self, log: OpLog) -> Result<(), WalError> {
+    pub async fn append(&self, log: ExecutionRecord) -> Result<(), WalError> {
         self.sender
             .send(log)
             .await
@@ -413,7 +410,7 @@ impl WalEngine {
             }
 
             if let Ok(archived_batch) = rkyv::access::<
-                <Vec<OpLog> as rkyv::Archive>::Archived,
+                <Vec<ExecutionRecord> as rkyv::Archive>::Archived,
                 rkyv::rancor::Error,
             >(payload)
             {
@@ -475,7 +472,7 @@ impl WalEngine {
 
             // Bounds-checked zero-copy pointer access
             if let Ok(batch) = rkyv::access::<
-                <Vec<OpLog> as rkyv::Archive>::Archived,
+                <Vec<ExecutionRecord> as rkyv::Archive>::Archived,
                 rkyv::rancor::Error,
             >(&payload)
             {
@@ -493,11 +490,7 @@ impl WalEngine {
     }
 
     /// Reads trailing thoughts directly from crash-safe WAL file on disk
-    pub fn read_recent_wal_thoughts(
-        &self,
-        wal_path: &str,
-        limit: usize,
-    ) -> Vec<RecentThought> {
+    pub fn read_recent_wal_thoughts(&self, wal_path: &str, limit: usize) -> Vec<RecentRecord> {
         let file = match File::open(wal_path) {
             Ok(f) => f,
             Err(_) => return Vec::new(),
@@ -527,7 +520,7 @@ impl WalEngine {
             }
 
             if let Ok(archived_batch) = rkyv::access::<
-                <Vec<OpLog> as rkyv::Archive>::Archived,
+                <Vec<ExecutionRecord> as rkyv::Archive>::Archived,
                 rkyv::rancor::Error,
             >(payload)
             {
@@ -547,7 +540,7 @@ impl WalEngine {
                         rkyv::Archived::<AgentStatus>::ToolExecution => "TOOL_EXEC",
                     };
 
-                    thoughts.push(RecentThought {
+                    thoughts.push(RecentRecord {
                         tx_id: format!("{:032x}", tx_id),
                         tx_id_hex,
                         agent_hex: hex::encode(archived_log.agent_id.as_slice()),
