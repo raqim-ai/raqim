@@ -10,7 +10,7 @@ use std::{
 use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 
-use crate::{merkle::MarkleBatch, OpLog};
+use crate::{merkle::MarkleBatch, ExecutionRecord};
 
 #[derive(
     Debug, Clone, Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
@@ -30,7 +30,7 @@ pub struct AnchoredRootWitness {
 )]
 pub struct CertifiedBundleBlock {
     pub witness: AnchoredRootWitness,
-    pub raw_logs: Vec<OpLog>,
+    pub raw_logs: Vec<ExecutionRecord>,
 }
 
 pub struct WormWitnessEngine {
@@ -60,7 +60,7 @@ impl WormWitnessEngine {
     pub async fn anchor_batch(
         &self,
         batch: &MarkleBatch,
-        raw_logs: Vec<OpLog>,
+        raw_logs: Vec<ExecutionRecord>,
     ) -> Result<AnchoredRootWitness, anyhow::Error> {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)

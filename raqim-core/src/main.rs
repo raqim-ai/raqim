@@ -17,7 +17,7 @@ use raqim_core::registry::SwarmRegistry;
 use raqim_core::wal::{WalCommand, WalEngine};
 use raqim_core::witness::WormWitnessEngine;
 use raqim_core::{
-    execute_raqim_cascade, AgentState, Execu, ExecutionRecord, ExecutionRecord, IngressEnvelope,
+    execute_raqim_cascade, AgentState, ExecutionRecord, ExecutionRecord, IngressEnvelope,
     SystemEvent,
 };
 use tower_http::cors::{Any, CorsLayer};
