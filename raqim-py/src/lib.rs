@@ -16,30 +16,40 @@ pub struct CapabilityCertificate {
     pub master_signature: Vec<u8>, // Signed by Swarm Master Key
 }
 
-// The fundamental unit of our Flight Recorder.
 #[derive(
-    Archive, Deserialize, Serialize, Debug, PartialEq, Clone, SerdeDeserialize, SerdeSerialize,
+    Archive,
+    Deserialize,
+    Serialize,
+    Debug,
+    PartialEq,
+    Eq,
+    Clone,
+    Copy,
+    SerdeDeserialize,
+    SerdeSerialize,
 )]
-pub struct AgentState {
-    pub agent_id: Option<[u8; 16]>,
-    pub transaction_id: u128,
-
-    pub timestamp: i64,
-    pub status: AgentStatus,
-
-    pub text: String,
-    pub namespace: String,
+pub enum ExecutionStage {
+    Intent,
+    Outcome,
+    Denied,
+    System,
 }
 
-// The current execution state of the agent in the swarm.
 #[derive(
-    Archive, Deserialize, Serialize, Debug, PartialEq, Clone, SerdeDeserialize, SerdeSerialize,
+    Archive, Deserialize, Serialize, Debug, PartialEq, Eq, Clone, SerdeDeserialize, SerdeSerialize,
 )]
-pub enum AgentStatus {
-    Idle,
-    Reasoning,     // Waiting on LLM token generation
-    ToolExecution, // Executing an external API or tool
-    Halted,        // Interdicted by the Aegis security layer
+pub struct ExecutionRecord {
+    pub tx_id: u128,
+    pub agent_id: [u8; 16],
+    pub step_ordinal: u64,
+    pub timestamp: i64,
+    pub namespace: String,
+    pub stage: ExecutionStage,
+    pub call_signature_hash: [u8; 32],
+    pub payload_hash: [u8; 32],
+    pub payload_bytes: Vec<u8>,
+    pub previous_root: [u8; 32],
+    pub leaf_hash: [u8; 32],
 }
 
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
@@ -47,7 +57,7 @@ pub struct IngressEnvelope {
     pub intent_path: String,
     pub public_key: [u8; 32],
     pub signature: [u8; 64],
-    pub state_bytes: Vec<u8>,
+    pub record_bytes: Vec<u8>,
     pub capability_cert: Vec<u8>,
 }
 
@@ -129,27 +139,36 @@ impl RaqimCryptoCore {
             pyo3::exceptions::PyValueError::new_err("Agent hex must be exactly 16-bytes")
         })?;
 
-        let state = AgentState {
-            agent_id: Some(agent_id_array),
-            namespace: intent_path.to_string(),
-            transaction_id: uuid::Uuid::now_v7().as_u128(),
+        let payload_bytes = text.as_bytes().to_vec();
+        let mut hasher = Hasher::new_derive_key("raqim.payload.v1");
+        hasher.update(&payload_bytes);
+        let payload_hash: [u8; 32] = hasher.finalize().into();
+
+        let record = ExecutionRecord {
+            tx_id: uuid::Uuid::now_v7().as_u128(),
+            agent_id: agent_id_array,
+            step_ordinal: 0,
             timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_secs() as i64,
-            status: AgentStatus::Idle,
-            text: text.to_string(),
+                .as_millis() as i64,
+            namespace: intent_path.to_string(),
+            stage: ExecutionStage::System,
+            call_signature_hash: [0u8; 32],
+            payload_hash,
+            payload_bytes,
+            previous_root: [0u8; 32],
+            leaf_hash: [0u8; 32],
         };
 
-        // rkyv Serialization & Ed25519 Signing happening natively in Rust C-Extension!
-        let state_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&state).unwrap();
-        let signature = self.signing_key.sign(&state_bytes).to_bytes();
+        let record_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&record).unwrap();
+        let signature = self.signing_key.sign(&record_bytes).to_bytes();
 
         let envelope = IngressEnvelope {
             intent_path: intent_path.to_string(),
             public_key: self.pub_key_bytes,
             signature,
-            state_bytes: state_bytes.into_vec(),
+            record_bytes: record_bytes.into_vec(),
             capability_cert: self.capability_cert_bytes.clone(),
         };
 

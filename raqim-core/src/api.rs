@@ -40,7 +40,7 @@ use crate::{
     effect_store::{EffectStore, UnifiedSearchResult},
     policy::PolicyEngine,
 };
-use crate::{execute_raqim_cascade, AgentState, IngressEnvelope, RecentThought, SystemEvent};
+use crate::{execute_raqim_cascade, ExecutionRecord, IngressEnvelope, RecentRecord, SystemEvent};
 
 // Strongly typed api error system (Zero-Panic Guarantee)
 #[derive(Debug)]
@@ -118,7 +118,7 @@ pub struct ApiState {
     pub config: Arc<RaqimConfig>,
 
     pub mem_router: Arc<EffectStore>,
-    pub axon: Arc<MerkleEngine>,
+    pub merkle: Arc<MerkleEngine>,
     pub policy: Arc<PolicyEngine>,
     pub wal: Arc<WalEngine>,
     pub cold_store: Arc<dyn ColdStore>,
@@ -327,11 +327,11 @@ pub async fn recent_thoughts_endpoint(
     _auth: ValidatedIdentity,
     State(state): State<ApiState>,
     Query(params): Query<RecentThoughtsParams>,
-) -> Result<Json<Vec<RecentThought>>, ApiError> {
+) -> Result<Json<Vec<RecentRecord>>, ApiError> {
     let limit = params.limit.unwrap_or(50).min(500);
 
     // 1. Gather thoughts from active RAM buffers
-    let ram_thoughts = state.axon.get_recent_thoughts_ram(limit);
+    let ram_thoughts = state.merkle.get_recent_record_ram(limit);
 
     // 2. Gather thoughts from WAL disk
     let wal_thoughts = state
@@ -419,7 +419,7 @@ pub async fn vault_telemetry_endpoint(
     _auth: ValidatedIdentity,
     State(state): State<ApiState>,
 ) -> Result<Json<VaultTelemetry>, ApiError> {
-    let wal_pending_count = state.axon.get_total_leaves() as u64;
+    let wal_pending_count = state.merkle.get_total_leaves() as u64;
 
     let total_vectors = state.cold_store.get_total_record_count().await;
 
@@ -613,13 +613,16 @@ pub async fn http_ingress_endpoint(
     >(&body)
     .map_err(|e| ApiError::BadRequest(format!("Malformed IngressEnvelope memory layout: {}", e)))?;
 
-    let state_bytes = archived_ingress.state_bytes.as_slice();
+    let record_bytes = archived_ingress.record_bytes.as_slice();
 
-    let archived_state =
-        rkyv::access::<<AgentState as rkyv::Archive>::Archived, rkyv::rancor::Error>(state_bytes)
-            .map_err(|e| {
-            ApiError::BadRequest(format!("Malformed AgentState inner memory layout: {}", e))
-        })?;
+    let mut aligned_buf = rkyv::util::AlignedVec::<16>::with_capacity(record_bytes.len());
+    aligned_buf.extend_from_slice(record_bytes);
+
+    let archived_rec = rkyv::access::<
+        <ExecutionRecord as rkyv::Archive>::Archived,
+        rkyv::rancor::Error,
+    >(&aligned_buf)
+    .map_err(|e| ApiError::BadRequest(format!("Malformed ExecutionRecord: {}", e)))?;
 
     let path_intent = archived_ingress.intent_path.as_str();
 
@@ -642,58 +645,31 @@ pub async fn http_ingress_endpoint(
         .verify_session_lineage(&archived_ingress.capability_cert.as_slice(), &agent_pub_key)
         .map_err(|e| ApiError::Unauthorized(format!("Lineage Verification failed: {}", e)))?;
 
-    let packet_timestamp: i64 = archived_state.timestamp.into();
+    let packet_ts_sec = (archived_rec.timestamp.to_native() / 1000) as i64;
     state
         .policy
         .authorize_packet_fast(
             agent_hex.as_str(),
             group_name.as_str(),
             &agent_pub_key,
-            &state_bytes,
+            &record_bytes,
             &packet_sig,
             &path_intent,
-            packet_timestamp,
+            packet_ts_sec,
         )
         .map_err(|e| ApiError::Forbidden(format!("Aegis Interdiction: {}", e)))?;
 
-    let task_event = state.event_tx.clone();
-    let task_axon = state.axon.clone();
-    let task_wal = state.wal.clone();
-
-    let body_clone = body.clone();
-
-    tokio::spawn(async move {
-        // Recast the pointer inside the 'static task bounds
-        let envelope = unsafe {
-            rkyv::access_unchecked::<<IngressEnvelope as rkyv::Archive>::Archived>(&body_clone)
-        };
-
-        let state = unsafe {
-            rkyv::access_unchecked::<<AgentState as rkyv::Archive>::Archived>(&envelope.state_bytes)
-        };
-
-        // Pass
-        let res = execute_raqim_cascade(
-            &state,
-            task_axon,
-            task_wal,
-            task_event,
-            Vec::new(),
-            Vec::new(),
-        )
-        .await;
-
-        let _ = match res {
-            Ok(id) => id,
-            Err(_) => {
-                eprintln!("[SECURITY FATAL] Unsigned/Anonymous payload hit the cascade. Dropped.");
-                return;
-            }
-        };
-    });
+    let tx_id = execute_raqim_cascade(
+        archived_rec,
+        state.merkle.clone(),
+        state.wal.clone(),
+        state.event_tx.clone(),
+    )
+    .await
+    .map_err(|e| ApiError::InternalServerError(e.to_string()))?;
 
     Ok(Json(
-        json!({"success": true, "message": "Thought accepted into cascade" }),
+        json!({"success": true, "tx_id_hex": format!("{:032x}", tx_id) }),
     ))
 }
 
@@ -769,10 +745,10 @@ pub async fn dashboard_cards_endpoint(
     let _hot_batches = state.wal.get_pending_count().await as u64;
 
     // Hot buffer leaves + cold storage
-    let hot_count = state.axon.get_total_leaves() as u64;
+    let hot_count = state.merkle.get_total_leaves() as u64;
     let total_lifetime_txn = cold_count + hot_count;
 
-    let latest_tx = state.axon.get_latest_tx_id();
+    let latest_tx = state.merkle.get_latest_tx_id();
     let latest_tx_hex = format!("0x{:032x}", latest_tx);
 
     Ok(Json(DashboardCards {
@@ -941,7 +917,7 @@ pub async fn cluster_info_endpoint(
         .map(|m| m.len())
         .unwrap_or(0);
 
-    let highest_tx = state.axon.get_latest_tx_id();
+    let highest_tx = state.merkle.get_latest_tx_id();
 
     let payload = json!({
         "highest_tx_id": format!("0x{:032x}", highest_tx),
@@ -1266,7 +1242,7 @@ pub async fn get_effect_handler(
     {
         Some(record) => {
             let b64_payload =
-                base64::engine::general_purpose::STANDARD.encode(&record.output_payload);
+                base64::engine::general_purpose::STANDARD.encode(&record.payload_bytes);
 
             Ok(Json(GetEffectResponse {
                 found: true,
@@ -1304,7 +1280,7 @@ pub async fn get_state_proof_handler(
         })?;
 
     // Query Axon Gatekeeper for 0(log N) Inclusion proof
-    match state.axon.generate_proof_for_tx(tx_id) {
+    match state.merkle.generate_proof_for_tx(tx_id) {
         Some(proof) => Ok(Json(StateProofResponse {
             success: true,
             proof: Some(proof.clone()),
@@ -1385,7 +1361,7 @@ pub async fn export_agent_timeline_otel(
 
     // fetch active merkle root
     let active_root = state
-        .axon
+        .merkle
         .batch_archive
         .iter()
         .next()

@@ -17,7 +17,8 @@ use raqim_core::registry::SwarmRegistry;
 use raqim_core::wal::{WalCommand, WalEngine};
 use raqim_core::witness::WormWitnessEngine;
 use raqim_core::{
-    execute_raqim_cascade, AgentState, IngressEnvelope, OpLog, RuntimeSecurityFlags, SystemEvent,
+    execute_raqim_cascade, AgentState, Execu, ExecutionRecord, ExecutionRecord, IngressEnvelope,
+    SystemEvent,
 };
 use tower_http::cors::{Any, CorsLayer};
 
@@ -82,8 +83,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (health_tx, _health_rx) = broadcast::channel::<SystemHealth>(100);
     let (phantom_ui_tx, _phanom_ui_rx) = broadcast::channel::<UiEvent>(100);
 
-    let security_flags = RuntimeSecurityFlags::new();
-
     // Securely loads the swarm key from disk. Generate it if it doesn't exist/
     let key_dir = Path::new("./ca-keys");
     let key_path = key_dir.join("swarm_master.key");
@@ -115,7 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let permissions = metadata.permissions();
         let mode = permissions.mode();
 
-        // Check if group or otthers have read/write/execute permission
+        // Check if group or others have read/write/execute permission
         if mode & 0o77 != 0 {
             eprintln!(
                 "[SECURITY HAZARD] Master key file '{:?}' has insecure permissions: {:o} (Expected 0600).",
@@ -139,7 +138,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ===============================
 
     // 1. BOOT SEQUENCE: INIITIALIZE ALL LAYERS (Wrapped in Arc for fearless concurrency)
-    let axon = Arc::new(MerkleEngine::new());
+    let merkle = Arc::new(MerkleEngine::new());
 
     // LEAK-PROOF BROADCAST RECEIVER LOOP: Spawn consumer loop to detect lagging and evict slow readers automatically
     let mut system_events_subscriber = event_tx.subscribe();
@@ -253,7 +252,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mem_router = Arc::new(EffectStore::new(
         config.clone(),
-        axon.clone(),
+        merkle.clone(),
         cold_store.clone(),
         wal.clone(),
         event_tx.clone(),
@@ -273,7 +272,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "[PHOENIX] State checkpoint detected from timestamp {}. Hydrating system core...",
             checkpoint.timestamp
         );
-        axon.hydrate_from_checkpoint(checkpoint.merkle_state);
+        merkle.hydrate_from_checkpoint(checkpoint.merkle_state);
         mem_router.hydrate_effects(checkpoint.effects);
         policy.hydrate_quarantines(checkpoint.quarantines);
         registry.hydrate_agents(checkpoint.active_agents);
@@ -361,7 +360,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None,
     ));
 
-    let mut recovered_logs: Vec<OpLog> = Vec::new();
     let mut uncompacted_count = 0;
 
     // Execute assembled scanning over the assembled timeline array
@@ -401,18 +399,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 aligned_buf.clear();
                 aligned_buf.extend_from_slice(entry_slice);
 
-                if let Ok(archived_log) = rkyv::access::<
-                    <Vec<OpLog> as rkyv::Archive>::Archived,
+                if let Ok(archived_batch) = rkyv::access::<
+                    <Vec<ExecutionRecord> as rkyv::Archive>::Archived,
                     rkyv::rancor::Error,
                 >(&aligned_buf)
                 {
-                    if let Ok(batch) =
-                        rkyv::deserialize::<Vec<OpLog>, rkyv::rancor::Error>(archived_log)
-                    {
-                        for recovered_log in batch {
-                            axon.hydrate_from_recovery(&recovered_log);
+                    if let Ok(batch) = rkyv::deserialize::<Vec<ExecutionRecord>, rkyv::rancor::Error>(
+                        archived_batch,
+                    ) {
+                        for recovered_rec in batch {
+                            merkle.hydrate_from_recovery(&recovered_rec);
+                            mem_router.hydrate_record_from_wal(recovered_rec);
 
-                            recovered_logs.push(recovered_log);
                             uncompacted_count += 1
                         }
                     }
@@ -424,14 +422,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!(
-        "[PHOENIX] Rehydrated {} un-crystallized log frames into Axon buffer ",
+        "[PHOENIX] Rehydrated {} un-crystallized log frames into merkle buffer ",
         uncompacted_count
     );
 
     // Load un-tamperable chronological WORM roots and assert execution matrix match
     let anchored_witness = witness_engine.load_local_witness();
     if !anchored_witness.is_empty() {
-        axon.execute_forensic_boot_audit(&anchored_witness, &witness_engine.clone())
+        merkle
+            .execute_forensic_boot_audit(&anchored_witness, &witness_engine.clone())
             .await?;
     }
 
@@ -454,7 +453,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &config.checkpoint_path,
         &config.control_journal_path,
         cold_store.clone(),
-        axon.clone(),
+        merkle.clone(),
         policy.clone(),
         registry.clone(),
         mem_router.clone(),
@@ -466,7 +465,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     compactor.clone().start_daemon();
 
     // 2 Background Listeners (Zenoh Global network)
-    let global_axon = axon.clone();
+    let global_merkle = merkle.clone();
     let global_tx = event_tx.clone();
 
     let (pause_tx, pause_rx) = tokio::sync::watch::channel(false);
@@ -480,7 +479,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config: config.clone(),
         policy: policy.clone(),
         mem_router: mem_router.clone(),
-        axon: axon.clone(),
+        merkle: merkle.clone(),
         cold_store: cold_store.clone(),
         wal: wal.clone(),
         event_tx: event_tx.clone(),
@@ -494,6 +493,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pause_tx: pause_tx.clone(),
         compactor: compactor.clone(),
     };
+
+    #[cfg(unix)]
+    {
+        let admin_sock_path = Path::new("./vault/admin.sock");
+        if let Some(parent) = admin_sock_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+
+        if admin_sock_path.exists() {
+            let _ = fs::remove_file(admin_sock_path);
+        }
+
+        let uds_listener = tokio::net::UnixListener::bind(admin_sock_path)
+            .expect("Failed to bind Admin Socket ./vault/admin.sock");
+
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(admin_sock_path, fs::Permissions::from_mode(0o600));
+        let admin_app = build_admin_router(api_state.clone());
+        tokio::spawn(async move {
+            println!(
+                "[SECURITY] Privileged Admin Socket locked to ./vault/admin.sock ( mode 0600) "
+            );
+            axum::serve(uds_listener, admin_app).await.unwrap();
+        });
+    }
 
     let axum_app = build_admin_router(api_state).layer(
         CorsLayer::new()
@@ -572,7 +596,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     println!("External Agent connected from: {}", addr);
 
-                    let task_axon = axon.clone();
+                    let task_merkle = merkle.clone();
                     let task_wal = wal.clone();
                     let task_event_tx = event_tx.clone();
                     let task_aegis = policy.clone();
@@ -653,16 +677,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 let path_intent = archived_ingress.intent_path.as_str();
-                let state_slice = archived_ingress.state_bytes.as_slice();
+                let record_slice = archived_ingress.record_bytes.as_slice();
 
 
-                // ===== REALIGNMENT: Force the sub-slice onto machine word boundaries ==========
                     let mut aligned_state_buf: rkyv::util::AlignedVec<16> = rkyv::util::AlignedVec::new();
-                    aligned_state_buf.extend_from_slice(state_slice);
+                    aligned_state_buf.extend_from_slice(record_slice);
 
                     // Validates the memory layout over the aligned buffer allocation
-                    let archived_state = match rkyv::access::<<AgentState as rkyv::Archive>::Archived, rkyv::rancor::Error>(&aligned_state_buf) {
-                        Ok(valid_state) => valid_state,
+                    let archived_rec = match rkyv::access::<<ExecutionRecord as rkyv::Archive>::Archived, rkyv::rancor::Error>(&aligned_state_buf) {
+                        Ok(valid_rec) => valid_rec,
                         Err(e) => {
                             eprintln!("[AEGIS ERROR] TCP Dropped: Misaligned/Malformed Inner Payload (AgentState): {} ", e);
                             break;
@@ -705,15 +728,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     // Perform ultrafast packet audit for each packet.
-                    let packet_timestamp = archived_state.timestamp.into();
-                    if let  Err(e) = task_aegis.authorize_packet_fast(&cached_agent_hex, &cached_group_name, &agent_pub_key, state_slice, &packet_sig, path_intent, packet_timestamp) {
+                    let packet_timestamp = (archived_rec.timestamp.to_native() / 1000) as i64;
+                    if let  Err(e) = task_aegis.authorize_packet_fast(&cached_agent_hex, &cached_group_name, &agent_pub_key, record_slice, &packet_sig, path_intent, packet_timestamp) {
                         eprintln!("[AEGIS INTERDICTION] Fast Audit failed: {} ", e);
                         break;
                     }
 
                     let agent_hex = cached_agent_hex.clone();
 
-                    let text = archived_state.text.as_str().to_string();
+                    let text = String::from_utf8_lossy(archived_rec.payload_bytes.as_slice()).to_string();
 
                     let mut alias = "Unknown".to_string();
                     if path_intent == "/system/handshake" {
@@ -765,11 +788,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // If the WAL or the Publisher channel are full, the .await creates a healthy backppressure rather than panicking.
                     match execute_raqim_cascade(
                         &archived_state,
-                        task_axon.clone(),
+                        task_merkle.clone(),
                         task_wal.clone(),
                         task_event_tx.clone(),
-                        Vec::new(),
-                        Vec::new(),
                     )
                     .await {
 
