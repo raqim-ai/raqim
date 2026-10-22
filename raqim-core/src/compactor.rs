@@ -298,11 +298,7 @@ impl WalCompactor {
             return 0;
         }
 
-        let max_compacted_tx = logs_to_archive
-            .iter()
-            .map(|l| l.state.transaction_id)
-            .max()
-            .unwrap_or(0);
+        let max_compacted_tx = logs_to_archive.iter().map(|l| l.tx_id).max().unwrap_or(0);
 
         // Archive directly via the ColdStore trait (Zero ML, dependency in the compactor!)
         let archived_count = match self.cold_store.archive_batch(&logs_to_archive).await {

@@ -218,7 +218,7 @@ impl WalEngine {
         if batch.is_empty() {
             return;
         }
-        let first_txid = batch[0].state.transaction_id;
+        let first_txid = batch[0].tx_id;
 
         // zero-copy serialize the entire batch
         let payload_bytes = to_bytes::<rkyv::rancor::Error>(&batch.to_vec())
@@ -477,7 +477,7 @@ impl WalEngine {
             >(&payload)
             {
                 for archived_log in batch.as_slice() {
-                    let tx_id = archived_log.state.transaction_id.to_native();
+                    let tx_id = archived_log.tx_id.to_native();
 
                     if tx_id > highest_tx {
                         highest_tx = tx_id;
@@ -544,7 +544,7 @@ impl WalEngine {
                         tx_id: format!("{:032x}", tx_id),
                         tx_id_hex,
                         agent_hex: hex::encode(archived_log.agent_id.as_slice()),
-                        intent_path: archived_log.state.namespace.as_str().to_string(),
+                        intent_path: archived_log.namespace.as_str().to_string(),
                         text: archived_log.state.text.as_str().to_string(),
                         status: status_str.to_string(),
                         timestamp,

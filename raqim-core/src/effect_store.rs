@@ -372,7 +372,7 @@ impl EffectStore {
 
         let _ = CheckpointEngine::append_control_mutation(
             std::path::Path::new(&self.config.control_journal_path),
-            &ControlMutation::RecordEffect(sealed_record),
+            &ControlMutation::RecordEffect(sealed_record.clone()),
         );
 
         if let Some(batch) = optional_batch {

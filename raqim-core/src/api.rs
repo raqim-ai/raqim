@@ -24,7 +24,6 @@ use tokio::sync::broadcast::Sender;
 
 use crate::cold_store::ColdStore;
 use crate::compactor::WalCompactor;
-use crate::health::SystemHealth;
 use crate::merkle::{InclusionProof, MerkleEngine};
 use crate::otel::{self, OtelExportRequest};
 use crate::policy::{CapabilityCertificate, QuarantineRecord};
