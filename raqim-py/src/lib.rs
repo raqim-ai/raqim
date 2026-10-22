@@ -1,3 +1,4 @@
+use blake3::Hasher;
 use ed25519_dalek::{Signer, SigningKey};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -198,7 +199,7 @@ impl RaqimCryptoCore {
     fn mint_capability_certificate(agent_hex: &str, signing_key: &SigningKey) -> Vec<u8> {
         let mut cert = CapabilityCertificate {
             agent_hex: agent_hex.to_string(),
-            group_name: "admin_group".to_string(),
+            group_name: "default_group".to_string(),
             expiration_timestamp: u64::MAX,
             master_signature: Vec::new(),
         };

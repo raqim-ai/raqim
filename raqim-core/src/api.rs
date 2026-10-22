@@ -107,91 +107,55 @@ where
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        // BARRIER 1: Drive-By Browser Exploit Shield (Cross-Origin Protection)
-        if let Some(origin) = parts.headers.get(ORIGIN).and_then(|v| v.to_str().ok()) {
-            let allowed_origins = [
-                "http://localhost:3000",
-                "http://127.0.0.1:3000",
-                "http://localhost:8081",
-                "http://127.0.0.1:8081",
-            ];
-
-            let is_allowed = allowed_origins.iter().any(|&allowed| allowed == origin);
-            if !is_allowed {
-                eprintln!(
-                    "[SECURITY ALERT] Blocked cross-origin drive-by attempt from Origin: {}",
-                    origin
-                );
-                return Err(ApiError::Forbidden(format!(
-                    "Cross-Origin Security Interdiction: Access from '{}' denied",
-                    origin
-                )));
-            }
-        }
-
-        // BARRIER 2: Resolve Runtime Environment & Loopback Bypass
         let is_production = std::env::var("RAQIM_ENV")
             .map(|v| v.to_lowercase() == "production")
             .unwrap_or(false);
 
-        // In local development, loopback requests from Next.js console are admitted
-        if !is_production {
-            if let Some(host) = parts.headers.get(HOST).and_then(|v| v.to_str().ok()) {
-                if host.starts_with("localhost:") || host.starts_with("127.0.0.1:") {
-                    return Ok(ValidatedIdentity {
-                        tenant_id: "local_open_core".to_string(),
-                        is_admin: true,
-                    });
-                }
-            }
-        }
-
-        // BARRIER 3: Production / Cloud VPS / Docker Hardening
-        let auth_header = match parts
+        // If an Authorization header is provided,  validate it strictky via contant-time comparison
+        if let Some(auth_header) = parts
             .headers
             .get(AUTHORIZATION)
             .and_then(|val| val.to_str().ok())
         {
-            Some(hdr) => hdr,
-            None => {
+            if !auth_header.starts_with("Bearer ") {
                 return Err(ApiError::Unauthorized(
-                    "Missing 'Authorization: Bearer <token>' header".to_string(),
+                    "Invalid auth scheme. Use 'Authorization: Bearer <token>'".to_string(),
                 ));
             }
-        };
 
-        if !auth_header.starts_with("Bearer ") {
+            let provided_token = auth_header.trim_start_matches("Bearer ").trim();
+            let expected_secret = std::env::var("RAQIM_ADMIN_SECRET").unwrap_or_else(|_| {
+                std::fs::read_to_string("./ca-keys/admin.secret")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string()
+            });
+
+            if !expected_secret.is_empty()
+                && constant_time_compare(provided_token.as_bytes(), expected_secret.as_bytes())
+            {
+                return Ok(ValidatedIdentity {
+                    tenant_id: "operator_authenticated".to_string(),
+                    is_admin: true,
+                });
+            }
+
             return Err(ApiError::Unauthorized(
-                "Invalid auth scheme. Use 'Bearer <token>'".to_string(),
+                "Access Denied: Invalid Administrative Bearer Token ".to_string(),
             ));
         }
 
-        let provided_token = auth_header.trim_start_matches("Bearer ").trim();
-
-        let expected_secret = std::env::var("RAQIM_ADMIN_SECRET").unwrap_or_else(|_| {
-            std::fs::read_to_string("keys/admin.secret")
-                .unwrap_or_default()
-                .trim()
-                .to_string()
-        });
-
-        if expected_secret.is_empty() {
-            return Err(ApiError::InternalServerError(
-                "Security Gate Block: RAQIM_ADMIN_SECRET is empty on production daemon".to_string(),
-            ));
-        }
-
-        // Constant-time byte comparison mitigates timing attacks
-        if constant_time_compare(provided_token.as_bytes(), expected_secret.as_bytes()) {
-            Ok(ValidatedIdentity {
-                tenant_id: "production_tenant".to_string(),
+        // On the Unix Domain Socket (./vault/admin.sock, mode 0600) or non productiton local sandbox
+        if !is_production {
+            return Ok(ValidatedIdentity {
+                tenant_id: "local_operator".to_string(),
                 is_admin: true,
-            })
-        } else {
-            Err(ApiError::Unauthorized(
-                "Access Denied: Invalid Administrative Token".to_string(),
-            ))
+            });
         }
+
+        Err(ApiError::Unauthorized(
+            "Missing 'Authorization: Bearer <token>' header for admin plane".to_string(),
+        ))
     }
 }
 
@@ -295,22 +259,15 @@ pub async fn active_qurantine_endpoint(
 }
 
 #[derive(Deserialize)]
-struct ResurrectPayload {
+struct LiftQuarantinePagyload {
     agent_hex: String,
-    system_prompt_override: String,
 }
 
-async fn lift_qurantine_and_resurrect(
+async fn lift_qurantine_handler(
     _auth: ValidatedIdentity,
     State(state): State<ApiState>,
-    Json(payload): Json<ResurrectPayload>,
+    Json(payload): Json<LiftQuarantinePagyload>,
 ) -> Result<Json<Value>, ApiError> {
-    // Fire the Out-of-Band Context Eviction Via Zenoh
-    println!(
-        "[AEGIS] Dispatching Context Eviction to: {}... ",
-        payload.agent_hex.clone()
-    );
-
     // Unfreeze the Agent (Remove from RAM)
     if state
         .policy
@@ -327,54 +284,32 @@ async fn lift_qurantine_and_resurrect(
         );
 
         // Also update the Ram process table so the Topology page knows it's alive again.
-        // TODO: Update the  namespace
         state
             .swarm_registry
-            .touch_agent(&payload.agent_hex, "Unknown", "Rebooting", "Unknown");
+            .touch_agent(&payload.agent_hex, "Unknown", "Active", "Unknown");
 
         println!(
-            "[AEGIS] Agent {} quarantine lifted. Reality re-seeded.",
+            "[POLICY] Quarantine lifted for agent: {}",
             payload.agent_hex
         );
 
-        match state
-            .mem_router
-            .boot_historical_agent(&payload.agent_hex, None, None, false)
-            .await
-        {
-            Ok(()) => Ok(Json(
-                json!({"success": true, "message": "Quarantine lifted"}),
-            )),
-
-            Err(e) => {
-                let err_str = e.to_string();
-                if err_str.contains("no immutable memory on disk") {
-                    println!(
-                        "[TIME MACHINE] Agent {} has no prior WAL history; active at Genesis state.", payload.agent_hex
-                    );
-
-                    Ok(Json(json!({
-                        "success": true,
-                        "message": "Quarantine lifted (Genesis state; zero historical commits)"
-                    })))
-                } else {
-                    eprintln!(
-                        "[TIME MACHINE FATAL] Failed to resurrect WASM state for {}: {} ",
-                        &payload.agent_hex, e
-                    );
-                    Err(ApiError::InternalServerError(format!(
-                        "Resurrection failed: {}",
-                        e
-                    )))
-                }
-            }
-        }
+        Ok(Json(json!({
+            "success": true,
+            "message": "Quarantine lifted"
+        })))
     } else {
         Err(ApiError::NotFound(format!(
             "Agent {} not in quarantine",
             payload.agent_hex
         )))
     }
+}
+
+pub async fn in_doubt_intents_endpoint(
+    _auth: ValidatedIdentity,
+    State(state): State<ApiState>,
+) -> Json<Vec<ExecutionRecord>> {
+    Json(state.mem_router.get_in_doubt_intents())
 }
 
 #[derive(Deserialize, Clone)]
@@ -438,7 +373,7 @@ async fn time_travel_endpoint(
     }
 }
 
-// THE ZERO-COPY HTTP INGRESS: The endpoint expects raw binary `rkyv` bytes, Not JSON.
+/// Zero-copy Binary Ingress Endpoint ("Point /v1/swarm/ingress")
 pub async fn http_ingress_endpoint(
     State(state): State<ApiState>,
     body: Bytes,
@@ -468,7 +403,7 @@ pub async fn http_ingress_endpoint(
         .try_into()
         .map_err(|_| ApiError::BadRequest("Public key must be exactly 32 bytes".to_string()))?;
 
-    // O(1) Aegis Policy Check.
+    // O(1) policy Policy Check.
     let mut packet_sig = [0u8; 64];
     if archived_ingress.signature.len() != 64 {
         return Err(ApiError::BadRequest(
@@ -494,7 +429,7 @@ pub async fn http_ingress_endpoint(
             &path_intent,
             packet_ts_sec,
         )
-        .map_err(|e| ApiError::Forbidden(format!("Aegis Interdiction: {}", e)))?;
+        .map_err(|e| ApiError::Forbidden(format!("policy Interdiction: {}", e)))?;
 
     let tx_id = execute_raqim_cascade(
         archived_rec,
@@ -540,8 +475,15 @@ pub async fn fetch_agent_timeline(
     }
 
     nodes.sort_by(|a, b| a.tx_id.cmp(&b.tx_id));
+    nodes.dedup_by_key(|n| n.tx_id);
 
     Ok(Json(nodes))
+}
+
+impl From<anyhow::Error> for ApiError {
+    fn from(err: anyhow::Error) -> Self {
+        ApiError::InternalServerError(err.to_string())
+    }
 }
 
 pub async fn toggle_ingress_endpoint(
@@ -556,11 +498,7 @@ pub async fn toggle_ingress_endpoint(
 
     println!(
         "[SYSTEM] Ingress flow control changed: {} ",
-        if new_state {
-            "PAUSED (TCP ZERO-WINDOW) "
-        } else {
-            "ACTIVE"
-        }
+        if new_state { "PAUSED " } else { "ACTIVE" }
     );
 
     Ok(Json(serde_json::json!({
@@ -580,7 +518,7 @@ pub struct GroupPolicyTelemetry {
 }
 
 #[derive(Serialize)]
-pub struct AegisMetricsData {
+pub struct PolicyMetricsData {
     pub total_quarantined: usize,
     pub recent_interdictions: usize,
     pub signarure_spoofs: usize,
@@ -589,11 +527,11 @@ pub struct AegisMetricsData {
     pub active_policies: Vec<GroupPolicyTelemetry>,
 }
 
-pub async fn aegis_metics_endpoint(
+pub async fn policy_metics_endpoint(
     _auth: ValidatedIdentity,
     State(state): State<ApiState>,
-) -> Result<Json<AegisMetricsData>, ApiError> {
-    let mut metrics = AegisMetricsData {
+) -> Result<Json<PolicyMetricsData>, ApiError> {
+    let mut metrics = PolicyMetricsData {
         total_quarantined: 0,
         recent_interdictions: 0,
         signarure_spoofs: 0,
@@ -788,11 +726,11 @@ pub async fn preflight_effect_handler(
     let capability_cert = hex::decode(&payload.capability_cert_hex)
         .map_err(|_| ApiError::BadRequest("Invalid capability_cert_hex format".to_string()))?;
 
-    // Aegis barrier 1: Lineage Verification
+    // policy barrier 1: Lineage Verification
     let (verified_agent_hex, group_name) = state
         .policy
         .verify_session_lineage(&capability_cert, &pub_key)
-        .map_err(|e| ApiError::Unauthorized(format!("Aegis lineage rejection: {}", e)))?;
+        .map_err(|e| ApiError::Unauthorized(format!("policy lineage rejection: {}", e)))?;
 
     if verified_agent_hex != payload.agent_hex {
         return Err(ApiError::Forbidden(
@@ -802,7 +740,7 @@ pub async fn preflight_effect_handler(
 
     if state.policy.is_quarantined(&payload.agent_hex) {
         return Err(ApiError::Forbidden(
-            "Agent is actively quarantined by Aegis firewall".to_string(),
+            "Agent is actively quarantined by policy firewall".to_string(),
         ));
     }
 
@@ -811,7 +749,7 @@ pub async fn preflight_effect_handler(
         payload.namespace, payload.step_ordinal, payload.call_signature_hex, payload.timestamp
     );
 
-    // Aegis Barrier 2: Fast-path policy audit (anti-replay, signature, rate-limiting, and namespace ACL)
+    // policy Barrier 2: Fast-path policy audit (anti-replay, signature, rate-limiting, and namespace ACL)
     state
         .policy
         .authorize_packet_fast(
@@ -823,7 +761,7 @@ pub async fn preflight_effect_handler(
             &payload.namespace,
             payload.timestamp,
         )
-        .map_err(|e| ApiError::Forbidden(format!("Aegis Interdiction: {}", e)))?;
+        .map_err(|e| ApiError::Forbidden(format!("policy Interdiction: {}", e)))?;
 
     Ok(Json(PreflightEffectResponse {
         allowed: true,
@@ -871,11 +809,11 @@ pub async fn record_effect_handler(
         .decode(&payload.output_payload_base64)
         .map_err(|_| ApiError::BadRequest("Invalid base64 payload".to_string()))?;
 
-    // Aegis barrier 1: Lineage Verification
+    // policy barrier 1: Lineage Verification
     let (verified_agent_hex, group_name) = state
         .policy
         .verify_session_lineage(&capability_cert, &pub_key)
-        .map_err(|e| ApiError::Unauthorized(format!("Aegis lineage rejection: {}", e)))?;
+        .map_err(|e| ApiError::Unauthorized(format!("policy lineage rejection: {}", e)))?;
 
     if verified_agent_hex != payload.agent_hex {
         return Err(ApiError::Forbidden(
@@ -892,7 +830,7 @@ pub async fn record_effect_handler(
         payload.timestamp
     );
 
-    // Aegis Barrier 2: Fast-path policy audit
+    // policy Barrier 2: Fast-path policy audit
     state
         .policy
         .authorize_packet_fast(
@@ -904,7 +842,7 @@ pub async fn record_effect_handler(
             &payload.namespace,
             payload.timestamp,
         )
-        .map_err(|e| ApiError::Forbidden(format!("Aegis Interdiction: {}", e)))?;
+        .map_err(|e| ApiError::Forbidden(format!("policy Interdiction: {}", e)))?;
 
     let is_forked = payload.namespace.starts_with("phantom_");
 
@@ -1130,13 +1068,10 @@ pub fn build_admin_router(state: ApiState) -> axum::Router {
         .route("/v1/effect/preflight", post(preflight_effect_handler))
         .route("/v1/effect/record", post(record_effect_handler))
         .route("/v1/effect/get", post(get_effect_handler))
-        // Aegis Firewall & Governance
+        // policy Firewall & Governance
         .route("/v1/policy/quarantine_list", get(active_qurantine_endpoint))
-        .route(
-            "/v1/admin/quarantine/lift",
-            post(lift_qurantine_and_resurrect),
-        )
-        .route("/v1/policy/metrics", get(aegis_metics_endpoint))
+        .route("/v1/admin/quarantine/lift", post(lift_qurantine_handler))
+        .route("/v1/policy/metrics", get(policy_metics_endpoint))
         .route("/v1/admin/ca/mint", post(handle_ca_mint))
         // Time Machine & Reality Forking
         .route("/v1/admin/time_travel", post(time_travel_endpoint))
