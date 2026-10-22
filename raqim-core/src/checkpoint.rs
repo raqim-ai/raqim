@@ -38,7 +38,7 @@ pub struct StateCheckpoint {
     /// Cryptographic Merkle DAG state
     pub merkle_state: MerkleCheckpointState,
     /// Deterministic $0 replay cache
-    pub effects: Vec<EffectRecord>,
+    pub effects: Vec<ExecutionRecord>,
     /// Active quarantine blocklist
     pub quarantines: Vec<QuarantineRecord>,
     /// Live agent process table
@@ -50,7 +50,7 @@ pub struct StateCheckpoint {
 pub enum ControlMutation {
     Quarantine(QuarantineRecord),
     LiftQuarantine { agent_hex: String },
-    RecordEffect(EffectRecord),
+    RecordEffect(ExecutionRecord),
     TouchAgent(AgentProcess),
 }
 

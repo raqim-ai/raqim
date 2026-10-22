@@ -6,7 +6,7 @@ use crate::{
     policy::PolicyEngine,
     registry::SwarmRegistry,
     wal::WalCommand,
-    OpLog, SystemEvent,
+    ExecutionRecord, SystemEvent,
 };
 use rkyv::Archive;
 use std::{
@@ -245,7 +245,7 @@ impl WalCompactor {
         }
 
         let mut offset = 0;
-        let mut logs_to_archive: Vec<OpLog> = Vec::new();
+        let mut logs_to_archive: Vec<ExecutionRecord> = Vec::new();
         let mut aligned_buf = rkyv::util::AlignedVec::<16>::new();
 
         // 16-Byte Aligned Batch Parser with CRC32 verification
@@ -277,11 +277,13 @@ impl WalCompactor {
             aligned_buf.clear();
             aligned_buf.extend_from_slice(entry_slice);
 
-            if let Ok(archived_batch) =
-                rkyv::access::<<Vec<OpLog> as Archive>::Archived, rkyv::rancor::Error>(&aligned_buf)
+            if let Ok(archived_batch) = rkyv::access::<
+                <Vec<ExecutionRecord> as Archive>::Archived,
+                rkyv::rancor::Error,
+            >(&aligned_buf)
             {
                 if let Ok(batch) =
-                    rkyv::deserialize::<Vec<OpLog>, rkyv::rancor::Error>(archived_batch)
+                    rkyv::deserialize::<Vec<ExecutionRecord>, rkyv::rancor::Error>(archived_batch)
                 {
                     logs_to_archive.extend(batch);
                 }

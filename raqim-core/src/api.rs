@@ -1157,7 +1157,6 @@ pub fn build_admin_router(state: ApiState) -> axum::Router {
         )
         // System & Agent Deployment endpoints
         .route("/v1/system/thoughts/recent", get(recent_record_endpoint))
-        .route("/v1/system/agents/aliases", get(agent_alias_endpoint))
         // Swarm & A2A Ingress
         .route("/v1/swarm/ingress", post(http_ingress_endpoint))
         .route(

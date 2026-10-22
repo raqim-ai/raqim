@@ -5,7 +5,6 @@ use crate::{
 use blake3::Hasher;
 use dashmap::DashMap;
 use parking_lot::RwLock;
-use rkyv::Archived;
 use serde::{Deserialize, Serialize};
 use std::{
     eprintln, format, println,
@@ -427,7 +426,7 @@ impl MerkleEngine {
                     &intact_bundle
                         .raw_logs
                         .iter()
-                        .map(|l| l.current_hash)
+                        .map(|l| l.leaf_hash)
                         .collect::<Vec<_>>(),
                 );
                 if hex::encode(computed_root) != witness.merkle_root_hex {
@@ -443,11 +442,7 @@ impl MerkleEngine {
                     parent_batch_root: hex::decode(&intact_bundle.witness.parent_batch_root_hex)?
                         .try_into()
                         .unwrap_or([0u8; 32]),
-                    leaves: intact_bundle
-                        .raw_logs
-                        .iter()
-                        .map(|l| l.current_hash)
-                        .collect(),
+                    leaves: intact_bundle.raw_logs.iter().map(|l| l.leaf_hash).collect(),
                 };
 
                 // Overwrite the corrupted local memory slot with pristine data
@@ -457,7 +452,7 @@ impl MerkleEngine {
                 // Re-map transaction indices for the repaired block logs
                 for (idx, log) in intact_bundle.raw_logs.iter().enumerate() {
                     self.tx_to_location
-                        .insert(log.state.transaction_id, (witness.batch_id, idx));
+                        .insert(log.tx_id, (witness.batch_id, idx));
                 }
 
                 println!(
