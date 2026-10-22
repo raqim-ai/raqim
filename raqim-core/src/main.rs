@@ -15,10 +15,7 @@ use raqim_core::effect_store::EffectStore;
 use raqim_core::registry::SwarmRegistry;
 use raqim_core::wal::{WalCommand, WalEngine};
 use raqim_core::witness::WormWitnessEngine;
-use raqim_core::{
-    execute_raqim_cascade, AgentState, ExecutionRecord, ExecutionRecord, IngressEnvelope,
-    SystemEvent,
-};
+use raqim_core::{execute_raqim_cascade, ExecutionRecord, IngressEnvelope, SystemEvent};
 use tower_http::cors::{Any, CorsLayer};
 
 use std::path::Path;

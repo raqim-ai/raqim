@@ -4,7 +4,7 @@ use rkyv::to_bytes;
 
 use std::{
     collections::BTreeMap,
-    eprintln,
+    eprintln, format,
     fs::File,
     io::Read,
     println,
@@ -23,7 +23,7 @@ pub struct WalEngine {
     sender: mpsc::Sender<ExecutionRecord>,
     pub cmd_sender: mpsc::Sender<WalCommand>,
 
-    // The O(1) INDEX: Maps TxID -> Physical byte offset in the WAL.
+    // The O(1) INDEX: Maps the first `tx_id` of each batch -> Physical byte offset in the WAL.
     pub index: Arc<RwLock<BTreeMap<u128, u64>>>,
 }
 
@@ -78,7 +78,7 @@ impl WalEngine {
 
     /// Bootstraps the crash-safe WAL with automatic torn-frame recovery
     pub async fn start(file_path: String) -> (Arc<Self>, tokio::task::JoinHandle<()>) {
-        println!("Bismillah. Booting Portable Nucleus Crash-Safe WAL Engine...");
+        println!("[WAL] Bismillah. Booting  Crash-Safe WAL Engine...");
 
         // Pre-Flight Forensic Scan - Detect and trunate torn frames from prior crashes.
         let (clean_offset, recovered_index) = Self::recover_and_truncate_torn_frames(&file_path);
@@ -116,16 +116,16 @@ impl WalEngine {
 
             loop {
                 tokio::select! {
-                    // Path A: Incoming log item
+                    // Path A: Incoming record item
                     msg = rx.recv() => {
                         match msg  {
-                            Some(log) => {
-                              batch.push(log);
+                            Some(record) => {
+                              batch.push(record);
 
-                            // Drain the channel of any other pending thoughts for batching
+                            // Drain the channel of any other pending record for batching
                             while batch.len() < 6_000 {
-                                    if let Ok(pending_log) = rx.try_recv() {
-                                        batch.push(pending_log);
+                                    if let Ok(pending) = rx.try_recv() {
+                                        batch.push(pending);
                                     } else {
                                         break;
                                     }
@@ -136,8 +136,7 @@ impl WalEngine {
 
                                 batch.clear();
                             }
-
-                    }
+                        }
                             None => break
 
                         }
@@ -186,14 +185,11 @@ impl WalEngine {
                             // Tell the compactor the achived file is ready
                             let _ = reply_tx.send(archived_name);
                             println!("[WAL_ENGINE] Rotation complete. I/O resumed.");
-
-                    }
+                        }
 
                             None => break,
                         }
-
                     }
-
                 }
             }
         });
@@ -272,7 +268,7 @@ impl WalEngine {
             Ok(f) => f,
             Err(_) => {
                 println!(
-                    "[WAL] No existing WAL file at {}. Initializing fresh 0-byte log. ",
+                    "[WAL] No existing WAL file at {}. Initializing fresh 0-byte record. ",
                     file_path
                 );
                 return (0, BTreeMap::new());
@@ -328,17 +324,20 @@ impl WalEngine {
                 break;
             }
 
+            let mut aligned_buf = rkyv::util::AlignedVec::<16>::with_capacity(payload.len());
+            aligned_buf.extend_from_slice(&payload);
+
             // Zero-copy rkyv exraction to build memory index
             if let Ok(archived_batch) = rkyv::access::<
                 <Vec<ExecutionRecord> as rkyv::Archive>::Archived,
                 rkyv::rancor::Error,
-            >(&payload)
+            >(&aligned_buf)
             {
                 if let Ok(batch) =
                     rkyv::deserialize::<Vec<ExecutionRecord>, rkyv::rancor::Error>(archived_batch)
                 {
                     if !batch.is_empty() {
-                        index.insert(batch[0].state.transaction_id, offset);
+                        index.insert(batch[0].tx_id, offset);
                     }
                 }
             }
@@ -363,15 +362,15 @@ impl WalEngine {
         (offset, index)
     }
 
-    /// Returns the number of uncompacted logs currently in the Hot WAL. O(1) operation utilizing the BTreeMap index
+    /// Returns the number of uncompacted recs currently in the Hot WAL. O(1) operation utilizing the BTreeMap index
     pub async fn get_pending_count(&self) -> usize {
         self.index.read().await.len()
     }
 
     /// Fire and forget. The TCP/Agent networking layer NEVER blocks here.
-    pub async fn append(&self, log: ExecutionRecord) -> Result<(), WalError> {
+    pub async fn append(&self, record: ExecutionRecord) -> Result<(), WalError> {
         self.sender
-            .send(log)
+            .send(record)
             .await
             .map_err(|e| WalError::IngressQueueFull(e.to_string()))
     }
@@ -392,6 +391,7 @@ impl WalEngine {
         let mmap = unsafe { MmapOptions::new().map(&file)? };
         let mut cursor = 0;
         let target_bytes = hex::decode(agent_hex).unwrap_or(vec![0; 16]);
+        let mut aligned_buf = rkyv::util::AlignedVec::<16>::new();
 
         while cursor + 8 <= mmap.len() {
             let len = u32::from_le_bytes(mmap[cursor..cursor + 4].try_into().unwrap()) as usize;
@@ -409,26 +409,26 @@ impl WalEngine {
                 continue;
             }
 
+            aligned_buf.clear();
+            aligned_buf.extend_from_slice(payload);
+
             if let Ok(archived_batch) = rkyv::access::<
                 <Vec<ExecutionRecord> as rkyv::Archive>::Archived,
                 rkyv::rancor::Error,
-            >(payload)
+            >(&aligned_buf)
             {
-                for archived_log in archived_batch.as_slice() {
-                    if archived_log.agent_id.as_slice() == target_bytes.as_slice() {
-                        let status_str = match &archived_log.state.status {
-                            rkyv::Archived::<AgentStatus>::Idle => "Idle",
-                            rkyv::Archived::<AgentStatus>::Reasoning => "Reasoning",
-                            rkyv::Archived::<AgentStatus>::Halted => "Halted",
-                            rkyv::Archived::<AgentStatus>::ToolExecution => "ToolExecution",
-                        };
-
-                        nodes.push(TimelineNode {
-                            tx_id: archived_log.state.transaction_id.to_native(),
-                            timestamp: archived_log.state.timestamp.to_string(),
-                            agent_status: status_str.to_string(),
-                            payload_preview: archived_log.state.text.as_str().to_string(),
-                        });
+                for archived_rec in archived_batch.as_slice() {
+                    if archived_rec.agent_id.as_slice() == target_bytes.as_slice() {
+                        if let Ok(owned) =
+                            rkyv::deserialize::<ExecutionRecord, rkyv::rancor::Error>(archived_rec)
+                        {
+                            nodes.push(TimelineNode {
+                                tx_id: owned.tx_id,
+                                timestamp: owned.timestamp.to_string(),
+                                agent_status: owned.stage.as_str().to_string(),
+                                payload_preview: owned.payload_text_preview(),
+                            });
+                        }
                     }
                 }
             }
@@ -455,7 +455,7 @@ impl WalEngine {
         let mut len_buf = [0u8; 4];
         let mut crc_buf = [0u8; 4];
 
-        // Iterate throught the append-only binary log.
+        // Iterate throught the append-only binary record.
         while file.read_exact(&mut len_buf).is_ok() {
             let payload_len = u32::from_le_bytes(len_buf) as usize;
 
@@ -476,8 +476,8 @@ impl WalEngine {
                 rkyv::rancor::Error,
             >(&payload)
             {
-                for archived_log in batch.as_slice() {
-                    let tx_id = archived_log.tx_id.to_native();
+                for archived_rec in batch.as_slice() {
+                    let tx_id = archived_rec.tx_id.to_native();
 
                     if tx_id > highest_tx {
                         highest_tx = tx_id;
@@ -500,8 +500,9 @@ impl WalEngine {
             Err(_) => return Vec::new(),
         };
 
-        let mut thoughts = Vec::new();
+        let mut records = Vec::new();
         let mut cursor = 0;
+        let mut aligned_buf = rkyv::util::AlignedVec::<16>::new();
 
         while cursor + 8 <= mmap.len() {
             let len = u32::from_le_bytes(mmap[cursor..cursor + 4].try_into().unwrap()) as usize;
@@ -519,43 +520,35 @@ impl WalEngine {
                 continue;
             }
 
+            aligned_buf.clear();
+            aligned_buf.extend_from_slice(payload);
+
             if let Ok(archived_batch) = rkyv::access::<
                 <Vec<ExecutionRecord> as rkyv::Archive>::Archived,
                 rkyv::rancor::Error,
-            >(payload)
+            >(&aligned_buf)
             {
-                for archived_log in archived_batch.as_slice() {
-                    let tx_id = archived_log.state.transaction_id.to_native();
-                    let tx_id_hex = format!("0x{:032x}", tx_id);
-                    let raw_ts = archived_log.state.timestamp.to_native();
-                    let timestamp = if raw_ts < 10_000_000_000 {
-                        raw_ts * 1000
-                    } else {
-                        raw_ts
-                    };
-                    let status_str = match &archived_log.state.status {
-                        rkyv::Archived::<AgentStatus>::Idle => "IDLE",
-                        rkyv::Archived::<AgentStatus>::Reasoning => "REASONING",
-                        rkyv::Archived::<AgentStatus>::Halted => "HALTED",
-                        rkyv::Archived::<AgentStatus>::ToolExecution => "TOOL_EXEC",
-                    };
-
-                    thoughts.push(RecentRecord {
-                        tx_id: format!("{:032x}", tx_id),
-                        tx_id_hex,
-                        agent_hex: hex::encode(archived_log.agent_id.as_slice()),
-                        intent_path: archived_log.namespace.as_str().to_string(),
-                        text: archived_log.state.text.as_str().to_string(),
-                        status: status_str.to_string(),
-                        timestamp,
-                    });
+                for archived_rec in archived_batch.as_slice() {
+                    if let Ok(owned) =
+                        rkyv::deserialize::<ExecutionRecord, rkyv::rancor::Error>(archived_rec)
+                    {
+                        records.push(RecentRecord {
+                            tx_id: format!("{:032x}", owned.tx_id),
+                            tx_id_hex: format!("0x{:032x}", owned.tx_id),
+                            agent_hex: hex::encode(owned.agent_id),
+                            intent_path: owned.namespace.clone(),
+                            text: owned.payload_text_preview(),
+                            status: owned.stage.as_str().to_string(),
+                            timestamp: owned.timestamp,
+                        });
+                    }
                 }
             }
         }
 
-        if thoughts.len() > limit {
-            thoughts = thoughts.split_off(thoughts.len() - limit);
+        if records.len() > limit {
+            records = records.split_off(records.len() - limit);
         }
-        thoughts
+        records
     }
 }

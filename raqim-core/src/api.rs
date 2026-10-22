@@ -100,7 +100,6 @@ pub struct ValidatedIdentity {
     pub is_admin: bool,
 }
 
-#[axum::async_trait]
 impl<S> FromRequestParts<S> for ValidatedIdentity
 where
     S: Send + Sync,
