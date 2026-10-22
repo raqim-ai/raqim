@@ -1,6 +1,6 @@
 use crate::{
     witness::{AnchoredRootWitness, WormWitnessEngine},
-    ExecutionRecord,
+    ExecutionRecord, RecentRecord,
 };
 use blake3::Hasher;
 use dashmap::DashMap;
@@ -80,14 +80,14 @@ impl MerkleEngine {
     }
 
     /// Cryptographically seals an `ExecutionRecord` into the namespace's Merkle tree. Triggers automatic batch crystallization when leaf capacity reaches 1,024
-    pub fn seal_record(&self, mut log: ExecutionRecord) -> (ExecutionRecord, Option<MarkleBatch>) {
-        let namespace = log.state.namespace.clone();
+    pub fn seal_record(
+        &self,
+        mut record: ExecutionRecord,
+    ) -> (ExecutionRecord, Option<MarkleBatch>) {
+        let namespace = record.namespace.clone();
 
         // Compute the discrete leaf cryptographic hash using domain separation
-        let mut leaf_hasher = Hasher::new_derive_key("raqim.axon.v1.leaf");
-        leaf_hasher.update(log.state.text.as_bytes());
-        leaf_hasher.update(&log.agent_id);
-        let leaf_hash: [u8; 32] = leaf_hasher.finalize().into();
+        let leaf_hash = Self::compute_leaf_hash(&record.payload_hash, &record.agent_id);
 
         // Fetch parent root hash for temporal linkage
         let parent_root = self
@@ -96,13 +96,13 @@ impl MerkleEngine {
             .map(|b| b.read().parent_batch_root)
             .unwrap_or([0u8; 32]);
 
-        log.previous_hash = parent_root;
-        log.current_hash = leaf_hash;
+        record.previous_root = parent_root;
+        record.leaf_hash = leaf_hash;
 
         // Delegate to internal ingestion helper
-        let batch = self.ingest_leaf_internal(&namespace, leaf_hash, log.clone());
+        let batch = self.ingest_leaf_internal(&namespace, leaf_hash, record.clone());
 
-        (log, batch)
+        (record, batch)
     }
 
     /// Internal Engine loop: Condenses an arbitrary array of leaf hashes into a single Markle Root
@@ -117,13 +117,13 @@ impl MerkleEngine {
 
             for chunk in current_level.chunks(2) {
                 if chunk.len() == 2 {
-                    let mut hasher = Hasher::new_derive_key("raqim.axon.v1.node");
+                    let mut hasher = Hasher::new_derive_key("raqim.merkle.v1.node");
                     hasher.update(&chunk[0]);
                     hasher.update(&chunk[1]);
                     next_level.push(hasher.finalize().into());
                 } else {
                     // Odd element cleanujp
-                    let mut hasher = Hasher::new_derive_key("raqim.axon.v1.node");
+                    let mut hasher = Hasher::new_derive_key("raqim.merkle.v1.node");
                     hasher.update(&chunk[0]);
                     hasher.update(&chunk[0]);
                     next_level.push(hasher.finalize().into());
@@ -155,6 +155,7 @@ impl MerkleEngine {
                     parent_batch_root_hex: hex::encode(batch.parent_batch_root),
                     batch_id,
                     is_active_buffer: false,
+                    payload_hash_hex: String::new(),
                 });
             }
         }
@@ -165,6 +166,11 @@ impl MerkleEngine {
             if let Some(leaf_index) = buffer.accumulated_tx_ids.iter().position(|&id| id == tx_id) {
                 let active_root = Self::compute_markle_root(&buffer.accumulated_leaves);
                 let proof_nodes = Self::exract_sibling_path(&buffer.accumulated_leaves, leaf_index);
+                let payload_hash_hex = buffer
+                    .accumulated_records
+                    .get(leaf_index)
+                    .map(|r| hex::encode(r.payload_hash))
+                    .unwrap_or_default();
 
                 return Some(InclusionProof {
                     tx_id_hex,
@@ -174,6 +180,7 @@ impl MerkleEngine {
                     parent_batch_root_hex: hex::encode(buffer.parent_batch_root),
                     batch_id: buffer.current_batch_id,
                     is_active_buffer: true,
+                    payload_hash_hex,
                 });
             }
         }
@@ -190,7 +197,7 @@ impl MerkleEngine {
             let mut next_level = Vec::with_capacity((current_level.len() + 1) / 2);
 
             for chunk in current_level.chunks(2) {
-                let mut hasher = Hasher::new_derive_key("raqim.axon.v1.node");
+                let mut hasher = Hasher::new_derive_key("raqim.merkle.v1.node");
                 if chunk.len() == 2 {
                     hasher.update(&chunk[0]);
                     hasher.update(&chunk[1]);
@@ -225,9 +232,9 @@ impl MerkleEngine {
         &self,
         namespace: &str,
         leaf_hash: [u8; 32],
-        log: OpLog,
+        record: ExecutionRecord,
     ) -> Option<MarkleBatch> {
-        let tx_id = log.state.transaction_id;
+        let tx_id = record.tx_id;
 
         // Pass 1: Acquire reference to the namespace buffer
         let buffer_arc = self
@@ -238,7 +245,7 @@ impl MerkleEngine {
                     current_batch_id: self.global_batch_counter.fetch_add(1, SeqCst),
                     parent_batch_root: [0u8; 32],
                     accumulated_leaves: Vec::with_capacity(1024),
-                    accumulated_logs: Vec::with_capacity(1024),
+                    accumulated_records: Vec::with_capacity(1024),
                     accumulated_tx_ids: Vec::with_capacity(1024),
                 }))
             })
@@ -254,7 +261,7 @@ impl MerkleEngine {
         );
 
         buffer.accumulated_leaves.push(leaf_hash);
-        buffer.accumulated_logs.push(log);
+        buffer.accumulated_records.push(record);
         buffer.accumulated_tx_ids.push(tx_id);
 
         // Cap Checkpoint: If capacity hits 1,024 leaves, crystallize the Markle Tree
@@ -277,7 +284,7 @@ impl MerkleEngine {
             buffer.parent_batch_root = root;
             buffer.current_batch_id = self.global_batch_counter.fetch_add(1, SeqCst);
             buffer.accumulated_leaves.clear();
-            buffer.accumulated_logs.clear();
+            buffer.accumulated_records.clear();
             buffer.accumulated_tx_ids.clear();
 
             return Some(completed_batch);
@@ -287,9 +294,9 @@ impl MerkleEngine {
     }
 
     /// THE PHOENIX CRASH RECOVERY COMPONENT
-    pub fn hydrate_from_recovery(&self, log: &OpLog) {
-        let namespace = log.state.namespace.clone();
-        let _ = self.ingest_leaf_internal(&namespace, log.current_hash, log.clone());
+    pub fn hydrate_from_recovery(&self, record: &ExecutionRecord) {
+        let namespace = record.namespace.clone();
+        let _ = self.ingest_leaf_internal(&namespace, record.leaf_hash, record.clone());
     }
 
     /// Exports the full cryptographic Merkle DAG state for checkpointing
@@ -304,7 +311,7 @@ impl MerkleEngine {
                 current_batch_id: buf.current_batch_id,
                 parent_batch_root: buf.parent_batch_root,
                 accumulated_leaves: buf.accumulated_leaves.clone(),
-                accumulated_logs: buf.accumulated_logs.clone(),
+                accumulated_records: buf.accumulated_records.clone(),
                 accumulated_tx_ids: buf.accumulated_tx_ids.clone(),
             });
         }
@@ -329,7 +336,7 @@ impl MerkleEngine {
                 current_batch_id: snap.current_batch_id,
                 parent_batch_root: snap.parent_batch_root,
                 accumulated_leaves: snap.accumulated_leaves,
-                accumulated_logs: snap.accumulated_logs,
+                accumulated_records: snap.accumulated_records,
                 accumulated_tx_ids: snap.accumulated_tx_ids,
             };
             self.active_buffers
@@ -340,17 +347,12 @@ impl MerkleEngine {
         }
     }
 
-    /// Validates inclusion proof using raw payload + proof data
-    pub fn verify_inclusion(
-        payload_bytes: &[u8],
+    pub fn verify_inclusion_by_payload_hash(
+        payload_hash: &[u8; 32],
         agent_id: &[u8; 16],
         proof: &InclusionProof,
     ) -> bool {
-        let mut leaf_hasher = Hasher::new_derive_key("raqim.axon.v1.leaf");
-        leaf_hasher.update(payload_bytes);
-        leaf_hasher.update(agent_id);
-        let mut current_hash: [u8; 32] = leaf_hasher.finalize().into();
-
+        let mut current_hash = Self::compute_leaf_hash(payload_hash, agent_id);
         let mut index = proof.leaf_index;
 
         for sibling_hex in &proof.sibling_hashes_hex {
@@ -377,16 +379,15 @@ impl MerkleEngine {
         hex::encode(current_hash) == proof.merkle_root_hex
     }
 
-    /// Network p2p Verification Anchor: Validates signatures over raw FFI slices safely
-    pub fn verify_foreign_thoughts(&self, log: &Archived<OpLog>) -> bool {
-        let mut hasher = Hasher::new_derive_key("raqim.axon.v1.leaf");
+    /// Validates inclusion proof using raw payload + proof data
+    pub fn verify_inclusion(
+        payload_bytes: &[u8],
+        agent_id: &[u8; 16],
+        proof: &InclusionProof,
+    ) -> bool {
+        let payload_hash = ExecutionRecord::compute_payload_hash(payload_bytes);
 
-        hasher.update(log.state.text.as_bytes());
-        hasher.update(log.agent_id.as_slice());
-
-        let expected_hash: [u8; 32] = hasher.finalize().into();
-
-        expected_hash == *log.current_hash.as_slice()
+        Self::verify_inclusion_by_payload_hash(&payload_hash, agent_id, proof)
     }
 
     /// FORENSIC INTEGRITY COMPONENT: Execute local disk cross-checks against anchored WORM witness on startup
@@ -498,39 +499,25 @@ impl MerkleEngine {
             .unwrap_or(0)
     }
 
-    /// Collects recent thoughts from active RAM buffers across all namespaces
-    pub fn get_recent_thoughts_ram(&self, limit: usize) -> Vec<crate::RecentThought> {
-        let mut thoughts = Vec::new();
+    /// Collects recent Record from active RAM buffers across all namespaces
+    pub fn get_recent_record_ram(&self, limit: usize) -> Vec<RecentRecord> {
+        let mut records = Vec::new();
         for entry in self.active_buffers.iter() {
             let buffer = entry.value().read();
-            for log in buffer.accumulated_logs.iter() {
-                let tx_id = log.state.transaction_id;
-                let tx_id_hex = format!("0x{:032x}", tx_id);
-                let raw_ts = log.state.timestamp;
-                let timestamp = if raw_ts < 10_000_000_000 {
-                    raw_ts * 1000
-                } else {
-                    raw_ts
-                };
-                let status_str = match &log.state.status {
-                    crate::AgentStatus::Idle => "IDLE",
-                    crate::AgentStatus::Reasoning => "REASONING",
-                    crate::AgentStatus::ToolExecution => "TOOL_EXEC",
-                    crate::AgentStatus::Halted => "HALTED",
-                };
-                thoughts.push(crate::RecentThought {
-                    tx_id: format!("{:032x}", tx_id),
-                    tx_id_hex,
-                    agent_hex: hex::encode(log.agent_id),
-                    intent_path: log.state.namespace.clone(),
-                    text: log.state.text.clone(),
-                    status: status_str.to_string(),
-                    timestamp,
+            for rec in buffer.accumulated_records.iter() {
+                records.push(RecentRecord {
+                    tx_id: format!("{:032x}", rec.tx_id),
+                    tx_id_hex: format!("0x{:032x}", rec.tx_id),
+                    agent_hex: hex::encode(rec.agent_id),
+                    intent_path: rec.namespace.clone(),
+                    text: rec.payload_text_preview(),
+                    status: rec.stage.as_str().to_string(),
+                    timestamp: rec.timestamp,
                 });
             }
         }
-        thoughts.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-        thoughts.truncate(limit);
-        thoughts
+        records.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        records.truncate(limit);
+        records
     }
 }

@@ -137,7 +137,7 @@ impl ExecutionRecord {
 }
 
 #[derive(Debug, PartialEq, Clone, SerdeDeserialize, SerdeSerialize)]
-pub struct RecentThought {
+pub struct RecentRecord {
     pub tx_id: String,
     pub tx_id_hex: String,
     pub agent_hex: String,

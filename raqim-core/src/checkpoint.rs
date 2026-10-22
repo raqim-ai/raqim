@@ -1,10 +1,9 @@
 use crate::{
-    merkle::MarkleBatch, policy::QuarantineRecord, registry::AgentProcess, EffectRecord, OpLog,
+    merkle::MarkleBatch, policy::QuarantineRecord, registry::AgentProcess, ExecutionRecord,
 };
 use crc32fast::Hasher as Crc32Hasher;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::Path,
@@ -17,7 +16,7 @@ pub struct ActiveTreeBufferSnapshot {
     pub current_batch_id: u64,
     pub parent_batch_root: [u8; 32],
     pub accumulated_leaves: Vec<[u8; 32]>,
-    pub accumulated_logs: Vec<OpLog>,
+    pub accumulated_records: Vec<ExecutionRecord>,
     pub accumulated_tx_ids: Vec<u128>,
 }
 
