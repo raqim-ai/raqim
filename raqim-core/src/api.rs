@@ -248,17 +248,6 @@ pub async fn recent_record_endpoint(
     Ok(Json(all_thoughts))
 }
 
-pub async fn agent_alias_endpoint(
-    _auth: ValidatedIdentity,
-    State(state): State<ApiState>,
-) -> axum::Json<HashMap<String, String>> {
-    let mut map = HashMap::new();
-    for entry in state.swarm_registry.active_agents.iter() {
-        map.insert(entry.key().clone().to_string(), entry.value().alias.clone());
-    }
-    axum::Json(map)
-}
-
 #[derive(Serialize, Clone, Debug)]
 pub struct VaultSearchResult {
     pub tx_id: u128,
@@ -288,40 +277,6 @@ impl From<UnifiedSearchResult> for VaultSearchResult {
             score: res.score,
         }
     }
-}
-
-#[derive(Serialize, Clone, Debug)]
-pub struct VaultTelemetry {
-    pub total_vectors: usize,
-    pub index_size_mb: f64,
-    pub wal_pending_count: u64,
-    pub densest_namespace: String,
-    pub embedder_name: String,
-    pub embeder_dim: usize,
-}
-
-pub async fn vault_telemetry_endpoint(
-    _auth: ValidatedIdentity,
-    State(state): State<ApiState>,
-) -> Result<Json<VaultTelemetry>, ApiError> {
-    let wal_pending_count = state.merkle.get_total_leaves() as u64;
-
-    let total_vectors = state.cold_store.get_total_record_count().await;
-
-    let index_size_mb = state.cold_store.get_storage_size_mb().await;
-
-    let densest_namespace = state.cold_store.get_densest_namespace().await;
-
-    let telemetry = VaultTelemetry {
-        total_vectors,
-        wal_pending_count,
-        index_size_mb,
-        densest_namespace,
-        embedder_name: state.config.embedder_type.clone(),
-        embeder_dim: state.cold_store.vector_dims() as usize,
-    };
-
-    Ok(Json(telemetry))
 }
 
 pub async fn active_qurantine_endpoint(
@@ -591,63 +546,6 @@ pub async fn fetch_agent_timeline(
     Ok(Json(nodes))
 }
 
-#[derive(Serialize)]
-pub struct DashboardCards {
-    pub global_transactions: u64,
-    pub active_agents: usize,
-    pub vault_capacity: usize,
-    pub hot_thoughts_count: u64,
-    pub cold_thoughts_count: u64,
-    pub latest_tx_hex: String,
-    pub embedder_dims: i32,
-    pub embedder_name: String,
-    pub ingress_pause: bool,
-}
-
-pub async fn dashboard_cards_endpoint(
-    _auth: ValidatedIdentity,
-    State(state): State<ApiState>,
-) -> Result<Json<DashboardCards>, ApiError> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    // Iterate through the Dashmap
-    let active_count = state
-        .swarm_registry
-        .active_agents
-        .iter()
-        .filter(|entry| {
-            let is_recent = now.saturating_sub(entry.last_seen_ts) <= 60;
-            let is_not_jailed = entry.status != "Quarantined";
-            is_recent && is_not_jailed
-        })
-        .count();
-
-    let cold_count = state.cold_store.get_total_record_count().await as u64;
-    let _hot_batches = state.wal.get_pending_count().await as u64;
-
-    // Hot buffer leaves + cold storage
-    let hot_count = state.merkle.get_total_leaves() as u64;
-    let total_lifetime_txn = cold_count + hot_count;
-
-    let latest_tx = state.merkle.get_latest_tx_id();
-    let latest_tx_hex = format!("0x{:032x}", latest_tx);
-
-    Ok(Json(DashboardCards {
-        global_transactions: total_lifetime_txn,
-        active_agents: active_count,
-        vault_capacity: cold_count as usize,
-        hot_thoughts_count: hot_count,
-        cold_thoughts_count: cold_count,
-        latest_tx_hex: latest_tx_hex,
-        embedder_dims: state.cold_store.vector_dims(),
-        embedder_name: state.config.embedder_type.clone(),
-        ingress_pause: *state.pause_tx.borrow(),
-    }))
-}
-
 pub async fn toggle_ingress_endpoint(
     _auth: ValidatedIdentity,
     State(state): State<ApiState>,
@@ -811,28 +709,6 @@ pub async fn cluster_info_endpoint(
     });
 
     Ok(Json(payload))
-}
-
-pub async fn cluster_enclaves_endpoint(
-    _auth: ValidatedIdentity,
-    State(state): State<ApiState>,
-) -> Result<Json<Value>, ApiError> {
-    let mut enclaves = Vec::new();
-
-    // Collect currently active connected agents
-    for entry in state.swarm_registry.active_agents.iter() {
-        let agent = entry.value();
-        enclaves.push(json!({
-            "alias": agent.alias,
-            "identity_hex": entry.agent_hex.clone(),
-            "home_shard": agent.namespace.clone(),
-            "status": agent.status,
-            "last_seen_ts": agent.last_seen_ts
-
-        }));
-    }
-
-    Ok(Json(json!(enclaves)))
 }
 
 #[derive(Deserialize)]
@@ -1274,8 +1150,6 @@ pub fn build_admin_router(state: ApiState) -> axum::Router {
         )
         // Cluster Observervability and Diagnostics
         .route("/v1/admin/cluster/info", get(cluster_info_endpoint))
-        .route("/v1/cluster/enclaves", get(cluster_enclaves_endpoint))
-        .route("/v1/dashboard/cards", get(dashboard_cards_endpoint))
         .route("/v1/admin/ingress/toggle", post(toggle_ingress_endpoint))
         .route(
             "/v1/admin/compactor/trigger",
@@ -1286,7 +1160,6 @@ pub fn build_admin_router(state: ApiState) -> axum::Router {
         .route("/v1/system/agents/aliases", get(agent_alias_endpoint))
         // Swarm & A2A Ingress
         .route("/v1/swarm/ingress", post(http_ingress_endpoint))
-        .route("/v1/vault/telemetry", get(vault_telemetry_endpoint))
         .route(
             "/v1/session/timeline/:agent_hex/export/otel",
             get(export_agent_timeline_otel),

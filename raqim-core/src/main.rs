@@ -802,10 +802,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         break;
 
                     }
-
-
                     }
-
 
                     task_registry.touch_agent(
                         agent_hex.clone().as_str(),
