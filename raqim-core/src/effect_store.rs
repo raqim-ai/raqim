@@ -1,7 +1,6 @@
 use dashmap::DashMap;
 use memmap2::MmapOptions;
 use rkyv::{Archive, Archived};
-use std::format;
 use std::println;
 
 use std::u64;
@@ -17,11 +16,6 @@ use crate::ExecutionStage;
 use crate::{config::RaqimConfig, wal::WalEngine, ExecutionRecord, SystemEvent};
 use serde::Serialize;
 
-pub enum RebuildMode {
-    Resurrection,
-    TimeTravel(u64), //
-}
-
 pub struct EffectStore {
     config: Arc<RaqimConfig>,
     merkle: Arc<MerkleEngine>,
@@ -33,17 +27,6 @@ pub struct EffectStore {
 
     /// Pre-execution `Intents` records that have not yet received a matching `Outcome`
     pending_intents: DashMap<EffectKey, ExecutionRecord>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct UnifiedSearchResult {
-    pub tx_id: u128,
-    pub agent_hex: String,
-    pub namespace: String,
-    pub text: String,
-    pub timestamp: i64,
-    pub score: f32,
-    pub source: &'static str,
 }
 
 impl EffectStore {
@@ -245,58 +228,6 @@ impl EffectStore {
             "Transaction ID {:032x} not found in Hot WAL or ColdStore",
             target_tx_id
         ))
-    }
-
-    /// The Unified Engine for both Resurrection (Live) and Time Travel (Isolated)
-    pub async fn boot_historical_agent(
-        &self,
-        agent_hex: &str,
-        target_tx_id: Option<u128>,
-        fork_config: Option<ForkConfig>,
-        is_isolated_debug: bool,
-    ) -> Result<(), anyhow::Error> {
-        let fetch_target = target_tx_id.unwrap_or(u128::MAX);
-
-        let historical_oplog = self
-            .rebuild_agent_timeline(agent_hex, fetch_target, self.wal_engine.clone())
-            .await?;
-
-        if historical_oplog.is_empty() {
-            return Err(anyhow::anyhow!(
-                "CRITICAL: Agent {} has no immutable memory on disk. Rebuild aborted.",
-                agent_hex
-            ));
-        }
-
-        let original_bytes =
-            hex::decode(agent_hex).map_err(|e| anyhow::anyhow!("Invalid agent hex: {}", e))?;
-        let mut phantom_bytes = [0u8; 16];
-        if original_bytes.len() == 16 {
-            phantom_bytes.copy_from_slice(&original_bytes);
-        }
-
-        if is_isolated_debug {
-            let tx_id_bytes = target_tx_id.unwrap_or(0).to_be_bytes();
-            let mut salt = [0u8; 16];
-            salt[0..8].copy_from_slice(&tx_id_bytes[0..8]);
-            salt[8..16].copy_from_slice(&tx_id_bytes[8..16]);
-
-            for i in 0..16 {
-                phantom_bytes[i] ^= salt[i];
-                phantom_bytes[i] ^= 0xFF;
-            }
-        }
-
-        let sandbox_agent_hex = hex::encode(phantom_bytes);
-
-        if let Some(fork) = &fork_config {
-            println!(
-                "[TIME MACHINE] Applied {} reality fork overrides",
-                fork.env_overrides.len()
-            );
-        }
-
-        Ok(())
     }
 
     /// Write-Ahead Intent / Denial Recorder: Seals a pre-execution `Intent` (or `Denied` interdicion ) into the WAL & Merkle DAG BEFORE any external tool or function body runs.

@@ -284,11 +284,6 @@ impl PolicyEngine {
 
         self.persist_quarantine_to_journal(&record);
 
-        // Shout into the event bus
-        let _ = self.tx.send(SystemEvent::GlobalQuarantineSync {
-            record: record.clone(),
-        });
-
         // Fire the durable WAL log
         let _ = self.tx.send(SystemEvent::AegisInterdiction {
             agent_id: agent_hex.to_string(),
@@ -300,33 +295,6 @@ impl PolicyEngine {
         let _ = eprintln!(
             "\n[AEGIS RED ALERT] Unauthorized access attempts by {} on path: {}, Violation Type: {}, Reason: {} ",
             agent_hex, target, v_type, reason
-        );
-    }
-
-    /// Remote Ingestion: Triggered when a foreign node broadcasts a quarantine over Zenoh
-    pub fn assimilate_remote_quarantine(&self, record: QuarantineRecord) {
-        // prevent redundant processing if already blocklisted
-        if self.quarantine_blocklist.contains_key(&record.agent_hex) {
-            return;
-        }
-
-        //  Mutate local firewall blocklist instantly.
-        self.quarantine_blocklist
-            .insert(record.agent_hex.clone(), record.clone());
-
-        // Trigger local security breach alerts
-        let _ = self.tx.send(SystemEvent::SecurityBreach {
-            agent_id: record.agent_hex.clone(),
-            reason: format!(
-                "Global Network Quarantine: {}",
-                record.violation_type.clone()
-            ),
-            culprit_text: record.payload_preview.clone(),
-        });
-
-        eprintln!(
-            "[AEGIS MESH INTERDICTION] Remote quarantine assimilated from network for agent {}. Reason: {} ",
-            record.agent_hex, record.violation_type
         );
     }
 

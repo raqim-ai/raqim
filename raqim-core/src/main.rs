@@ -746,27 +746,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // We do not execute a cascade for handshake. We just register and drop
                             task_registry.touch_agent(&agent_hex, &path_intent, "Connected", &alias);
 
-                            // ==============================
-                            // JIT COLD-START HYDRATION
-                            // ==============================
-                            let agent_hex_clone = agent_hex.clone();
-                            let wal_clone = task_wal.clone();
-                            let router_clone = task_mem_router.clone();
-
-                            // spawn the heave lancedb/wal lookup in the bg os thread
-                            tokio::spawn(async move {
-
-                                println!("[JIT HYDRATION] Waking up agent {} from cold storage.", agent_hex_clone);
-
-                                if let Err(e) = router_clone.rebuild_agent_timeline(&agent_hex_clone, u128::MAX, wal_clone).await {
-
-                                        eprintln!(" [JIT HYDRATION ERROR] Failed to wake up agent {}: {} ", agent_hex_clone, e);
-
-                                } else {
-                                    println!("[JIT HYDRATION] Agent {} fully synchronized with historical reality.", agent_hex_clone);
-                                }
-                            });
-
                             // Emits 20-byte Hadshake Ack
                             let mut ack_buf = [0u8; 20];
                             ack_buf[0..4].copy_from_slice(&0u32.to_le_bytes());

@@ -261,15 +261,6 @@ pub enum SystemEvent {
         culprit_text: String,
     },
 
-    RealityForked {
-        agent_id: String,
-        original_namespace: String,
-        phantom_namespace: String,
-        step_ordinal: u64,
-        tx_id: String,
-        timestamp: i64,
-    },
-
     AegisInterdiction {
         agent_id: String,
         attempted_path: String,
@@ -284,13 +275,6 @@ pub enum SystemEvent {
 
     SystemBoot {
         message: String,
-    },
-    LicenseUpdated {
-        new_jwt: String,
-    },
-
-    GlobalQuarantineSync {
-        record: QuarantineRecord,
     },
 
     MarkleBatchCrystallized {
