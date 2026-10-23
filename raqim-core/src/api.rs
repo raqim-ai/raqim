@@ -1,5 +1,5 @@
 use axum::extract::{Path, Query};
-use axum::http::header::{AUTHORIZATION, HOST, ORIGIN};
+use axum::http::header::AUTHORIZATION;
 use axum::response::{IntoResponse, Response};
 use axum::{
     extract::{FromRequestParts, State},
@@ -107,7 +107,10 @@ where
 {
     type Rejection = ApiError;
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &ApiState,
+    ) -> Result<Self, Self::Rejection> {
         let is_production = std::env::var("RAQIM_ENV")
             .map(|v| v.to_lowercase() == "production")
             .unwrap_or(false);
@@ -125,12 +128,8 @@ where
             }
 
             let provided_token = auth_header.trim_start_matches("Bearer ").trim();
-            let expected_secret = std::env::var("RAQIM_ADMIN_SECRET").unwrap_or_else(|_| {
-                std::fs::read_to_string("./ca-keys/admin.secret")
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string()
-            });
+            // Zero disk I/O
+            let expected_secret = &state.admin_secret;
 
             if !expected_secret.is_empty()
                 && constant_time_compare(provided_token.as_bytes(), expected_secret.as_bytes())
@@ -657,6 +656,7 @@ pub struct PreflightEffectResponse {
 
 /// Pre-flight policy audit (/v1/effect/preflight)
 pub async fn preflight_effect_handler(
+    _auth: ValidatedIdentity,
     State(state): State<ApiState>,
     Json(payload): Json<PreflightEffectRequest>,
 ) -> Result<Json<PreflightEffectResponse>, ApiError> {
@@ -723,6 +723,8 @@ pub async fn preflight_effect_handler(
 
 /// Records live side-effect into WAL + Markle DAG
 pub async fn record_effect_handler(
+    _auth: ValidatedIdentity,
+
     State(state): State<ApiState>,
     Json(payload): Json<RecordEffectRequest>,
 ) -> Result<Json<RecordEffectResponse>, ApiError> {
@@ -844,6 +846,8 @@ pub async fn record_effect_handler(
 
 /// Fetches a recoorded effect for deterministic replay
 pub async fn get_effect_handler(
+    _auth: ValidatedIdentity,
+
     State(state): State<ApiState>,
     Json(payload): Json<GetEffectRequest>,
 ) -> Result<Json<GetEffectResponse>, ApiError> {
