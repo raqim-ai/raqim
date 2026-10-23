@@ -328,7 +328,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "[INITIALIZATION] Phoenix protocol: Commencing state rehydration scanning from active WAL frame sequences..."
     );
-    let manifest_path = "compaction.manifest.json";
+    let manifest_path = &config.manifest_path;
     let mut files_to_scan = Vec::new();
 
     // 2PC MANIFEST CHECK
@@ -346,7 +346,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     let _ = fs::remove_file(target_file);
                     let _ = fs::remove_file(manifest_path);
-                } else if state == "PENDING" {
+                } else if state == "Pending" {
                     // Prevent Amnesia (Data Loss): File was rotated but never made it to lancedb
                     println!(
                         "[PHOENIX] Orphaned WAL '{}' detected in PENDING state. Queuing for RAM Hydration",
@@ -808,9 +808,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                  }
 
                 });
-
-
-
             }
         }
     }

@@ -29,11 +29,7 @@ use crate::otel::{self, OtelExportRequest};
 use crate::policy::{CapabilityCertificate, QuarantineRecord};
 use crate::registry::SwarmRegistry;
 use crate::wal::WalEngine;
-use crate::{
-    config::RaqimConfig,
-    effect_store::{EffectStore, UnifiedSearchResult},
-    policy::PolicyEngine,
-};
+use crate::{config::RaqimConfig, effect_store::EffectStore, policy::PolicyEngine};
 use crate::{execute_raqim_cascade, ExecutionRecord, IngressEnvelope, RecentRecord, SystemEvent};
 
 // Strongly typed api error system (Zero-Panic Guarantee)
@@ -208,37 +204,6 @@ pub async fn recent_records_endpoint(
     }
 
     Ok(Json(all_thoughts))
-}
-
-#[derive(Serialize, Clone, Debug)]
-pub struct VaultSearchResult {
-    pub tx_id: u128,
-    pub tx_id_hex: String,
-    pub agent_hex: String,
-    pub namespace: String,
-    pub payload: String,
-    pub text: String,
-    pub timestamp: String,
-    pub source: String,
-    pub similarity_score: f32,
-    pub score: f32,
-}
-
-impl From<UnifiedSearchResult> for VaultSearchResult {
-    fn from(res: UnifiedSearchResult) -> Self {
-        Self {
-            tx_id: res.tx_id,
-            tx_id_hex: format!("{:032x}", res.tx_id),
-            agent_hex: res.agent_hex,
-            namespace: res.namespace,
-            payload: res.text.clone(),
-            text: res.text,
-            timestamp: res.timestamp.to_string(),
-            source: res.source.to_string(),
-            similarity_score: res.score,
-            score: res.score,
-        }
-    }
 }
 
 pub async fn active_quarantine_endpoint(
@@ -810,32 +775,11 @@ pub async fn record_effect_handler(
         )
         .await
     {
-        Ok(tx_id) => {
-            let original_ns = payload.namespace.clone().replace("phantom_", "");
-
-            if is_forked {
-                let tx_id = format!("{:032x}", tx_id);
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64;
-
-                let _ = state.event_tx.send(SystemEvent::RealityForked {
-                    agent_id: payload.agent_hex.clone(),
-                    original_namespace: original_ns.clone(),
-                    phantom_namespace: payload.namespace.clone(),
-                    step_ordinal: payload.step_ordinal,
-                    tx_id: tx_id.clone(),
-                    timestamp,
-                });
-            }
-
-            Ok(Json(RecordEffectResponse {
-                success: true,
-                tx_id_hex: format!("{:032x}", tx_id),
-                is_forked_branch: is_forked,
-            }))
-        }
+        Ok(tx_id) => Ok(Json(RecordEffectResponse {
+            success: true,
+            tx_id_hex: format!("{:032x}", tx_id),
+            is_forked_branch: is_forked,
+        })),
 
         Err(e) => Err(ApiError::InternalServerError(format!(
             "Failed to record effect: {}",
