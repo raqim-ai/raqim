@@ -170,7 +170,7 @@ pub struct RecentThoughtsParams {
     pub limit: Option<usize>,
 }
 
-pub async fn recent_record_endpoint(
+pub async fn recent_records_endpoint(
     _auth: ValidatedIdentity,
     State(state): State<ApiState>,
     Query(params): Query<RecentThoughtsParams>,
@@ -241,7 +241,7 @@ impl From<UnifiedSearchResult> for VaultSearchResult {
     }
 }
 
-pub async fn active_qurantine_endpoint(
+pub async fn active_quarantine_endpoint(
     _auth: ValidatedIdentity,
     State(state): State<ApiState>,
 ) -> Json<Vec<QuarantineRecord>> {
@@ -263,7 +263,7 @@ struct LiftQuarantinePagyload {
     agent_hex: String,
 }
 
-async fn lift_qurantine_handler(
+async fn lift_quarantine_handler(
     _auth: ValidatedIdentity,
     State(state): State<ApiState>,
     Json(payload): Json<LiftQuarantinePagyload>,
@@ -318,59 +318,6 @@ pub struct ForkConfig {
     pub inject_network: Option<String>,
     pub env_overrides: HashMap<String, String>,
     pub config_overrides: HashMap<String, String>,
-}
-
-#[derive(Deserialize)]
-struct TimeTravelRequest {
-    agent_hex: String,
-    target_tx_id: u128,
-    fork_config: ForkConfig,
-}
-
-// THE ACTIVE DEBUGGING ROUTE HANDLER
-async fn time_travel_endpoint(
-    _identity: ValidatedIdentity,
-    State(state): State<ApiState>,
-    Json(payload): Json<TimeTravelRequest>,
-) -> Result<Json<Value>, ApiError> {
-    println!(
-        "[TIME TRAVEL] Admin requested Reality Forkk for Agent {} at TxID {} ",
-        payload.agent_hex, payload.target_tx_id
-    );
-
-    // 1. Lift policy Quarantine so that the agent can actually boot
-    // Unfreeze the Agent (Remove from DashhMap)
-    if state
-        .policy
-        .quarantine_blocklist
-        .remove(&payload.agent_hex)
-        .is_some()
-    {
-        match state
-            .mem_router
-            .boot_historical_agent(
-                &payload.agent_hex,
-                Some(payload.target_tx_id),
-                Some(payload.fork_config),
-                true,
-            )
-            .await
-        {
-            Ok(()) => Ok(Json(
-                json!({"success": true, "message": "Time travel initiated" }),
-            )),
-
-            Err(e) => Err(ApiError::InternalServerError(format!(
-                "Time travel failed: {}",
-                e
-            ))),
-        }
-    } else {
-        Err(ApiError::NotFound(format!(
-            "Agent hex: {} not found in quarantine blocklist",
-            &payload.agent_hex
-        )))
-    }
 }
 
 /// Zero-copy Binary Ingress Endpoint ("Point /v1/swarm/ingress")
@@ -527,7 +474,7 @@ pub struct PolicyMetricsData {
     pub active_policies: Vec<GroupPolicyTelemetry>,
 }
 
-pub async fn policy_metics_endpoint(
+pub async fn policy_metrics_endpoint(
     _auth: ValidatedIdentity,
     State(state): State<ApiState>,
 ) -> Result<Json<PolicyMetricsData>, ApiError> {
@@ -1085,7 +1032,6 @@ pub fn build_data_router(state: ApiState) -> axum::Router {
                 "/v1/policy/quarantine_list",
                 get(active_quarantine_endpoint),
             )
-            .route("/v1/system/thoughts/recent", get(recent_records_endpoint))
             .route("/v1/admin/records/recent", get(recent_records_endpoint))
             .layer(CatchPanicLayer::new())
             .with_state(state)
