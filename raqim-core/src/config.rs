@@ -12,16 +12,12 @@ struct RaqimTomlProxy {
 
 #[derive(Deserialize)]
 struct DaemonSection {
-    topic: String,
     wal_path: String,
     manifest_path: String,
     witness_path: String,
-    aegis_path: String,
+    policy_path: String,
     port: Option<u16>,
     host: Option<String>,
-    dims: Option<i32>,
-    limit: Option<usize>,
-    embedder_type: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -34,16 +30,11 @@ struct StorageSection {
 struct IdentitySection {
     tenant_id: String,
     node_pub_key_hex: String,
-    license_key: String,
-    openai_api_key: Option<String>,
 }
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Raqim Daemon configuration")]
 pub struct CliArgs {
-    #[arg(short, long)]
-    pub topic: Option<String>,
-
     #[arg(short, long)]
     pub wal_path: Option<String>,
 
@@ -54,28 +45,13 @@ pub struct CliArgs {
     pub witness_path: Option<String>,
 
     #[arg(short, long)]
-    pub lance_path: Option<String>,
-
-    #[arg(short, long)]
-    pub aegis_path: Option<String>,
+    pub policy_path: Option<String>,
 
     #[arg(short, long)]
     pub node_public_key_hex: Option<String>,
 
-    #[arg(short, long)]
-    pub embedder_type: Option<String>,
-
-    #[arg(short, long)]
-    pub openai_api_key: Option<String>,
-
     #[arg(long)]
     pub tenant_id: Option<String>,
-
-    #[arg(long)]
-    pub license_key: Option<String>,
-
-    #[arg(short, long)]
-    pub dims: Option<i32>,
 
     #[arg(long)]
     pub limit: Option<usize>,
@@ -95,20 +71,12 @@ pub struct CliArgs {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct RaqimConfig {
-    pub topic: String,
     pub wal_path: String,
     pub manifest_path: String,
-    pub lance_path: String,
     pub witness_path: String,
-    pub aegis_path: String,
-    pub table_name: String,
+    pub policy_path: String,
     pub tenant_id: String,
-    pub license_key: String,
     pub node_public_key_hex: String,
-    pub embedder_type: String,
-    pub openai_api_key: String,
-    pub dims: i32,
-    pub limit: usize,
     pub port: u16,
     pub host: String,
     pub checkpoint_path: String,
@@ -118,22 +86,14 @@ pub struct RaqimConfig {
 impl Default for RaqimConfig {
     fn default() -> Self {
         Self {
-            topic: "raqim_default".to_string(),
             wal_path: "./production.wal".to_string(),
             manifest_path: "./compactor.manifest.json".to_string(),
             witness_path: "./vault/witnesses".to_string(),
-            lance_path: "./production_semantic.lancedb".to_string(),
-            aegis_path: "./aegis.toml".to_string(),
-            table_name: "agent_history".to_string(),
+            policy_path: "./aegis.toml".to_string(),
             tenant_id: "open_core_local".to_string(),
-            license_key: "dev_move".to_string(),
             node_public_key_hex: "0000000000000000000000000000000000000000000000000000000000000000"
                 .to_string(),
 
-            embedder_type: "BGE-Base-EN-v1.5".to_string(),
-            openai_api_key: "".to_string(),
-            dims: 768,
-            limit: 5,
             port: 8080,
             host: "127.0.0.1".to_string(),
             checkpoint_path: "./vault/state_checkpoint.bin".to_string(),
@@ -157,32 +117,16 @@ impl RaqimConfig {
                 .expect("[FATAL] Invalid TOML structural layout in raqim.toml ");
 
             RaqimConfig {
-                topic: proxy.daemon.topic,
                 wal_path: proxy.daemon.wal_path,
                 manifest_path: proxy.daemon.manifest_path,
                 witness_path: proxy.daemon.witness_path,
-                lance_path: proxy
-                    .storage
-                    .lance_path
-                    .unwrap_or_else(|| "./production_semantic.lancedb".to_string()),
-                aegis_path: proxy.daemon.aegis_path,
-                table_name: proxy
-                    .storage
-                    .table_name
-                    .unwrap_or_else(|| "agent_history".to_string()),
+
+                policy_path: proxy.daemon.policy_path,
+
                 tenant_id: proxy.identity.tenant_id,
-                license_key: proxy.identity.license_key,
+
                 node_public_key_hex: proxy.identity.node_pub_key_hex,
-                embedder_type: proxy
-                    .daemon
-                    .embedder_type
-                    .unwrap_or_else(|| "BGE-Base-EN-v1.5".to_string()),
-                openai_api_key: proxy
-                    .identity
-                    .openai_api_key
-                    .unwrap_or_else(|| "".to_string()),
-                dims: proxy.daemon.dims.unwrap_or(384),
-                limit: proxy.daemon.limit.unwrap_or(5),
+
                 port: proxy.daemon.port.unwrap_or(8080),
                 host: proxy.daemon.host.unwrap_or_else(|| "127.0.0.1".to_string()),
                 checkpoint_path: "./vault/state_checkpoint.bin".to_string(),
@@ -200,9 +144,7 @@ impl RaqimConfig {
         };
 
         //  THE OVERRIDE MATRIX: CLI Args always win if provided
-        if let Some(t) = args.topic {
-            config.topic = t;
-        }
+
         if let Some(w) = args.wal_path {
             config.wal_path = w;
         }
@@ -219,35 +161,14 @@ impl RaqimConfig {
             config.node_public_key_hex = p_key;
         }
 
-        if let Some(e_type) = args.embedder_type {
-            config.embedder_type = e_type
-        }
-
-        if let Some(o_api) = args.openai_api_key {
-            config.openai_api_key = o_api
-        }
-
-        if let Some(l) = args.lance_path {
-            config.lance_path = l;
-        }
-        if let Some(d) = args.dims {
-            config.dims = d;
-        }
         if let Some(t_id) = args.tenant_id {
             config.tenant_id = t_id;
         }
 
-        if let Some(a) = args.aegis_path {
-            config.aegis_path = a;
+        if let Some(a) = args.policy_path {
+            config.policy_path = a;
         }
 
-        if let Some(key) = args.license_key {
-            config.license_key = key;
-        }
-
-        if let Some(l) = args.limit {
-            config.limit = l;
-        }
         if let Some(p) = args.port {
             config.port = p
         }
