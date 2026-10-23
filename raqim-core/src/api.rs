@@ -88,6 +88,7 @@ pub struct ApiState {
     pub event_tx: Sender<SystemEvent>,
     pub swarm_registry: Arc<SwarmRegistry>,
     pub master_signing_key: SigningKey,
+    pub admin_secret: String,
 
     pub pause_tx: Arc<watch::Sender<bool>>,
 

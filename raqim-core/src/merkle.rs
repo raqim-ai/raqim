@@ -362,7 +362,7 @@ impl MerkleEngine {
                 return false;
             }
 
-            let mut hasher = Hasher::new_derive_key("raqim.axon.v1.node");
+            let mut hasher = Hasher::new_derive_key("raqim.merkle.v1.node");
             if index % 2 == 0 {
                 hasher.update(&current_hash);
                 hasher.update(&sibling_bytes);

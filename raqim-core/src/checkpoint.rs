@@ -20,7 +20,7 @@ pub struct ActiveTreeBufferSnapshot {
     pub accumulated_tx_ids: Vec<u128>,
 }
 
-/// Consolidated state of the Axon Merkle DAG at checkpoint time
+/// Consolidated state of the Merkle DAG at checkpoint time
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MerkleCheckpointState {
     pub global_batch_counter: u64,
