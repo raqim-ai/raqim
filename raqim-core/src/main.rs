@@ -1,7 +1,7 @@
 use ed25519_dalek::SigningKey;
 use notify::{Event, Watcher};
 use rand_core::OsRng;
-use raqim_core::api::{build_admin_router, ApiState};
+use raqim_core::api::{build_admin_router, build_data_router, ApiState};
 use raqim_core::checkpoint::{CheckpointEngine, ControlMutation};
 use raqim_core::merkle::MerkleEngine;
 use raqim_core::policy::{PolicyConfigFile, PolicyEngine};
@@ -127,6 +127,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let master_signing_key = SigningKey::from_bytes(&key_array);
 
     let master_public_key = master_signing_key.verifying_key().to_bytes();
+
+    let admin_secret_path = key_dir.join("admin.secret");
+    if !admin_secret_path.exists() {
+        let mut secret_bytes = [0u8; 32];
+        use rand_core::RngCore;
+        OsRng.fill_bytes(&mut secret_bytes);
+        let secret_hex = hex::encode(secret_bytes);
+        fs::write(&admin_secret_path, &secret_hex).expect("Failed to write admin.secret");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&admin_secret_path, fs::Permissions::from_mode(0o600));
+        }
+    }
+
+    let admin_secret = fs::read_to_string(&admin_secret_path)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
     // ===============================
 
     // 1. BOOT SEQUENCE: INIITIALIZE ALL LAYERS (Wrapped in Arc for fearless concurrency)
@@ -455,10 +475,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start Autonomous Daemon
     compactor.clone().start_daemon();
 
-    // 2 Background Listeners (Zenoh Global network)
-    let global_merkle = merkle.clone();
-    let global_tx = event_tx.clone();
-
     let (pause_tx, pause_rx) = tokio::sync::watch::channel(false);
     let pause_tx = Arc::new(pause_tx);
 
@@ -473,11 +489,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         swarm_registry: registry.clone(),
         master_signing_key: master_signing_key.clone(),
+        admin_secret,
 
         pause_tx: pause_tx.clone(),
         compactor: compactor.clone(),
     };
 
+    // 1. OPERATOR ADMIN PAUSE: Bound to Unix Domain Socket (mode 0600)
     #[cfg(unix)]
     {
         let admin_sock_path = Path::new("./vault/admin.sock");
@@ -497,13 +515,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let admin_app = build_admin_router(api_state.clone());
         tokio::spawn(async move {
             println!(
-                "[SECURITY] Privileged Admin Socket locked to ./vault/admin.sock ( mode 0600) "
+                "[SECURITY] Privileged Admin Socket locked to ./vault/admin.sock (mode 0600) "
             );
             axum::serve(uds_listener, admin_app).await.unwrap();
         });
     }
 
-    let axum_app = build_admin_router(api_state).layer(
+    let data_app = build_data_router(api_state).layer(
         CorsLayer::new()
             .allow_origin(Any)
             .allow_methods([Method::GET, Method::POST])
@@ -520,10 +538,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         socket.bind(addr).unwrap();
         let listener = socket.listen(1024).unwrap();
         println!(
-            "[SYSTEM] Axum control plane live on {}:{} ",
+            "[SYSTEM] Agent HTTP Data Plane live on {}:{} ",
             host_for_api, api_port
         );
-        axum::serve(listener, axum_app).await.unwrap();
+        axum::serve(listener, data_app).await.unwrap();
     });
 
     // 3. The Production TCP ingress.
@@ -770,7 +788,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // --- The Raqim Cascade ---
                     // If the WAL or the Publisher channel are full, the .await creates a healthy backppressure rather than panicking.
                     match execute_raqim_cascade(
-                        &archived_state,
+                        &archived_rec,
                         task_merkle.clone(),
                         task_wal.clone(),
                         task_event_tx.clone(),
