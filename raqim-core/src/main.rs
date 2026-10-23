@@ -521,12 +521,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    let data_app = build_data_router(api_state).layer(
-        CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods([Method::GET, Method::POST])
-            .allow_headers(Any),
-    );
+    let data_app = build_data_router(api_state);
+
     let api_port = config.port + 1;
     let host_for_api = config.host.clone();
     tokio::spawn(async move {

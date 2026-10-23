@@ -12,7 +12,6 @@ use tokio::sync::watch;
 use tower_http::catch_panic::CatchPanicLayer;
 
 use axum::body::Bytes;
-use ed25519_dalek::{Signer, SigningKey};
 use serde_json::{json, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{eprintln, format, println};
@@ -26,7 +25,7 @@ use crate::cold_store::ColdStore;
 use crate::compactor::WalCompactor;
 use crate::merkle::{InclusionProof, MerkleEngine};
 use crate::otel::{self, OtelExportRequest};
-use crate::policy::{CapabilityCertificate, QuarantineRecord};
+use crate::policy::QuarantineRecord;
 use crate::registry::SwarmRegistry;
 use crate::wal::WalEngine;
 use crate::{config::RaqimConfig, effect_store::EffectStore, policy::PolicyEngine};
@@ -83,7 +82,6 @@ pub struct ApiState {
 
     pub event_tx: Sender<SystemEvent>,
     pub swarm_registry: Arc<SwarmRegistry>,
-    pub master_signing_key: SigningKey,
     pub admin_secret: String,
 
     pub pause_tx: Arc<watch::Sender<bool>>,
@@ -501,40 +499,6 @@ pub async fn policy_metrics_endpoint(
 pub struct MintRequest {
     pub agent_hex: String,
     pub group: String,
-}
-
-pub async fn handle_ca_mint(
-    _auth: ValidatedIdentity,
-    State(state): State<ApiState>,
-    Json(payload): Json<MintRequest>,
-) -> Result<Json<String>, ApiError> {
-    // Contruct the unsigned Certificate Passport
-    let expiration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        + (365 * 24 * 60 * 60);
-
-    let mut cert = CapabilityCertificate {
-        agent_hex: payload.agent_hex.clone(),
-        group_name: payload.group.clone(),
-        expiration_timestamp: expiration,
-        master_signature: Vec::new(),
-    };
-
-    // Serialize and sign using the master private key inside api_state
-    let serialized_raw = postcard::to_allocvec(&cert)
-        .map_err(|e| ApiError::InternalServerError(format!("Serialization failed: {}", e)))?;
-
-    let signature = state.master_signing_key.sign(&serialized_raw);
-
-    cert.master_signature = signature.to_bytes().to_vec();
-
-    // Returned the fully serialized and signed passport to the CLI
-    let final_bytes = postcard::to_allocvec(&cert)
-        .map_err(|e| ApiError::InternalServerError(format!("Final packing failed: {}", e)))?;
-
-    Ok(Json(hex::encode(final_bytes)))
 }
 
 /// Maps to `raqim cluster info`
@@ -975,7 +939,6 @@ pub fn build_data_router(state: ApiState) -> axum::Router {
     if !is_production {
         // Local dev convenience routes (disabled automatically when RAQIM_ENV=production)
         router
-            .route("/v1/admin/ca/mint", post(handle_ca_mint))
             .route("/v1/aegis/quarantine_list", get(active_quarantine_endpoint))
             .route(
                 "/v1/policy/quarantine_list",
@@ -999,7 +962,6 @@ pub fn build_admin_router(state: ApiState) -> axum::Router {
             "/health",
             get(|| async { Json(json!({"status": "ok", "plane": "admin", "version": "0.2.0"})) }),
         )
-        .route("/v1/admin/ca/mint", post(handle_ca_mint))
         .route(
             "/v1/policy/quarantine_list",
             get(active_quarantine_endpoint),
