@@ -636,12 +636,15 @@ pub async fn cluster_info_endpoint(
         .unwrap_or(0);
 
     let highest_tx = state.merkle.get_latest_tx_id();
+    let cold_records = state.cold_store.get_total_record_count().await;
 
     let payload = json!({
         "highest_tx_id": format!("0x{:032x}", highest_tx),
         "wal_bytes": wal_size,
         "wal_size_mb": (wal_size as f64 ) / (1024.0 * 1024.0),
         "buffer_load": pending_wal_items,
+        "cold_records": cold_records,
+        "in_doubt_intents": state.mem_router.get_in_doubt_intents().len()
     });
 
     Ok(Json(payload))
@@ -704,7 +707,7 @@ pub struct PreflightEffectResponse {
     pub namespace: String,
 }
 
-/// Executes cryptographic zero-trust pre-flight audit before any tool or effect executes.
+/// Pre-flight policy audit (/v1/effect/preflight)
 pub async fn preflight_effect_handler(
     State(state): State<ApiState>,
     Json(payload): Json<PreflightEffectRequest>,
@@ -730,7 +733,7 @@ pub async fn preflight_effect_handler(
     let (verified_agent_hex, group_name) = state
         .policy
         .verify_session_lineage(&capability_cert, &pub_key)
-        .map_err(|e| ApiError::Unauthorized(format!("policy lineage rejection: {}", e)))?;
+        .map_err(|e| ApiError::Unauthorized(format!("Lineage rejection: {}", e)))?;
 
     if verified_agent_hex != payload.agent_hex {
         return Err(ApiError::Forbidden(
@@ -740,7 +743,7 @@ pub async fn preflight_effect_handler(
 
     if state.policy.is_quarantined(&payload.agent_hex) {
         return Err(ApiError::Forbidden(
-            "Agent is actively quarantined by policy firewall".to_string(),
+            "Agent is actively quarantined by PolicyEngine".to_string(),
         ));
     }
 
@@ -867,7 +870,6 @@ pub async fn record_effect_handler(
                     .unwrap_or_default()
                     .as_secs() as i64;
 
-                // Audit Trail: Emitted to System Event Bus -> Persisted to lanceDB System event table
                 let _ = state.event_tx.send(SystemEvent::RealityForked {
                     agent_id: payload.agent_hex.clone(),
                     original_namespace: original_ns.clone(),
@@ -952,7 +954,7 @@ pub async fn get_state_proof_handler(
             ApiError::BadRequest("tx_id must be a valid 32-character hex string".to_string())
         })?;
 
-    // Query Axon Gatekeeper for 0(log N) Inclusion proof
+    // Query MerkleEngine for 0(log N) Inclusion proof
     match state.merkle.generate_proof_for_tx(tx_id) {
         Some(proof) => Ok(Json(StateProofResponse {
             success: true,
@@ -967,10 +969,7 @@ pub async fn get_state_proof_handler(
         None => Ok(Json(StateProofResponse {
             success: false,
             proof: None,
-            message: format!(
-                "Transaction ID {:032x} not found in active memory batch archives.",
-                tx_id
-            ),
+            message: format!("Transaction ID {:032x} not found.", tx_id),
         })),
     }
 }
@@ -1001,7 +1000,7 @@ pub async fn trigger_compaction_endpoint(
 
     Ok(Json(serde_json::json!({
         "success": "ACCEPTED",
-        "message": "WAL rotation and 2PC LanceDB assimilation initiated in background worker."
+        "message": "WAL rotation and 2PC ColdStore compaction initiated."
     })))
 }
 
@@ -1039,10 +1038,7 @@ pub async fn export_agent_timeline_otel(
         .iter()
         .next()
         .map(|b| hex::encode(b.value().markle_root))
-        .unwrap_or_else(|| {
-            "0000000000000000000000000000000000000000000000000000000000000000".to_string()
-        });
-    // -- what happens if the agent never has a merkle root? Maybe  the buffer is still active and yeet to seal?
+        .unwrap_or_else(|| "0".repeat(64));
 
     // Delegate transformation to the dedicated domain builder
     let otlp_payload = otel::build_otlp_trace_from_timeline(
@@ -1055,46 +1051,76 @@ pub async fn export_agent_timeline_otel(
     Ok(Json(otlp_payload))
 }
 
-// Route Builder
-pub fn build_admin_router(state: ApiState) -> axum::Router {
-    axum::Router::new()
-        // Health check endpoint
+// =================================================================
+// ROUTER 1: AGENT DATA PLANE (TCP port 8081)
+// =================================================================
+// Exposes ONLY runtime execution, replay, and proof verification endpoints.
+
+pub fn build_data_router(state: ApiState) -> axum::Router {
+    let is_production = std::env::var("RAQIM_ENV")
+        .map(|v| v.to_lowercase() == "production")
+        .unwrap_or(false);
+
+    let router = axum::Router::new()
         .route(
             "/health",
-            get(|| async { axum::Json(serde_json::json!({"status": "ok", "version": "0.1.2"})) }),
+            get(|| async { Json(json!({"status": "ok", "version": "0.2.0"})) }),
         )
-        // State Proofs & Effect Recording
-        .route("/v1/state/proof/:tx_id", get(get_state_proof_handler))
+        .route("/v1/state/proof/{tx_id}", get(get_state_proof_handler))
         .route("/v1/effect/preflight", post(preflight_effect_handler))
         .route("/v1/effect/record", post(record_effect_handler))
         .route("/v1/effect/get", post(get_effect_handler))
-        // policy Firewall & Governance
-        .route("/v1/policy/quarantine_list", get(active_qurantine_endpoint))
-        .route("/v1/admin/quarantine/lift", post(lift_qurantine_handler))
-        .route("/v1/policy/metrics", get(policy_metics_endpoint))
-        .route("/v1/admin/ca/mint", post(handle_ca_mint))
-        // Time Machine & Reality Forking
-        .route("/v1/admin/time_travel", post(time_travel_endpoint))
-        .route("/v1/time_travel/fork", post(time_travel_endpoint))
-        .route("/v1/admin/time_travel/fork", post(time_travel_endpoint))
+        .route("/v1/swarm/ingress", post(http_ingress_endpoint))
         .route(
-            "/v1/admin/time_travel/timeline/:agent_hex",
-            get(fetch_agent_timeline),
+            "/v1/session/timeline/{agent_hex}/export/otel",
+            get(export_agent_timeline_otel),
+        );
+
+    if !is_production {
+        // Local dev convenience routes (disabled automatically when RAQIM_ENV=production)
+        router
+            .route("/v1/admin/ca/mint", post(handle_ca_mint))
+            .route("/v1/aegis/quarantine_list", get(active_quarantine_endpoint))
+            .route(
+                "/v1/policy/quarantine_list",
+                get(active_quarantine_endpoint),
+            )
+            .route("/v1/system/thoughts/recent", get(recent_records_endpoint))
+            .route("/v1/admin/records/recent", get(recent_records_endpoint))
+            .layer(CatchPanicLayer::new())
+            .with_state(state)
+    } else {
+        router.layer(CatchPanicLayer::new()).with_state(state)
+    }
+}
+
+// ==================================================================
+// ROUTER 2: Operator Admin Plane (Unix Domain Socket `./vault/admin.sock`) [0600]
+// ==================================================================
+
+pub fn build_admin_router(state: ApiState) -> axum::Router {
+    axum::Router::new()
+        .route(
+            "/health",
+            get(|| async { Json(json!({"status": "ok", "plane": "admin", "version": "0.2.0"})) }),
         )
-        // Cluster Observervability and Diagnostics
+        .route("/v1/admin/ca/mint", post(handle_ca_mint))
+        .route(
+            "/v1/policy/quarantine_list",
+            get(active_quarantine_endpoint),
+        )
+        .route("/v1/aegis/quarantine_list", get(active_quarantine_endpoint))
+        .route("/v1/admin/quarantine/lift", post(lift_quarantine_handler))
+        .route("/v1/policy/metrics", get(policy_metrics_endpoint))
+        .route("/v1/aegis/metrics", get(policy_metrics_endpoint))
+        .route("/v1/admin/in_doubt", get(in_doubt_intents_endpoint))
+        .route("/v1/admin/timeline/{agent_hex}", get(fetch_agent_timeline))
+        .route("/v1/admin/records/recent", get(recent_records_endpoint))
         .route("/v1/admin/cluster/info", get(cluster_info_endpoint))
         .route("/v1/admin/ingress/toggle", post(toggle_ingress_endpoint))
         .route(
             "/v1/admin/compactor/trigger",
             post(trigger_compaction_endpoint),
-        )
-        // System & Agent Deployment endpoints
-        .route("/v1/system/thoughts/recent", get(recent_record_endpoint))
-        // Swarm & A2A Ingress
-        .route("/v1/swarm/ingress", post(http_ingress_endpoint))
-        .route(
-            "/v1/session/timeline/:agent_hex/export/otel",
-            get(export_agent_timeline_otel),
         )
         .layer(CatchPanicLayer::new())
         .with_state(state)
