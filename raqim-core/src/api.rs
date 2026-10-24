@@ -105,10 +105,6 @@ where
         parts: &mut Parts,
         state: &ApiState,
     ) -> Result<Self, Self::Rejection> {
-        let is_production = std::env::var("RAQIM_ENV")
-            .map(|v| v.to_lowercase() == "production")
-            .unwrap_or(false);
-
         // If an Authorization header is provided,  validate it strictky via contant-time comparison
         if let Some(auth_header) = parts
             .headers
@@ -137,14 +133,6 @@ where
             return Err(ApiError::Unauthorized(
                 "Access Denied: Invalid Administrative Bearer Token ".to_string(),
             ));
-        }
-
-        // On the Unix Domain Socket (./vault/admin.sock, mode 0600) or non productiton local sandbox
-        if !is_production {
-            return Ok(ValidatedIdentity {
-                tenant_id: "local_operator".to_string(),
-                is_admin: true,
-            });
         }
 
         Err(ApiError::Unauthorized(
@@ -755,7 +743,6 @@ pub async fn record_effect_handler(
 /// Fetches a recoorded effect for deterministic replay
 pub async fn get_effect_handler(
     _auth: ValidatedIdentity,
-
     State(state): State<ApiState>,
     Json(payload): Json<GetEffectRequest>,
 ) -> Result<Json<GetEffectResponse>, ApiError> {
@@ -917,10 +904,6 @@ pub async fn export_agent_timeline_otel(
 // Exposes ONLY runtime execution, replay, and proof verification endpoints.
 
 pub fn build_data_router(state: ApiState) -> axum::Router {
-    let is_production = std::env::var("RAQIM_ENV")
-        .map(|v| v.to_lowercase() == "production")
-        .unwrap_or(false);
-
     let router = axum::Router::new()
         .route(
             "/health",
@@ -934,22 +917,11 @@ pub fn build_data_router(state: ApiState) -> axum::Router {
         .route(
             "/v1/session/timeline/{agent_hex}/export/otel",
             get(export_agent_timeline_otel),
-        );
+        )
+        .layer(CatchPanicLayer::new())
+        .with_state(state);
 
-    if !is_production {
-        // Local dev convenience routes (disabled automatically when RAQIM_ENV=production)
-        router
-            .route("/v1/aegis/quarantine_list", get(active_quarantine_endpoint))
-            .route(
-                "/v1/policy/quarantine_list",
-                get(active_quarantine_endpoint),
-            )
-            .route("/v1/admin/records/recent", get(recent_records_endpoint))
-            .layer(CatchPanicLayer::new())
-            .with_state(state)
-    } else {
-        router.layer(CatchPanicLayer::new()).with_state(state)
-    }
+    router
 }
 
 // ==================================================================

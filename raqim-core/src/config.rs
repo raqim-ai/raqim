@@ -3,37 +3,12 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
-#[derive(Deserialize)]
-struct RaqimTomlProxy {
-    daemon: DaemonSection,
-    storage: StorageSection,
-    identity: IdentitySection,
-}
-
-#[derive(Deserialize)]
-struct DaemonSection {
-    wal_path: String,
-    manifest_path: String,
-    witness_path: String,
-    policy_path: String,
-    port: Option<u16>,
-    host: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct StorageSection {
-    lance_path: Option<String>,
-    table_name: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct IdentitySection {
-    tenant_id: String,
-    node_pub_key_hex: String,
-}
-
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Raqim Daemon configuration")]
+#[command(
+    author,
+    version,
+    about = "Raqim Execution-Integrity Daemon Configuration "
+)]
 pub struct CliArgs {
     #[arg(short, long)]
     pub wal_path: Option<String>,
@@ -45,7 +20,7 @@ pub struct CliArgs {
     pub witness_path: Option<String>,
 
     #[arg(short, long)]
-    pub policy_path: Option<String>,
+    pub aegis_path: Option<String>,
 
     #[arg(short, long)]
     pub node_public_key_hex: Option<String>,
@@ -74,7 +49,7 @@ pub struct RaqimConfig {
     pub wal_path: String,
     pub manifest_path: String,
     pub witness_path: String,
-    pub policy_path: String,
+    pub aegis_path: String,
     pub tenant_id: String,
     pub node_public_key_hex: String,
     pub port: u16,
@@ -89,7 +64,7 @@ impl Default for RaqimConfig {
             wal_path: "./production.wal".to_string(),
             manifest_path: "./compactor.manifest.json".to_string(),
             witness_path: "./vault/witnesses".to_string(),
-            policy_path: "./aegis.toml".to_string(),
+            aegis_path: "./aegis.toml".to_string(),
             tenant_id: "open_core_local".to_string(),
             node_public_key_hex: "0000000000000000000000000000000000000000000000000000000000000000"
                 .to_string(),
@@ -121,7 +96,7 @@ impl RaqimConfig {
                 manifest_path: proxy.daemon.manifest_path,
                 witness_path: proxy.daemon.witness_path,
 
-                policy_path: proxy.daemon.policy_path,
+                aegis_path: proxy.daemon.aegis_path,
 
                 tenant_id: proxy.identity.tenant_id,
 
@@ -165,8 +140,8 @@ impl RaqimConfig {
             config.tenant_id = t_id;
         }
 
-        if let Some(a) = args.policy_path {
-            config.policy_path = a;
+        if let Some(a) = args.aegis_path {
+            config.aegis_path = a;
         }
 
         if let Some(p) = args.port {

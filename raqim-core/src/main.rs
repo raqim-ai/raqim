@@ -16,7 +16,6 @@ use raqim_core::registry::SwarmRegistry;
 use raqim_core::wal::{WalCommand, WalEngine};
 use raqim_core::witness::WormWitnessEngine;
 use raqim_core::{execute_raqim_cascade, ExecutionRecord, IngressEnvelope, SystemEvent};
-use tower_http::cors::{Any, CorsLayer};
 
 use std::path::Path;
 use std::sync::Arc;
@@ -488,7 +487,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         event_tx: event_tx.clone(),
 
         swarm_registry: registry.clone(),
-        master_signing_key: master_signing_key.clone(),
         admin_secret,
 
         pause_tx: pause_tx.clone(),

@@ -12,11 +12,11 @@ pub mod utils;
 pub mod wal;
 pub mod witness;
 
-#[cfg(feature = "vector-memory")]
+#[cfg(feature = "vector_embedding")]
 pub mod embedding;
-#[cfg(feature = "vector-memory")]
+#[cfg(feature = "vector_embedding")]
 pub mod hot_memory;
-#[cfg(feature = "vector-memory")]
+#[cfg(feature = "vector_embedding")]
 pub mod lancedb_store;
 
 use blake3::Hasher;
@@ -28,7 +28,6 @@ use std::{eprintln, format};
 use tokio::sync::broadcast::Sender;
 
 use crate::merkle::MarkleBatch;
-use crate::policy::QuarantineRecord;
 use crate::{merkle::MerkleEngine, wal::WalEngine};
 
 /// Lifecycle stage of an agent action at the control/gateway boundary
