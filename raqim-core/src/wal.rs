@@ -19,77 +19,78 @@ use tokio::{
     time::interval,
 };
 
+/// Max allowed single WAL batch frame size (16 MiB) to prevent OOM allocation on corrupt headers.
+pub const MAX_WAL_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
+type WalWriteRequest = (ExecutionRecord, oneshot::Sender<Result<(), WalError>>);
+
 pub struct WalEngine {
-    sender: mpsc::Sender<ExecutionRecord>,
+    sender: mpsc::Sender<WalWriteRequest>,
     pub cmd_sender: mpsc::Sender<WalCommand>,
 
     // The O(1) INDEX: Maps the first `tx_id` of each batch -> Physical byte offset in the WAL.
     pub index: Arc<RwLock<BTreeMap<u128, u64>>>,
+    pub poisoned: Arc<AtomicBool>,
 }
 
 #[derive(Debug)]
 pub enum WalError {
     IngressQueueFull(String),
-    Io(std::io::Error),
+    EnginePoisined(String),
+    MidFileCorruption(String),
+    Io(String),
 }
 
 impl std::fmt::Display for WalError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WalError::IngressQueueFull(msg) => write!(f, "WAL channel saturated: {}", msg),
+            WalError::EnginePoisoned(msg) => write!(f, "WAL engine poisoned (fail-closed): {}", e),
+            WalError::MidFileCorruption(msg) => {
+                write!(f, "Fatal mid-write WAL corruption: {}", msg)
+            }
             WalError::Io(e) => write!(f, "I/O error during WAL operation: {}", e),
         }
     }
 }
 
-impl std::error::Error for WalError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            WalError::IngressQueueFull(_) => None,
-            WalError::Io(e) => Some(e),
-        }
+impl std::error::Error for WalError {}
+
+impl From<std::io::Error> for WalError {
+    fn from(err: std::io::Error) -> Self {
+        WalError::Io(err.to_string())
     }
 }
 
 impl From<std::io::Error> for WalError {
     fn from(err: std::io::Error) -> Self {
-        WalError::Io(err)
+        WalError::Io(err.to_string())
     }
 }
 
 pub enum WalCommand {
-    Rotate(oneshot::Sender<String>),
+    Rotate(oneshot::Sender<String, WalError>),
     Shutdown,
 }
 
 impl WalEngine {
-    pub async fn start_dummy() -> Arc<Self> {
-        let (tx, _) = mpsc::channel::<ExecutionRecord>(100);
-        let (cmd_tx, _) = mpsc::channel::<WalCommand>(10);
-
-        let index = Arc::new(RwLock::new(BTreeMap::new()));
-
-        Arc::new(Self {
-            sender: tx,
-            cmd_sender: cmd_tx,
-            index,
-        })
-    }
-
-    /// Bootstraps the crash-safe WAL with automatic torn-frame recovery
+    /// Bootstraps the crash-safe WAL with strict mid-file corruption detection vs. tail-frame truncation.
     pub async fn start(file_path: String) -> (Arc<Self>, tokio::task::JoinHandle<()>) {
         println!("[WAL] Bismillah. Booting  Crash-Safe WAL Engine...");
 
         // Pre-Flight Forensic Scan - Detect and trunate torn frames from prior crashes.
-        let (clean_offset, recovered_index) = Self::recover_and_truncate_torn_frames(&file_path);
+        let (clean_offset, recovered_index) = Self::recover_and_truncate_torn_frames(&file_path)
+            .expect("[WAL FATAL] Refusing to boot on mid-file corrupted WAL! Inspect file.");
 
         // Bounded channel to prevent OOM crashes
-        let (tx, mut rx) = mpsc::channel::<ExecutionRecord>(100_000);
+        let (tx, mut rx) = mpsc::channel::<WalWriteRequest>(100_000);
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<WalCommand>(10);
 
         let index = Arc::new(RwLock::new(recovered_index));
         let index_clone = index.clone();
         let fp_clone = file_path.clone();
+        let poisoned = Arc::new(AtomicBool::new(false));
+        let poisoned_clone = poisoned.clone();
 
         // Spawn Tokio Worker task
         let handle = tokio::spawn(async move {
@@ -109,87 +110,126 @@ impl WalEngine {
                 .expect("FATAL: Failed to seek WAL writes cursor to clean_offset");
 
             let mut current_offset = clean_offset;
-            let mut batch: Vec<ExecutionRecord> = Vec::with_capacity(6_000);
-
-            // Group commit timer (flushes the disk cache every 2ms if data is pending)
-            let mut flush_interval = interval(Duration::from_millis(2));
+            let mut batch_records: Vec<ExecutionRecord> = Vec::with_capacity(1_024);
+            let mut batch_acks: Vec<oneshot::Sender<Result<(), WalError>>> =
+                Vec::with_capacity(1_024);
 
             loop {
                 tokio::select! {
-                    // Path A: Incoming record item
-                    msg = rx.recv() => {
-                        match msg  {
-                            Some(record) => {
-                              batch.push(record);
+                    biased;
 
-                            // Drain the channel of any other pending record for batching
-                            while batch.len() < 6_000 {
-                                    if let Ok(pending) = rx.try_recv() {
-                                        batch.push(pending);
-                                    } else {
-                                        break;
-                                    }
-                            }
-
-                            if !batch.is_empty() {
-                                Self::write_batch_to_disk(&mut active_file, &mut current_offset, &batch, &index_clone).await;
-
-                                batch.clear();
-                            }
-                        }
-                            None => break
-
-                        }
-
-                    }
-
-                    // Path B: Group Commit Flush (Enforces hardware NVMe cache sync)
-                    _ = flush_interval.tick() => {
-                        let _ = active_file.sync_data().await;
-                    }
-
-                    // Path C: Segment Rotation Command
                     cmd = cmd_rx.recv() => {
                         match cmd {
-                        Some(WalCommand::Shutdown) => {
-                            let _ = active_file.sync_all().await;
-                            break;
-                        }
 
-                        Some(WalCommand::Rotate(reply_tx)) => {
-                            println!("[WAL_ENGINE] Halting I/O. Rotating WAL segment...");
-
-                            // 1. Force final hardware flush
-                            let _ = active_file.sync_data().await;
-
-                            // Generate archived filename based on unix timestamp
-                            let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
-                            let archived_name = format!("{}_{}.wal", fp_clone, timestamp);
-
-                            // Async File rename (non-blocking)
-                            if let Err(e) = tokio::fs::rename(&fp_clone, &archived_name).await {
-                                eprintln!("[WAL_ENGINE ERROR] Rotation rename failed: {} ", e);
-                                continue;
+                            Some(WalCommad::Shutdown) => {
+                                let  _ = active_file.sync_data().await;
+                                break;
                             }
 
-                            // Open a fresh active file & reset offset
-                            active_file = tokio::fs::OpenOptions::new().create(true).read(true).write(true).open(&fp_clone).await.unwrap();
-                            current_offset = 0;
+                            Some(WalCommad::Rotate) => {
+                                if poisoned_clone.load(Ordering::SeqCst) {
+                                    let _ = reply_tx.send(Err(WalError::EnginePoisoned("Cannot rotate poisoned WAL".to_string())));
 
-                            // Clear memory index for fresh segment
-                            {
-                                let mut idx = index_clone.write().await;
-                                idx.clear();
+                                    continue;
+                                }
+
+                                let _ = active_file.sync_data().await;
+                                let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
+                                let archived_name = format!("{}_{}.wal", fp_clone, timestamp);
+
+                                if let Err(e) = tokio::fs::rename(&fp_clone, &archived_name).await {
+                                    let _ = reply_tx.send(Err(WalError::Io(e.to_string())));
+                                    continue;
+                                }
+
+                                match tokio::fs::OpenOptions::new().create(true).read(true).write(true).truncate(true).open(&fp_clone).await {
+
+                                        Ok(new_file) => {
+                                            active_file = new_file;
+                                            current_offset = 0;
+                                            index_clone.write().await.clear();
+                                            let _ = reply_tx.send(Ok(archived_name));
+
+                                        }
+                                        Err(e) => {
+                                            poisoned_clone.store(true, Order::SeqCst);
+                                            let _ = reply_tx.send(Err(WalError::Io(e.to_string())));
+                                        }
+                                }
                             }
-
-                            // Tell the compactor the achived file is ready
-                            let _ = reply_tx.send(archived_name);
-                            println!("[WAL_ENGINE] Rotation complete. I/O resumed.");
-                        }
-
                             None => break,
                         }
                     }
+
+                    msg = rx.recv() => {
+
+                        match msg {
+                            Some((first_rec, first_ack)) => {
+
+                                if poisoned_clone.load(Ordering::SeqCst) {
+                                    let _ = first_ack.send(Err(WalError::EnginePoisined(
+                                        "WAL is poisoned due to prior disk I/O error".to_string()
+                                    )));
+                                    continue;
+                                }
+
+                                batch_records.push(first_rec);
+                                batch_acks.push(first_ack);
+
+                                // Group-commit coalescing window: drain any concurrent arrivals or wait up to 2ms if queue is momentarily empty to batch fdatasync
+                                let deadline = tokio::time::Instant::now() + Duration::from_millis(2);
+                                while batch_record.len() < 2_048 {
+                                    match rx.try_recv() {
+
+                                        Ok((rec, ack)) => {
+                                            batch_records.push(rec);
+                                            batch_ack.push(ack);
+                                        }
+
+                                        Err(_) => {
+
+                                            if batch_records.len() >= 64 {
+                                                break;
+                                            }
+                                            match tokio::time::timeout_at(deadline, rx.recv()).await {
+                                                Ok(Some((rec, ack))) => {
+                                                    batch_records.push(rec);
+                                                    batch_acks.push(ack);
+                                                }
+
+                                                _ => break
+                                            }
+                                        }
+                                    }
+                                }
+
+                                let write_res = Self::write_batch_to_disk(&mut active_file, &mut current_offset, &batch_records, &index_clone).await;
+
+                                match write_res {
+                                    Ok(()) => {
+                                        for ack in batch_acks.drain(..) {
+                                            let _ = ack.send(OK());
+                                        }
+                                    }
+                                    Err(err) => {
+                                        eprintln!("[WAL FATAL] Disk write/fdatasync failed {}. Poisoning engine (fail-closed)!", err);
+                                        poisoned_clone.store(true, Orderirng::SeqCst);
+
+                                        // Roll back any partial frame so disk remains clean at current_offset
+                                        let _ = active_file.set_len(current_offset).await;
+                                        for ack in batch_acks.drain(..) {
+                                            let _ = ack.send(Err(err.clone()));
+                                        }
+                                    }
+                                }
+                                batch_records.clear();
+
+                            }
+                            None => break,
+                        }
+
+                    }
+
                 }
             }
         });
@@ -199,6 +239,7 @@ impl WalEngine {
                 sender: tx,
                 cmd_sender: cmd_tx,
                 index,
+                poisoned,
             }),
             handle,
         )
