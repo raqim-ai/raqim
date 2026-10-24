@@ -372,7 +372,6 @@ impl WalEngine {
 
 
         }
-
        
         if offset < file_len {
             file.set_len(offset)?;
@@ -389,12 +388,23 @@ impl WalEngine {
         self.index.read().await.len()
     }
 
-    /// Fire and forget. The TCP/Agent networking layer NEVER blocks here.
+    /// Appends a record and awaits physical `fdatasync` group-commit confirmation before returning Ok(())
     pub async fn append(&self, record: ExecutionRecord) -> Result<(), WalError> {
+
+        if self.poisoned.load(Ordering::SeqCst) {
+            return Err(WalError::EnginePoisined(
+                "WAL engine is poisoned; refusing write".to_string(),
+            ));
+        }
+
+        let (ack_tx, ack_rx) = oneshot::channel();
+
         self.sender
-            .send(record)
+            .send((record, ack_tx))
             .await
-            .map_err(|e| WalError::IngressQueueFull(e.to_string()))
+            .map_err(|e| WalError::IngressQueueFull(e.to_string()))?;
+
+            ack_rx.await.map_err(|_| WalError::EnginePoisined("WAL worker dropped ACK channel ".to_string()))?
     }
 
     pub fn fetch_hot_timeline(
@@ -409,6 +419,10 @@ impl WalEngine {
             Err(_) => return Ok(nodes),
         };
 
+        if file.metadata()?.len() < 8 {
+            return Ok(nodes);
+        }
+
         // Page WAL into memory
         let mmap = unsafe { MmapOptions::new().map(&file)? };
         let mut cursor = 0;
@@ -420,7 +434,7 @@ impl WalEngine {
             let expected_crc = u32::from_le_bytes(mmap[cursor + 4..cursor + 8].try_into().unwrap());
             cursor += 8;
 
-            if cursor + len > mmap.len() {
+            if len > MAX_WAL_FRAME_BYTES || cursor + len > mmap.len() {
                 break;
             }
 
@@ -517,6 +531,11 @@ impl WalEngine {
             Ok(f) => f,
             Err(_) => return Vec::new(),
         };
+     
+        if file.metadata().map(|m| m.len()).unwrap_or(0) < 8 {
+            return Vec::new();
+        }
+     
         let mmap = match unsafe { MmapOptions::new().map(&file) } {
             Ok(m) => m,
             Err(_) => return Vec::new(),
