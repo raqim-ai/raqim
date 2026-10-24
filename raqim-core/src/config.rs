@@ -19,17 +19,11 @@ pub struct CliArgs {
     #[arg(long, alias = "witnes-path")]
     pub witness_path: Option<String>,
 
-    #[arg(short, long)]
+    #[arg(short, long, alias = "policy_path")]
     pub aegis_path: Option<String>,
-
-    #[arg(short, long)]
-    pub node_public_key_hex: Option<String>,
 
     #[arg(long)]
     pub tenant_id: Option<String>,
-
-    #[arg(long)]
-    pub limit: Option<usize>,
 
     #[arg(short, long)]
     port: Option<u16>,
@@ -42,37 +36,49 @@ pub struct CliArgs {
 
     #[arg(long)]
     pub checkpoint_path: Option<String>,
+
+    #[arg(long)]
+    pub cold_store_path: Option<String>,
+
+    #[arg(long)]
+    pub admin_socket_path: Option<String>,
+
+    #[arg(long)]
+    pub worm_remote_url: Option<String>,
 }
 
+/// Unified Configuration Schema ( Used identically for both TOML read & write )
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct RaqimConfig {
+    pub tenant_id: String,
+    pub port: u16,
+    pub host: String,
     pub wal_path: String,
     pub manifest_path: String,
     pub witness_path: String,
     pub aegis_path: String,
-    pub tenant_id: String,
-    pub node_public_key_hex: String,
-    pub port: u16,
-    pub host: String,
     pub checkpoint_path: String,
     pub control_journal_path: String,
+    pub cold_store_path: String,
+    pub admin_socket_path: String,
+    pub worm_remote_url: Option<String>,
 }
 
 impl Default for RaqimConfig {
     fn default() -> Self {
         Self {
-            wal_path: "./production.wal".to_string(),
-            manifest_path: "./compactor.manifest.json".to_string(),
-            witness_path: "./vault/witnesses".to_string(),
-            aegis_path: "./aegis.toml".to_string(),
-            tenant_id: "open_core_local".to_string(),
-            node_public_key_hex: "0000000000000000000000000000000000000000000000000000000000000000"
-                .to_string(),
-
+            tenant_id: "local_sovereign".to_string(),
             port: 8080,
             host: "127.0.0.1".to_string(),
+            wal_path: "./production.wal".to_string(),
+            manifest_path: "./compaction.manifest.json".to_string(),
+            witness_path: "./vault/witnesses".to_string(),
+            aegis_path: "./policy.toml".to_string(),
             checkpoint_path: "./vault/state_checkpoint.bin".to_string(),
             control_journal_path: "./vault/control_journal.bin".to_string(),
+            cold_store_path: "./vault/cold_segments".to_string(),
+            admin_socket_path: "./vault/admin.sock".to_string(),
+            worm_remote_url: None,
         }
     }
 }
@@ -87,29 +93,12 @@ impl RaqimConfig {
             let content =
                 fs::read_to_string(config_path).expect("[FATAL] Failed to read raqim.toml");
 
-            // Parse into sectional proxy structure
-            let proxy: RaqimTomlProxy = toml::from_str(&content)
-                .expect("[FATAL] Invalid TOML structural layout in raqim.toml ");
-
-            RaqimConfig {
-                wal_path: proxy.daemon.wal_path,
-                manifest_path: proxy.daemon.manifest_path,
-                witness_path: proxy.daemon.witness_path,
-
-                aegis_path: proxy.daemon.aegis_path,
-
-                tenant_id: proxy.identity.tenant_id,
-
-                node_public_key_hex: proxy.identity.node_pub_key_hex,
-
-                port: proxy.daemon.port.unwrap_or(8080),
-                host: proxy.daemon.host.unwrap_or_else(|| "127.0.0.1".to_string()),
-                checkpoint_path: "./vault/state_checkpoint.bin".to_string(),
-                control_journal_path: "./vault/control_journal.bin".to_string(),
-            }
+            toml::from_str::<RaqimConfig>(&content)
+                .expect("[FATAL] Invalid TOML syntax in raqim.toml ")
         } else {
             let default_cfg = Self::default();
-            let toml_string = toml::to_string(&default_cfg).unwrap();
+            let toml_string = toml::to_string_pretty(&default_cfg)
+                .expect("Faild to serialize default RaqimConfig");
             fs::write(config_path, toml_string).expect("Failed to bootstap raqim.toml");
             println!(
                 "[SYSTEM] Bootstapped  default configuration at {}",
@@ -118,34 +107,25 @@ impl RaqimConfig {
             default_cfg
         };
 
-        //  THE OVERRIDE MATRIX: CLI Args always win if provided
+        // The CLI override matrix
 
         if let Some(w) = args.wal_path {
             config.wal_path = w;
         }
-
         if let Some(m) = args.manifest_path {
             config.manifest_path = m;
         }
-
-        if let Some(w_path) = args.witness_path {
-            config.witness_path = w_path;
+        if let Some(wp) = args.witness_path {
+            config.witness_path = wp;
         }
-
-        if let Some(p_key) = args.node_public_key_hex {
-            config.node_public_key_hex = p_key;
+        if let Some(ap) = args.aegis_path {
+            config.aegis_path = ap;
         }
-
-        if let Some(t_id) = args.tenant_id {
-            config.tenant_id = t_id;
+        if let Some(tid) = args.tenant_id {
+            config.tenant_id = tid;
         }
-
-        if let Some(a) = args.aegis_path {
-            config.aegis_path = a;
-        }
-
         if let Some(p) = args.port {
-            config.port = p
+            config.port = p;
         }
         if let Some(h) = args.host {
             config.host = h;
@@ -155,6 +135,15 @@ impl RaqimConfig {
         }
         if let Some(cp) = args.checkpoint_path {
             config.checkpoint_path = cp;
+        }
+        if let Some(cs) = args.cold_store_path {
+            config.cold_store_path = cs;
+        }
+        if let Some(sock) = args.admin_socket_path {
+            config.admin_socket_path = sock;
+        }
+        if let Some(url) = args.worm_remote_url {
+            config.worm_remote_url = Some(url);
         }
 
         config
