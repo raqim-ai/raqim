@@ -20,6 +20,7 @@ pub mod hot_memory;
 pub mod lancedb_store;
 
 use blake3::Hasher;
+use rand_core::{OsRng, RngCore};
 use rkyv::{Archive, Deserialize, Serialize};
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 use std::sync::Arc;
@@ -31,6 +32,7 @@ use crate::merkle::MarkleBatch;
 use crate::{merkle::MerkleEngine, wal::WalEngine};
 
 /// Lifecycle stage of an agent action at the control/gateway boundary
+#[repr(u8)]
 #[derive(
     Archive,
     Deserialize,
@@ -45,13 +47,13 @@ use crate::{merkle::MerkleEngine, wal::WalEngine};
 )]
 pub enum ExecutionStage {
     /// Pre-execution intent logged to WAL *before* upstream API or tool runs.
-    Intent,
+    Intent = 1,
     /// Post-execution outcome sealed with output payload and Merkle leaf hash.
-    Outcome,
+    Outcome = 2,
     /// Action rejected pre-execution by PolicyEngine
-    Denied,
+    Denied = 3,
     /// Lifecycle / system events (e.g., agent boot handshake)
-    System,
+    System = 4,
 }
 
 impl ExecutionStage {
@@ -61,6 +63,15 @@ impl ExecutionStage {
             ExecutionStage::Outcome => "OUTCOME",
             ExecutionStage::Denied => "DENIED",
             ExecutionStage::System => "SYSTEMS",
+        }
+    }
+
+    pub fn from_u8(val: u8) -> Self {
+        match val {
+            1 => ExecutionStage::Intent,
+            2 => ExecutionStage::Outcome,
+            3 => ExecutionStage::Denied,
+            _ => ExecutionStage::System,
         }
     }
 }
@@ -78,6 +89,7 @@ pub struct ExecutionRecord {
     /// Current stage in the execution state machine
     pub stage: ExecutionStage,
     pub call_signature_hash: [u8; 32],
+    pub payload_salt: [u8; 16],
     pub payload_hash: [u8; 32],
     pub payload_bytes: Vec<u8>,
     pub previous_root: [u8; 32],
@@ -85,9 +97,10 @@ pub struct ExecutionRecord {
 }
 
 impl ExecutionRecord {
-    /// computes the domain-separated 32-byte blake3 digest of a payload slice.
-    pub fn compute_payload_hash(payload_bytes: &[u8]) -> [u8; 32] {
-        let mut hasher = Hasher::new_derive_key("raqim.payload.v1");
+    /// computes the salted domain-separated blake3 commitment over (payload_salt || payload_bytes)
+    pub fn compute_salted_payload_hash(payload_salt: &[u8; 16], payload_bytes: &[u8]) -> [u8; 32] {
+        let mut hasher = Hasher::new_derive_key("raqim.payload.v2");
+        hasher.update(payload_salt);
         hasher.update(payload_bytes);
         hasher.finalize().into()
     }
@@ -105,7 +118,10 @@ impl ExecutionRecord {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as i64;
-        let payload_hash = Self::compute_payload_hash(&payload_bytes);
+
+        let mut payload_salt = [0u8; 16];
+        OsRng.fill_bytes(&mut payload_salt);
+        let payload_hash = Self::compute_salted_payload_hash(&payload_salt, &payload_bytes);
 
         Self {
             tx_id,
@@ -115,6 +131,7 @@ impl ExecutionRecord {
             step_ordinal,
             stage,
             call_signature_hash,
+            payload_salt,
             payload_hash,
             payload_bytes,
             previous_root: [0u8; 32],
@@ -122,9 +139,19 @@ impl ExecutionRecord {
         }
     }
 
+    /// Cryptographically shreds PII from this record in-place
+    pub fn redact_pii(&mut self) {
+        self.payload_bytes.clear();
+        self.payload_salt = [0u8; 16];
+    }
+
+    pub fn is_redacted(&self) -> bool {
+        self.payload_bytes.is_empty() && self.payload_salt == [0u8; 16]
+    }
+
     /// Helper to display payload as UTF-8 text preview
     pub fn payload_text_preview(&self) -> String {
-        if self.payload_bytes.is_empty() && self.payload_hash != Self::compute_payload_hash(&[]) {
+        if self.is_redacted() {
             "[REDACTED_NDPA]".to_string()
         } else {
             String::from_utf8(self.payload_bytes.clone())
