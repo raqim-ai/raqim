@@ -8,7 +8,10 @@ use std::{
     fs::File,
     io::Read,
     println,
-    sync::{atomic::Ordering, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
     vec,
 };
@@ -16,7 +19,6 @@ use tokio::io::AsyncWriteExt;
 use tokio::{
     io::AsyncSeekExt,
     sync::{mpsc, oneshot, RwLock},
-    time::interval,
 };
 
 /// Max allowed single WAL batch frame size (16 MiB) to prevent OOM allocation on corrupt headers.
@@ -33,10 +35,10 @@ pub struct WalEngine {
     pub poisoned: Arc<AtomicBool>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum WalError {
     IngressQueueFull(String),
-    EnginePoisined(String),
+    EnginePoisoned(String),
     MidFileCorruption(String),
     Io(String),
 }
@@ -45,7 +47,9 @@ impl std::fmt::Display for WalError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WalError::IngressQueueFull(msg) => write!(f, "WAL channel saturated: {}", msg),
-            WalError::EnginePoisoned(msg) => write!(f, "WAL engine poisoned (fail-closed): {}", e),
+            WalError::EnginePoisoned(msg) => {
+                write!(f, "WAL engine poisoned (fail-closed): {}", msg)
+            }
             WalError::MidFileCorruption(msg) => {
                 write!(f, "Fatal mid-write WAL corruption: {}", msg)
             }
@@ -62,14 +66,8 @@ impl From<std::io::Error> for WalError {
     }
 }
 
-impl From<std::io::Error> for WalError {
-    fn from(err: std::io::Error) -> Self {
-        WalError::Io(err.to_string())
-    }
-}
-
 pub enum WalCommand {
-    Rotate(oneshot::Sender<String, WalError>),
+    Rotate(oneshot::Sender<Result<String, WalError>>),
     Shutdown,
 }
 
@@ -121,12 +119,12 @@ impl WalEngine {
                     cmd = cmd_rx.recv() => {
                         match cmd {
 
-                            Some(WalCommad::Shutdown) => {
+                            Some(WalCommand::Shutdown) => {
                                 let  _ = active_file.sync_data().await;
                                 break;
                             }
 
-                            Some(WalCommad::Rotate) => {
+                            Some(WalCommand::Rotate(reply_tx)) => {
                                 if poisoned_clone.load(Ordering::SeqCst) {
                                     let _ = reply_tx.send(Err(WalError::EnginePoisoned("Cannot rotate poisoned WAL".to_string())));
 
@@ -152,7 +150,7 @@ impl WalEngine {
 
                                         }
                                         Err(e) => {
-                                            poisoned_clone.store(true, Order::SeqCst);
+                                            poisoned_clone.store(true, Ordering::SeqCst);
                                             let _ = reply_tx.send(Err(WalError::Io(e.to_string())));
                                         }
                                 }
@@ -167,7 +165,7 @@ impl WalEngine {
                             Some((first_rec, first_ack)) => {
 
                                 if poisoned_clone.load(Ordering::SeqCst) {
-                                    let _ = first_ack.send(Err(WalError::EnginePoisined(
+                                    let _ = first_ack.send(Err(WalError::EnginePoisoned(
                                         "WAL is poisoned due to prior disk I/O error".to_string()
                                     )));
                                     continue;
@@ -178,12 +176,12 @@ impl WalEngine {
 
                                 // Group-commit coalescing window: drain any concurrent arrivals or wait up to 2ms if queue is momentarily empty to batch fdatasync
                                 let deadline = tokio::time::Instant::now() + Duration::from_millis(2);
-                                while batch_record.len() < 2_048 {
+                                while batch_records.len() < 2_048 {
                                     match rx.try_recv() {
 
                                         Ok((rec, ack)) => {
                                             batch_records.push(rec);
-                                            batch_ack.push(ack);
+                                            batch_acks.push(ack);
                                         }
 
                                         Err(_) => {
@@ -208,7 +206,7 @@ impl WalEngine {
                                 match write_res {
                                     Ok(()) => {
                                         for ack in batch_acks.drain(..) {
-                                            let _ = ack.send(OK());
+                                            let _ = ack.send(Ok(()));
                                         }
                                     }
                                     Err(err) => {
@@ -259,11 +257,15 @@ impl WalEngine {
 
         // zero-copy serialize the entire batch
         let payload_bytes = to_bytes::<rkyv::rancor::Error>(&batch.to_vec())
-            .map_err(|e| WalError::IO(format!("Serialization error: {}", e)))?
+            .map_err(|e| WalError::Io(format!("Serialization error: {}", e)))?
             .into_vec();
 
         if payload_bytes.len() > MAX_WAL_FRAME_BYTES {
-            return Err(WalError::Io(format!("Batch frame size {} exceeds MAX_WAL_FRAME_BYTES ({})", payload_bytes.len(), MAX_WAL_FRAME_BYTES)))
+            return Err(WalError::Io(format!(
+                "Batch frame size {} exceeds MAX_WAL_FRAME_BYTES ({})",
+                payload_bytes.len(),
+                MAX_WAL_FRAME_BYTES
+            )));
         }
 
         // Compute CRC32 checksums over payload bytes
@@ -272,7 +274,7 @@ impl WalEngine {
 
         let mut frame = Vec::with_capacity(8 + payload_bytes.len());
         frame.extend_from_slice(&payload_len.to_le_bytes());
-        frame.extend_from_slice(&checksum.to_le_bytes()); 
+        frame.extend_from_slice(&checksum.to_le_bytes());
         frame.extend_from_slice(&payload_bytes);
 
         file.write_all(&frame).await?;
@@ -283,19 +285,19 @@ impl WalEngine {
             idx.insert(first_txid, *current_offset);
         }
 
-
         *current_offset += frame.len() as u64;
         Ok(())
     }
 
-    /// Pre-flight recovery: Truncates ONLY if a torn frame or CRC mismatch occurs on the FINAL frame at the end of the file. 
-     
-    pub fn recover_and_truncate_torn_frames(file_path: &str) -> Result<(u64, BTreeMap<u128, u64>), WalError> {
+    /// Pre-flight recovery: Truncates ONLY if a torn frame or CRC mismatch occurs on the FINAL frame at the end of the file.
+
+    pub fn recover_and_truncate_torn_frames(
+        file_path: &str,
+    ) -> Result<(u64, BTreeMap<u128, u64>), WalError> {
         let mut file = match File::options().read(true).write(true).open(file_path) {
             Ok(f) => f,
-            Err(_) => return Ok((0, BTreeMap::new()))
+            Err(_) => return Ok((0, BTreeMap::new())),
         };
-
 
         let file_len = file.metadata()?.len();
         let mut offset: u64 = 0;
@@ -304,9 +306,11 @@ impl WalEngine {
         let mut crc_buf = [0u8; 4];
 
         while offset < file_len {
-
             if offset + 8 > file_len {
-                eprintln!("[WAL RECOVERY WARN] Torn 8-byte frame header at tail offset {}. Truncating.", offset); 
+                eprintln!(
+                    "[WAL RECOVERY WARN] Torn 8-byte frame header at tail offset {}. Truncating.",
+                    offset
+                );
 
                 break;
             }
@@ -314,18 +318,18 @@ impl WalEngine {
             file.read_exact(&mut len_buf)?;
             let payload_len = u32::from_le_bytes(len_buf) as usize;
 
-
             file.read_exact(&mut crc_buf)?;
             let expected_crc = u32::from_le_bytes(crc_buf);
 
             if payload_len > MAX_WAL_FRAME_BYTES {
                 if offset + 8 + (payload_len as u64) >= file_len {
-
                     eprintln!("[WAL RECOVERY WARN] Corrupt length header ({}) at tail offset {}. Truncating.", payload_len, offset);
                     break;
-
                 } else {
-                    return Err(WalError::MidFileCorruption(format!("Frame at offset {} exceeds MAX_WAL_FRAME_BYTES ({}) ", offset, payload_len)));
+                    return Err(WalError::MidFileCorruption(format!(
+                        "Frame at offset {} exceeds MAX_WAL_FRAME_BYTES ({}) ",
+                        offset, payload_len
+                    )));
                 }
             }
 
@@ -338,47 +342,49 @@ impl WalEngine {
                 break;
             }
 
-            let mut paylaod = vec![0u8; payload_len];
+            let mut payload = vec![0u8; payload_len];
             file.read_exact(&mut payload)?;
 
-            let computed_crc = crc32fast::hash(&payload); 
-            if computed_crc != expected_crc { 
+            let computed_crc = crc32fast::hash(&payload);
+            if computed_crc != expected_crc {
                 if frame_end == file_len {
                     eprintln!("[WAL RECOVERY ERROR] CRC mismatch at tail offset {}! Expected {:x}, computed {:x}. Truncating torn write ", offset, expected_crc, computed_crc);
+                    break;
+                } else {
+                    eprintln!("[WAL RECOVERY CORRUPTION] CRC mismatch at mid-file offset {} (file_len={})! Expected {:x}, computed {:x}  ", offset, file_len, expected_crc, computed_crc);
+
+                    return Err(WalError::MidFileCorruption(format!(
+                        "Mid-file CRC32 corruption at offset {} (expected {:x}, computed {:x})",
+                        offset, expected_crc, computed_crc
+                    )));
                 }
-                break;
-            } else {
-
-                eprintln!("[WAL RECOVERY CORRUPTION] CRC mismatch at mid-file offset {} (file_len={})! Expected {:x}, computed {:x}  ", offset, file_len, expected_crc, computed_crc); 
-                
-                return Err(WalError::MidFileCorruption(format!(
-                    "Mid-file CRC32 corruption at offset {} (expected {:x}, computed {:x})", offset, expectedd_crc, computed_crc
-                )));
-
             }
 
-             let mut aligned_buf = rkyv::util::AlignedVec::<16>::with_capacity(payload.len());
-            aligned_buf.expand_from_slice(&payload);
+            let mut aligned_buf = rkyv::util::AlignedVec::<16>::with_capacity(payload.len());
+            aligned_buf.extend_from_slice(&payload);
 
-            let archived_batch = rkyv::access::<Vec<ExecutionRecord> as rkyv::Archive>::Archived>, rkyv::rancor::Error>(&aligned_buf).map_err(|e| {
-                WalError::MidFileCorruption(format!("rkyv archivie validation failed at offset {}: {}", offset, e))
+            let archived_batch = rkyv::access::<
+                <Vec<ExecutionRecord> as rkyv::Archive>::Archived,
+                rkyv::rancor::Error,
+            >(&aligned_buf)
+            .map_err(|e| {
+                WalError::MidFileCorruption(format!(
+                    "rkvy archive validation failed at offset {}: {}",
+                    offset, e
+                ))
             })?;
 
-            if !archived_batch.is_empty {
+            if !archived_batch.is_empty() {
                 index.insert(archived_batch[0].tx_id.to_native(), offset);
             }
 
-        offset = frame_end;
-
-
+            offset = frame_end;
         }
-       
+
         if offset < file_len {
             file.set_len(offset)?;
             file.sync_all()?;
         }
-
-
 
         Ok((offset, index))
     }
@@ -390,9 +396,8 @@ impl WalEngine {
 
     /// Appends a record and awaits physical `fdatasync` group-commit confirmation before returning Ok(())
     pub async fn append(&self, record: ExecutionRecord) -> Result<(), WalError> {
-
         if self.poisoned.load(Ordering::SeqCst) {
-            return Err(WalError::EnginePoisined(
+            return Err(WalError::EnginePoisoned(
                 "WAL engine is poisoned; refusing write".to_string(),
             ));
         }
@@ -404,7 +409,9 @@ impl WalEngine {
             .await
             .map_err(|e| WalError::IngressQueueFull(e.to_string()))?;
 
-            ack_rx.await.map_err(|_| WalError::EnginePoisined("WAL worker dropped ACK channel ".to_string()))?
+        ack_rx
+            .await
+            .map_err(|_| WalError::EnginePoisoned("WAL worker dropped ACK channel ".to_string()))?
     }
 
     pub fn fetch_hot_timeline(
@@ -531,11 +538,11 @@ impl WalEngine {
             Ok(f) => f,
             Err(_) => return Vec::new(),
         };
-     
+
         if file.metadata().map(|m| m.len()).unwrap_or(0) < 8 {
             return Vec::new();
         }
-     
+
         let mmap = match unsafe { MmapOptions::new().map(&file) } {
             Ok(m) => m,
             Err(_) => return Vec::new(),
