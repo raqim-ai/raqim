@@ -10,7 +10,7 @@ use std::{
 use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 
-use crate::{merkle::MarkleBatch, ExecutionRecord};
+use crate::{merkle::MerkleBatch, ExecutionRecord};
 
 #[derive(
     Debug, Clone, Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
@@ -59,7 +59,7 @@ impl WormWitnessEngine {
     /// ANCHOR BATCH: Signs and Writ the complete data + root bundle to WORM targets
     pub async fn anchor_batch(
         &self,
-        batch: &MarkleBatch,
+        batch: &MerkleBatch,
         raw_logs: Vec<ExecutionRecord>,
     ) -> Result<AnchoredRootWitness, anyhow::Error> {
         let timestamp = SystemTime::now()
@@ -67,7 +67,7 @@ impl WormWitnessEngine {
             .unwrap_or_default()
             .as_secs();
 
-        let merkle_root_hex = hex::encode(batch.markle_root);
+        let merkle_root_hex = hex::encode(batch.merkle_root);
         let parent_root_hex = hex::encode(batch.parent_batch_root);
 
         // Construct unsigned witness payload

@@ -28,7 +28,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::{eprintln, format};
 use tokio::sync::broadcast::Sender;
 
-use crate::merkle::MarkleBatch;
+use crate::merkle::MerkleBatch;
+use crate::policy::QuarantineRecord;
 use crate::{merkle::MerkleEngine, wal::WalEngine};
 
 /// Lifecycle stage of an agent action at the control/gateway boundary
@@ -171,10 +172,9 @@ pub struct RecentRecord {
     pub timestamp: i64,
 }
 
-/// Signed wire evellope for high-throughput binary TCP / HTTP ingress
+/// Signed wire envelope for binary TCP/HTTP ingress.
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 pub struct IngressEnvelope {
-    pub intent_path: String,
     pub public_key: [u8; 32],
     pub signature: [u8; 64],
     pub record_bytes: Vec<u8>,
@@ -204,7 +204,11 @@ pub fn generate_uuidv7_txid() -> u128 {
     uuid::Uuid::now_v7().as_u128()
 }
 
-/// Zero-copy TCP ingress cascade: validates and seals an incoming `Archived<Execution>`
+/// Executes the unified ingestiion cascade.
+/// 1. Prepares the cryptographic leaf hash on the record
+/// 2. Appends and waits for physical NVMe `fdatasync` ACK from `WalEngine` Only THEN
+/// 3. Commits to in-mem `MerkleEngine` ONLY after disk durability is guaranteed.
+
 pub async fn execute_raqim_cascade(
     archived_rec: &rkyv::Archived<ExecutionRecord>,
     merkle: Arc<MerkleEngine>,
@@ -256,14 +260,14 @@ pub async fn execute_raqim_cascade(
     let (sealed_record, optional_batch) = merkle.seal_record(unsealed_record);
 
     if let Some(batch) = optional_batch {
-        let _ = tx.send(SystemEvent::MarkleBatchCrystallized { batch });
+        let _ = tx.send(SystemEvent::MerkleBatchCrystallized { batch });
     }
 
     wal.append(sealed_record)
         .await
         .map_err(|e| anyhow::anyhow!("Durability Breach / WAL Saturated: {}", e))?;
 
-    let _ = tx.send(SystemEvent::ThoughtCommitted {
+    let _ = tx.send(SystemEvent::RecordCommitted {
         agent_id: agent_hex,
         tx_id: format!("{:032x}", tx_id),
         namespace,
@@ -275,19 +279,14 @@ pub async fn execute_raqim_cascade(
 
 #[derive(Clone, Debug, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub enum SystemEvent {
-    ThoughtCommitted {
+    RecordCommitted {
         agent_id: String,
         tx_id: String,
         namespace: String,
         text: String,
     },
-    SecurityBreach {
-        agent_id: String,
-        reason: String,
-        culprit_text: String,
-    },
 
-    AegisInterdiction {
+    PolicyInterdiction {
         agent_id: String,
         attempted_path: String,
         rule_broken: String,
@@ -303,7 +302,11 @@ pub enum SystemEvent {
         message: String,
     },
 
-    MarkleBatchCrystallized {
-        batch: MarkleBatch,
+    MerkleBatchCrystallized {
+        batch: MerkleBatch,
+    },
+
+    QuarantineTriggered {
+        record: QuarantineRecord,
     },
 }

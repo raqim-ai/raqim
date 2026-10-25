@@ -1,5 +1,5 @@
 use crate::{
-    merkle::MarkleBatch, policy::QuarantineRecord, registry::AgentProcess, ExecutionRecord,
+    merkle::MerkleBatch, policy::QuarantineRecord, registry::AgentProcess, ExecutionRecord,
 };
 use crc32fast::Hasher as Crc32Hasher;
 use serde::{Deserialize, Serialize};
@@ -25,7 +25,7 @@ pub struct ActiveTreeBufferSnapshot {
 pub struct MerkleCheckpointState {
     pub global_batch_counter: u64,
     pub active_buffers: Vec<ActiveTreeBufferSnapshot>,
-    pub batch_archive: Vec<MarkleBatch>,
+    pub batch_archive: Vec<MerkleBatch>,
 }
 
 /// The unified atomic state checkpoint captured during WAL compaction

@@ -15,10 +15,10 @@ use std::{
 #[derive(
     Debug, Clone, Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
 )]
-pub struct MarkleBatch {
+pub struct MerkleBatch {
     pub batch_id: u64,
     pub namespace: String,
-    pub markle_root: [u8; 32],
+    pub merkle_batch: [u8; 32],
     pub parent_batch_root: [u8; 32],
     pub leaves: Vec<[u8; 32]>,
 }
@@ -53,7 +53,7 @@ pub struct MerkleEngine {
     pub active_buffers: DashMap<String, Arc<RwLock<ActiveTreeBuffer>>>,
 
     /// The global completed block ledger for historical lookups
-    pub batch_archive: DashMap<u64, MarkleBatch>,
+    pub batch_archive: DashMap<u64, MerkleBatch>,
     pub global_batch_counter: std::sync::atomic::AtomicU64,
 
     // Fast-path map: tx_id(u128) -> (batch_id, leaf_index)
@@ -82,7 +82,7 @@ impl MerkleEngine {
     pub fn seal_record(
         &self,
         mut record: ExecutionRecord,
-    ) -> (ExecutionRecord, Option<MarkleBatch>) {
+    ) -> (ExecutionRecord, Option<MerkleBatch>) {
         let namespace = record.namespace.clone();
 
         // Compute the discrete leaf cryptographic hash using domain separation
@@ -104,8 +104,8 @@ impl MerkleEngine {
         (record, batch)
     }
 
-    /// Internal Engine loop: Condenses an arbitrary array of leaf hashes into a single Markle Root
-    pub fn compute_markle_root(leaves: &[[u8; 32]]) -> [u8; 32] {
+    /// Internal Engine loop: Condenses an arbitrary array of leaf hashes into a single Merkle Root
+    pub fn compute_merkle_root(leaves: &[[u8; 32]]) -> [u8; 32] {
         if leaves.is_empty() {
             return [0u8; 32];
         }
@@ -150,7 +150,7 @@ impl MerkleEngine {
                     tx_id_hex,
                     leaf_index,
                     sibling_hashes_hex: proof_nodes.iter().map(|h| hex::encode(h)).collect(),
-                    merkle_root_hex: (hex::encode(batch.markle_root)),
+                    merkle_root_hex: (hex::encode(batch.merkle_batch)),
                     parent_batch_root_hex: hex::encode(batch.parent_batch_root),
                     batch_id,
                     is_active_buffer: false,
@@ -163,7 +163,7 @@ impl MerkleEngine {
         for entry in self.active_buffers.iter() {
             let buffer = entry.value().read();
             if let Some(leaf_index) = buffer.accumulated_tx_ids.iter().position(|&id| id == tx_id) {
-                let active_root = Self::compute_markle_root(&buffer.accumulated_leaves);
+                let active_root = Self::compute_merkle_root(&buffer.accumulated_leaves);
                 let proof_nodes = Self::exract_sibling_path(&buffer.accumulated_leaves, leaf_index);
                 let payload_hash_hex = buffer
                     .accumulated_records
@@ -232,7 +232,7 @@ impl MerkleEngine {
         namespace: &str,
         leaf_hash: [u8; 32],
         record: ExecutionRecord,
-    ) -> Option<MarkleBatch> {
+    ) -> Option<MerkleBatch> {
         let tx_id = record.tx_id;
 
         // Pass 1: Acquire reference to the namespace buffer
@@ -263,14 +263,14 @@ impl MerkleEngine {
         buffer.accumulated_records.push(record);
         buffer.accumulated_tx_ids.push(tx_id);
 
-        // Cap Checkpoint: If capacity hits 1,024 leaves, crystallize the Markle Tree
+        // Cap Checkpoint: If capacity hits 1,024 leaves, crystallize the Merkle Tree
         if buffer.accumulated_leaves.len() >= 1024 {
-            let root = Self::compute_markle_root(&buffer.accumulated_leaves);
+            let root = Self::compute_merkle_root(&buffer.accumulated_leaves);
 
-            let completed_batch = MarkleBatch {
+            let completed_batch = MerkleBatch {
                 batch_id: buffer.current_batch_id,
                 namespace: namespace.to_string(),
-                markle_root: root,
+                merkle_batch: root,
                 parent_batch_root: buffer.parent_batch_root,
                 leaves: buffer.accumulated_leaves.clone(),
             };
@@ -314,7 +314,7 @@ impl MerkleEngine {
                 accumulated_tx_ids: buf.accumulated_tx_ids.clone(),
             });
         }
-        let batch_archive: Vec<MarkleBatch> = self
+        let batch_archive: Vec<MerkleBatch> = self
             .batch_archive
             .iter()
             .map(|e| e.value().clone())
@@ -384,7 +384,7 @@ impl MerkleEngine {
         agent_id: &[u8; 16],
         proof: &InclusionProof,
     ) -> bool {
-        let payload_hash = ExecutionRecord::compute_payload_hash(payload_bytes);
+        let payload_hash = ExecutionRecord::compute_salted_payload_hash(payload_bytes);
 
         Self::verify_inclusion_by_payload_hash(&payload_hash, agent_id, proof)
     }
@@ -403,7 +403,7 @@ impl MerkleEngine {
             let mut local_valid = false;
 
             if let Some(local_batch) = self.batch_archive.get(&witness.batch_id) {
-                let local_root_hex = hex::encode(local_batch.markle_root);
+                let local_root_hex = hex::encode(local_batch.merkle_batch);
                 if local_root_hex == witness.merkle_root_hex {
                     local_valid = true;
                 }
@@ -422,7 +422,7 @@ impl MerkleEngine {
                     .await?;
 
                 // Re-validate the fetched bundle's cryptigraphic proof to ensure the witness itself wasn't corrupted
-                let computed_root = Self::compute_markle_root(
+                let computed_root = Self::compute_merkle_root(
                     &intact_bundle
                         .raw_logs
                         .iter()
@@ -435,10 +435,10 @@ impl MerkleEngine {
                     ));
                 }
                 // Repair the local memory map by rolling back to the intact WORM block data state
-                let recomputed_batch = MarkleBatch {
+                let recomputed_batch = MerkleBatch {
                     batch_id: intact_bundle.witness.batch_id,
                     namespace: intact_bundle.witness.namespace.clone(),
-                    markle_root: computed_root,
+                    merkle_batch: computed_root,
                     parent_batch_root: hex::decode(&intact_bundle.witness.parent_batch_root_hex)?
                         .try_into()
                         .unwrap_or([0u8; 32]),

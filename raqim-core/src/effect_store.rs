@@ -263,7 +263,7 @@ impl EffectStore {
         if let Some(batch) = optional_batch {
             let _ = self
                 .event_tx
-                .send(SystemEvent::MarkleBatchCrystallized { batch });
+                .send(SystemEvent::MerkleBatchCrystallized { batch });
         }
 
         self.wal_engine.append(sealed_record).await?;
@@ -306,7 +306,7 @@ impl EffectStore {
         if let Some(batch) = optional_batch {
             let _ = self
                 .event_tx
-                .send(SystemEvent::MarkleBatchCrystallized { batch });
+                .send(SystemEvent::MerkleBatchCrystallized { batch });
         }
 
         self.wal_engine.append(sealed_record).await?;

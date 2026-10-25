@@ -638,7 +638,7 @@ pub async fn preflight_effect_handler(
     }))
 }
 
-/// Records live side-effect into WAL + Markle DAG
+/// Records live side-effect into WAL + Merkle DAG
 pub async fn record_effect_handler(
     _auth: ValidatedIdentity,
 
@@ -809,7 +809,7 @@ pub async fn get_state_proof_handler(
             message: if proof.is_active_buffer {
                 "Proof generated against active workspace buffer (un-crystallines)".to_string()
             } else {
-                "proof generated against immutable Markle Batch archive.".to_string()
+                "proof generated against immutable Merkle Batch archive.".to_string()
             },
         })),
 
@@ -884,7 +884,7 @@ pub async fn export_agent_timeline_otel(
         .batch_archive
         .iter()
         .next()
-        .map(|b| hex::encode(b.value().markle_root))
+        .map(|b| hex::encode(b.value().merkle_root))
         .unwrap_or_else(|| "0".repeat(64));
 
     // Delegate transformation to the dedicated domain builder
