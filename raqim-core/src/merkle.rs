@@ -4,7 +4,9 @@ use crate::{
 };
 use blake3::Hasher;
 use dashmap::DashMap;
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use parking_lot::RwLock;
+use rkyv::bytecheck::Verify;
 use serde::{Deserialize, Serialize};
 use std::{
     eprintln, format, println,
@@ -456,7 +458,7 @@ impl MerkleEngine {
         let Ok(tx_id) = u128::from_str_radix(proof.tx_id_hex.trim_start_matches("0x"), 16) else {
             return false;
         };
-        let Ok(call_sig_vec) = hex::decode(&proof.call_signature_hex) else {
+        let Ok(call_sig_vec) = hex::decode(&proof.call_sig_hex) else {
             return false;
         };
         let Ok(call_sig): Result<[u8; 32], _> = call_sig_vec.try_into() else {
@@ -496,85 +498,130 @@ impl MerkleEngine {
             let Ok(sibling_bytes) = hex::decode(sibling_hex) else {
                 return false;
             };
+
+            if sibling_bytes.len() != 32 {
+                return false;
+            }
+
+            if index % 2 == 0 {
+                if index + 1 < level_len {
+                    let mut hasher = Hasher::new_derive_key("raqim.merkle.v2.node");
+                    hasher.update(&current_hash);
+                    hasher.update(&sibling_bytes);
+                    current_hash = hasher.finalize().into()
+                } else {
+                    let mut hasher = Hasher::new_derive_key("raim.merkle.v2.node_odd");
+                    hasher.update(&current_hash);
+                    current_hash = hasher.finalize().into();
+                }
+            } else {
+                let mut hasher = Hasher::new_derive_key("raqim.merkle.v2.node");
+                hasher.update(&sibling_bytes);
+                hasher.update(&current_hash);
+                current_hash = hasher.finalize().into();
+            }
+
+            index /= 2;
+            level_len = (level_len + 1) / 2;
         }
+
+        hex::encode(current_hash) == proof.merkle_root_hex
     }
 
-    /// FORENSIC INTEGRITY COMPONENT: Execute local disk cross-checks against anchored WORM witness on startup
+    /// Boot Forensic Audit: Verified Ed25519 witness sig AND merkle roots against WORM anchors.
     pub async fn execute_forensic_boot_audit(
         &self,
         witnesses: &[AnchoredRootWitness],
         witness_engine: &WormWitnessEngine,
+        master_verifying_key: &VerifyingKey,
     ) -> Result<(), anyhow::Error> {
         println!(
-            "[PHOENIX AUDIT] Commencing cryptographic verification of local ledger blocks against WORM anchors... "
+            "[PHOENIX AUDIT] Verifying WORM witness signatures and local Merkle batch roots..."
         );
 
         for witness in witnesses {
+            // 1. Cryptographically Verify the witness signature itself!
+
+            let unsigned_payloaod = format!(
+                "raqim.worm.v1:{}:{}:{}:{}:{}",
+                witness.batch_id,
+                witness.namespace,
+                witness.merkle_root_hex,
+                witness.parent_batch_root_hex,
+                witness.timestamp
+            );
+            let sig_bytes: [u8; 64] = hex::decode(&witness.master_signature_hex)?
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("Invalid witness signature length"))?;
+            let sig = Signature::from_bytes(&sig_bytes);
+
+            master_verifying_key
+                .verify(unsigned_payloaod.as_bytes(), &sig)
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "FATAL: WORM witness header #{} failed Ed25519 signature verification!",
+                        witness.batch_id
+                    )
+                })?;
+
+            // 2. Verify local batch matches the signed witness root
             let mut local_valid = false;
 
             if let Some(local_batch) = self.batch_archive.get(&witness.batch_id) {
-                let local_root_hex = hex::encode(local_batch.merkle_batch);
-                if local_root_hex == witness.merkle_root_hex {
+                if hex::encode(local_batch.merkle_root) == witness.merkle_root_hex {
                     local_valid = true;
                 }
             }
 
-            // Critical disaster Recovery Override: Local delta is corrupted, altred or missing compeltely
             if !local_valid {
                 eprintln!(
-                    "\n[PHOENIX RED ALERT] Cryptographic mismatch or missing data detected on local block Batch #{}! Disk state is comprised. Triggering WORM Vault Rollback...",
+                    "[PHOENIX RED ALERT] Mismatch on Batch #{}! Restoring from WORM Witness Vault...",
                     witness.batch_id
                 );
 
-                // Fetch the absolute, untampered historical block bundle from our WORM Cloud/Local Vault
                 let intact_bundle = witness_engine
                     .fetch_bundle_from_witness(witness.batch_id)
                     .await?;
 
-                // Re-validate the fetched bundle's cryptigraphic proof to ensure the witness itself wasn't corrupted
                 let computed_root = Self::compute_merkle_root(
                     &intact_bundle
                         .raw_logs
                         .iter()
-                        .map(|l| l.leaf_hash)
+                        .map(|r| r.leaf_hash)
                         .collect::<Vec<_>>(),
                 );
+
                 if hex::encode(computed_root) != witness.merkle_root_hex {
                     return Err(anyhow::anyhow!(
-                        "FATAL: WORM witness vault payload failed self-authentication. Perimeter compromised. Terminating."
+                        "FATAL: WORM witness bundle #{} failed root self-authentication!",
+                        witness.batch_id
                     ));
                 }
-                // Repair the local memory map by rolling back to the intact WORM block data state
+
+                let parent_root: [u8; 32] =
+                    hex::decode(&intact_bundle.witness.parent_batch_root_hex)?
+                        .try_into()
+                        .unwrap_or([0u8; 32]);
+
                 let recomputed_batch = MerkleBatch {
                     batch_id: intact_bundle.witness.batch_id,
                     namespace: intact_bundle.witness.namespace.clone(),
-                    merkle_batch: computed_root,
-                    parent_batch_root: hex::decode(&intact_bundle.witness.parent_batch_root_hex)?
-                        .try_into()
-                        .unwrap_or([0u8; 32]),
-                    leaves: intact_bundle.raw_logs.iter().map(|l| l.leaf_hash).collect(),
+                    merkle_root: computed_root,
+                    parent_batch_root: parent_root,
+                    leaves: intact_bundle.raw_logs.iter().map(|r| r.leaf_hash).collect(),
                 };
 
-                // Overwrite the corrupted local memory slot with pristine data
                 self.batch_archive
                     .insert(recomputed_batch.batch_id, recomputed_batch);
 
-                // Re-map transaction indices for the repaired block logs
-                for (idx, log) in intact_bundle.raw_logs.iter().enumerate() {
+                for (idx, rec) in intact_bundle.raw_logs.iter().enumerate() {
                     self.tx_to_location
-                        .insert(log.tx_id, (witness.batch_id, idx));
+                        .insert(rec.tx_id, (witness.batch_id, idx));
                 }
-
-                println!(
-                    "[PHOENIX AUDIT] Re-mapped and restored 1,024 transaction logs from WORM vault for Batch #{}. ",
-                    witness.batch_id
-                );
             }
         }
 
-        println!(
-            "[PHOENIX AUDIT] Audit Complete. All local historical blocks verified and synchronized with WORM anchors."
-        );
+        println!("[PHOENIX AUDIT] All historical batches verified against signed WORM witnesses.");
         Ok(())
     }
 
