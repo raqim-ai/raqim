@@ -100,7 +100,7 @@ pub struct ExecutionRecord {
 impl ExecutionRecord {
     /// computes the salted domain-separated blake3 commitment over (payload_salt || payload_bytes)
     pub fn compute_salted_payload_hash(payload_salt: &[u8; 16], payload_bytes: &[u8]) -> [u8; 32] {
-        let mut hasher = Hasher::new_derive_key("raqim.payload.v2");
+        let mut hasher = Hasher::new_derive_key("raqim.payload.v1");
         hasher.update(payload_salt);
         hasher.update(payload_bytes);
         hasher.finalize().into()

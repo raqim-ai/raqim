@@ -6,7 +6,6 @@ use blake3::Hasher;
 use dashmap::DashMap;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use parking_lot::RwLock;
-use rkyv::bytecheck::Verify;
 use serde::{Deserialize, Serialize};
 use std::{
     eprintln, format, println,
@@ -15,6 +14,36 @@ use std::{
         Arc,
     },
 };
+
+/// Compact, fixed-size envelope metadata retained in crystallized batches.
+#[derive(
+    Debug, Clone, Serialize, Deserialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
+pub struct LeafMetadata {
+    pub tx_id: u128,
+    pub agent_id: [u8; 16],
+    pub step_ordinal: u64,
+    pub timestamp: i64,
+    pub stage: u8,
+    pub call_signature_hash: [u8; 32],
+    pub payload_salt: [u8; 16],
+    pub payload_hash: [u8; 32],
+}
+
+impl LeafMetadata {
+    pub fn from_record(rec: &ExecutionRecord) -> Self {
+        Self {
+            tx_id: rec.tx_id,
+            agent_id: rec.agent_id,
+            step_ordinal: rec.step_ordinal,
+            timestamp: rec.timestamp,
+            stage: rec.stage as u8,
+            call_signature_hash: rec.call_signature_hash,
+            payload_salt: rec.payload_salt,
+            payload_hash: rec.payload_hash,
+        }
+    }
+}
 
 /// A completed cryptographic audit checkpoint batch ready for ledger immutability
 #[derive(
@@ -26,6 +55,7 @@ pub struct MerkleBatch {
     pub merkle_root: [u8; 32],
     pub parent_batch_root: [u8; 32],
     pub leaves: Vec<[u8; 32]>,
+    pub metadata: Vec<LeafMetadata>,
 }
 
 /// Complete, self-veriifying Inclusion Proof committing to the entire action envelope
@@ -82,7 +112,7 @@ impl MerkleEngine {
         }
     }
 
-    /// Full Action Envelope Commitment (`raqim.merkle.v2.leaf`)
+    /// Full Action Envelope Commitment (`raqim.merkle.v1.leaf`)
     pub fn compute_envelope_leaf_hash(
         tx_id: u128,
         agent_id: &[u8; 16],
@@ -93,7 +123,7 @@ impl MerkleEngine {
         call_signature_hash: &[u8; 32],
         payload_hash: &[u8; 32],
     ) -> [u8; 32] {
-        let mut leaf_hasher = Hasher::new_derive_key("raqim.merkle.v2.leaf");
+        let mut leaf_hasher = Hasher::new_derive_key("raqim.merkle.v1.leaf");
         leaf_hasher.update(&tx_id.to_le_bytes());
         leaf_hasher.update(agent_id);
         leaf_hasher.update(&step_ordinal.to_le_bytes());
@@ -169,7 +199,7 @@ impl MerkleEngine {
 
             for chunk in current_level.chunks(2) {
                 if chunk.len() == 2 {
-                    let mut hasher = Hasher::new_derive_key("raqim.merkle.v2.node");
+                    let mut hasher = Hasher::new_derive_key("raqim.merkle.v1.node");
                     hasher.update(&chunk[0]);
                     hasher.update(&chunk[1]);
                     next_level.push(hasher.finalize().into());
@@ -196,12 +226,18 @@ impl MerkleEngine {
 
             if !buffer.accumulated_leaves.is_empty() {
                 let root = Self::compute_merkle_root(&buffer.accumulated_leaves);
+                let metadata = buffer
+                    .accumulated_records
+                    .iter()
+                    .map(LeafMetadata::from_record)
+                    .collect();
                 let completed_batch = MerkleBatch {
                     batch_id: buffer.current_batch_id,
                     namespace: ns,
                     merkle_root: root,
                     parent_batch_root: buffer.parent_batch_root,
                     leaves: buffer.accumulated_leaves.clone(),
+                    metadata,
                 };
 
                 let records = std::mem::take(&mut buffer.accumulated_records);
@@ -223,7 +259,7 @@ impl MerkleEngine {
     pub fn generate_proof_for_tx(&self, tx_id: u128) -> Option<InclusionProof> {
         let tx_id_hex = format!("{:032x}", tx_id);
 
-        // Check active buffer first
+        // Path A: Check active buffer first
         for entry in self.active_buffers.iter() {
             let buffer = entry.value().read();
             if let Some(leaf_index) = buffer.accumulated_tx_ids.iter().position(|&id| id == tx_id) {
@@ -253,21 +289,22 @@ impl MerkleEngine {
             }
         }
 
-        // Check crystallized batch archive
+        // Path B: Check crystallized batch archive
         if let Some(location) = self.tx_to_location.get(&tx_id) {
             let (batch_id, leaf_index) = *location.value();
             if let Some(batch) = self.batch_archive.get(&batch_id) {
+                let meta = batch.metadata.get(leaf_index)?;
                 let proof_nodes = Self::extract_sibiling_path(&batch.leaves, leaf_index);
                 return Some(InclusionProof {
                     tx_id_hex,
                     agent_hex: String::new(),
-                    step_ordinal: 0,
-                    timestamp: 0,
+                    step_ordinal: meta.step_ordinal,
+                    timestamp: meta.timestamp,
                     stage: ExecutionStage::Outcome as u8,
                     namespace: batch.namespace.clone(),
-                    call_sig_hex: String::new(),
-                    payload_salt_hex: String::new(),
-                    payload_hash_hex: String::new(),
+                    call_sig_hex: hex::encode(meta.call_signature_hash),
+                    payload_salt_hex: hex::encode(meta.payload_salt),
+                    payload_hash_hex: hex::encode(meta.payload_hash),
                     leaf_index,
                     total_leaves_in_tree: batch.leaves.len(),
                     sibling_hashes_hex: proof_nodes.iter().map(hex::encode).collect(),
@@ -292,12 +329,12 @@ impl MerkleEngine {
 
             for chunk in current_level.chunks(2) {
                 if chunk.len() == 2 {
-                    let mut hasher = Hasher::new_derive_key("raqim.merkle.v2.node");
+                    let mut hasher = Hasher::new_derive_key("raqim.merkle.v1.node");
                     hasher.update(&chunk[0]);
                     hasher.update(&chunk[1]);
                     next_level.push(hasher.finalize().into());
                 } else {
-                    let mut hasher = Hasher::new_derive_key("raqim.merkle.v2.node_odd");
+                    let mut hasher = Hasher::new_derive_key("raqim.merkle.v1.node_odd");
                     hasher.update(&chunk[0]);
                     next_level.push(hasher.finalize().into());
                 }
@@ -361,13 +398,18 @@ impl MerkleEngine {
         // Cap Checkpoint: If capacity hits 1,024 leaves, crystallize the Merkle Tree
         if buffer.accumulated_leaves.len() >= 1024 {
             let root = Self::compute_merkle_root(&buffer.accumulated_leaves);
-
+            let metadata = buffer
+                .accumulated_records
+                .iter()
+                .map(LeafMetadata::from_record)
+                .collect();
             let completed_batch = MerkleBatch {
                 batch_id: buffer.current_batch_id,
                 namespace: namespace.to_string(),
                 merkle_root: root,
                 parent_batch_root: buffer.parent_batch_root,
                 leaves: buffer.accumulated_leaves.clone(),
+                metadata,
             };
 
             //  Archive completed block for historical query proofs
@@ -445,6 +487,11 @@ impl MerkleEngine {
                 .insert(snap.namespace, Arc::new(RwLock::new(buffer)));
         }
         for batch in state.batch_archive {
+            for (idx, meta) in batch.metadata.iter().enumerate() {
+                self.tx_to_location
+                    .insert(meta.tx_id, (batch.batch_id, idx));
+            }
+
             self.batch_archive.insert(batch.batch_id, batch);
         }
     }
@@ -505,17 +552,17 @@ impl MerkleEngine {
 
             if index % 2 == 0 {
                 if index + 1 < level_len {
-                    let mut hasher = Hasher::new_derive_key("raqim.merkle.v2.node");
+                    let mut hasher = Hasher::new_derive_key("raqim.merkle.v1.node");
                     hasher.update(&current_hash);
                     hasher.update(&sibling_bytes);
                     current_hash = hasher.finalize().into()
                 } else {
-                    let mut hasher = Hasher::new_derive_key("raim.merkle.v2.node_odd");
+                    let mut hasher = Hasher::new_derive_key("raim.merkle.v1.node_odd");
                     hasher.update(&current_hash);
                     current_hash = hasher.finalize().into();
                 }
             } else {
-                let mut hasher = Hasher::new_derive_key("raqim.merkle.v2.node");
+                let mut hasher = Hasher::new_derive_key("raqim.merkle.v1.node");
                 hasher.update(&sibling_bytes);
                 hasher.update(&current_hash);
                 current_hash = hasher.finalize().into();
@@ -609,6 +656,11 @@ impl MerkleEngine {
                     merkle_root: computed_root,
                     parent_batch_root: parent_root,
                     leaves: intact_bundle.raw_logs.iter().map(|r| r.leaf_hash).collect(),
+                    metadata: intact_bundle
+                        .raw_logs
+                        .iter()
+                        .map(LeafMetadata::from_record)
+                        .collect(),
                 };
 
                 self.batch_archive
