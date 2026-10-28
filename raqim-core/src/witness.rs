@@ -36,14 +36,14 @@ pub struct CertifiedBundleBlock {
 pub struct WormWitnessEngine {
     witness_dir: String,
     master_signing_key: SigningKey,
-    gcp_worm_bucket_url: Option<String>,
+    worm_remote_url: Option<String>,
 }
 
 impl WormWitnessEngine {
     pub fn new(
         witness_dir: &str,
         master_signing_key: SigningKey,
-        gcp_worm_bucket_url: Option<String>,
+        worm_remote_url: Option<String>,
     ) -> Self {
         if !Path::new(witness_dir).exists() {
             let _ = fs::create_dir_all(witness_dir);
@@ -52,16 +52,21 @@ impl WormWitnessEngine {
         Self {
             witness_dir: witness_dir.to_string(),
             master_signing_key,
-            gcp_worm_bucket_url,
+            worm_remote_url,
         }
     }
 
-    /// ANCHOR BATCH: Signs and Writ the complete data + root bundle to WORM targets
+    /// Signs and anchors a crystallized MerkleBatch + envelope-only records to WORM storage
     pub async fn anchor_batch(
         &self,
         batch: &MerkleBatch,
-        raw_logs: Vec<ExecutionRecord>,
+        mut raw_logs: Vec<ExecutionRecord>,
     ) -> Result<AnchoredRootWitness, anyhow::Error> {
+        // Privacy Invariant: Strip raq `payload_bytes` and `payload_salt` before writing to uneraseable WORM storage
+        for rec in &mut raw_logs {
+            rec.redact_pii();
+        }
+
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -99,44 +104,41 @@ impl WormWitnessEngine {
         let bundle_bytes = serde_json::to_vec_pretty(&bundle)?;
         let witness_file_path = format!("{}/batch_{:08}.json", self.witness_dir, batch.batch_id);
 
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&witness_file_path)
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "WORM Violation: Cannot overwrite exiisting witness file '{}': {} ",
-                    witness_file_path,
-                    e
-                )
-            })?;
+        if !Path::new(&witness_file_path).exists() {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&witness_file_path)?;
 
-        file.write_all(&bundle_bytes)?;
-        file.sync_all()?;
+            file.write_all(&bundle_bytes)?;
+            file.sync_all()?;
 
-        // Apply Linux Kernel Immutable Attribute
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&witness_file_path, fs::Permissions::from_mode(0o400));
+            // Apply Linux Kernel Immutable Attribute
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&witness_file_path, fs::Permissions::from_mode(0o400));
+            }
+
+            println!(
+                "[WORM WITNESS] Batch #{} anchored to immutable storage (Root: {})",
+                batch.batch_id, merkle_root_hex
+            );
         }
 
-        println!(
-            "[WORM WITNESS] Merkle Root for Batch #{} anchored to immutable storage: {} ",
-            batch.batch_id, merkle_root_hex
-        );
-
-        // Target 2: GCP WORM Bucket
-        if let Some(bucket_url) = &self.gcp_worm_bucket_url {
+        if let Some(bucket_url) = &self.worm_remote_url {
             let client = reqwest::Client::new();
-            let url = format!("{}/batch_{:08}.json", bucket_url, batch.batch_id);
+            let url = format!(
+                "{}/batch_{:08}.json",
+                bucket_url.trim_end_matches("/"),
+                batch.batch_id
+            );
             let _ = client.put(&url).body(bundle_bytes).send().await;
         }
 
         Ok(witness)
     }
 
-    /// Cold recovery fetcher: Pulls an untampered historical block bundle diirectly from WORM vault
     pub async fn fetch_bundle_from_witness(
         &self,
         batch_id: u64,
@@ -150,7 +152,7 @@ impl WormWitnessEngine {
             return Ok(bundle);
         }
 
-        if let Some(bucket_url) = &self.gcp_worm_bucket_url {
+        if let Some(bucket_url) = &self.worm_remote_url {
             let client = reqwest::Client::new();
             let url = format!("{}/bundle_{:08}.json", bucket_url, batch_id);
             let resp = client.get(&url).send().await?;
@@ -162,7 +164,7 @@ impl WormWitnessEngine {
         }
 
         Err(anyhow::anyhow!(
-            "Disaster Recovery Error: Block bundle #{} not found in any worm target.",
+            "Disaster Recovery Error: Block bundle #{} not found in any WORM target.",
             batch_id
         ))
     }
