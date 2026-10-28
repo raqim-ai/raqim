@@ -3,22 +3,46 @@ use dashmap::DashMap;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{collections::HashMap, sync::Arc};
-use std::{eprintln, println};
+use std::{eprintln, format, println};
 use tokio::sync::broadcast::Sender;
 
-/// The Internal Token packed inside every agent's SDK bundle
+/// Number of consecutive rate-limit rejections before an afent is deemed a runaway flood and placed into Quarantine.
+pub const MAX_CONSECUTIVE_RATE_STRIKES: u32 = 50;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyError {
+    Unauthenticated(String),
+    Quarantined(String),
+    RateLimited(String),
+    ForbiddenNamespace(String),
+}
+
+impl std::fmt::Display for PolicyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PolicyError::Unauthenticated(m) => write!(f, "Unauthenticated: {}", m),
+            PolicyError::Quarantined(m) => write!(f, "Quarantined: {}", m),
+            PolicyError::RateLimited(m) => write!(f, "Rate Limit Exceeded: {}", m),
+            PolicyError::ForbiddenNamespace(m) => write!(f, "Policy Interdiction: {}", m),
+        }
+    }
+}
+
+impl std::error::Error for PolicyError {}
+
+/// Signed capability passport binding an agent to a security group
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CapabilityCertificate {
     pub agent_hex: String,
     pub group_name: String,
     pub expiration_timestamp: u64,
-    pub master_signature: Vec<u8>, // Signed by Swarm Master Key
+    pub master_signature: Vec<u8>,
 }
 
-/// Atomic Token Bucket Rate Limiter
+/// Lock-Free Hardware CAS Token Bucket with consecutive flood strike counter.
 #[derive(Debug)]
 
 pub struct AtomicTokenBucket {
@@ -26,6 +50,7 @@ pub struct AtomicTokenBucket {
     pub burst_capacity: u64,
     pub tokens: AtomicU64,
     pub last_refill_nanos: AtomicU64,
+    pub consecutive_violations: AtomicU32,
 }
 
 impl AtomicTokenBucket {
@@ -40,6 +65,7 @@ impl AtomicTokenBucket {
             burst_capacity,
             tokens: AtomicU64::new(burst_capacity),
             last_refill_nanos: AtomicU64::new(now_nanos),
+            consecutive_violations: AtomicU32::new(0),
         }
     }
 
@@ -98,14 +124,17 @@ impl AtomicTokenBucket {
         }
     }
 
-    /// HARDENED: Atomic CAS consumption loop. Immute to underflows.
-    pub fn check_and_consume(&self) -> bool {
+    /// Attempts to consome 1 token atomically.
+    /// - On success: resets `consecutvive_violations` to 0 and returns Ok(())
+    /// - On exhaustion: increments `consecutive_violations` and returns `Err(strike_count)`
+    pub fn check_and_consume(&self) -> Result<(), u32> {
         self.refill();
 
         let mut current = self.tokens.load(std::sync::atomic::Ordering::Relaxed);
         loop {
             if current == 0 {
-                return false;
+                let strikes = self.consecutive_violations.fetch_add(1, Ordering::AcqRel);
+                return Err(strikes);
             }
 
             // Atomic CAS
@@ -115,7 +144,10 @@ impl AtomicTokenBucket {
                 std::sync::atomic::Ordering::AcqRel,
                 std::sync::atomic::Ordering::Relaxed,
             ) {
-                Ok(_) => return true,
+                Ok(_) => {
+                    self.consecutive_violations.store(0, Ordering::Relaxed);
+                    return Ok(());
+                }
                 Err(actual) => current = actual,
             }
         }
@@ -126,7 +158,8 @@ impl AtomicTokenBucket {
 pub struct GroupPolicy {
     pub allowed_namespaces: Vec<String>,
     pub blocked_namespaces: Vec<String>,
-    pub rate_limiter: Arc<AtomicTokenBucket>,
+    pub max_tps: u64,
+    pub burst_capacity: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, rkyv::Archive, rkyv::Serialize)]
@@ -161,7 +194,8 @@ impl PolicyConfigFile {
                 GroupPolicy {
                     allowed_namespaces: cfg.allowed_namespaces.clone(),
                     blocked_namespaces: cfg.blocked_namespaces.clone(),
-                    rate_limiter: Arc::new(AtomicTokenBucket::new(cfg.max_tps, cfg.burst_capacity)),
+                    max_tps: cfg.max_tps,
+                    burst_capacity: cfg.burst_capacity,
                 },
             );
         }
@@ -172,6 +206,7 @@ impl PolicyConfigFile {
 
 pub struct PolicyEngine {
     pub group_policies: Arc<RwLock<HashMap<String, GroupPolicy>>>,
+    pub agent_rate_limiters: DashMap<String, Arc<AtomicTokenBucket>>,
     pub quarantine_blocklist: DashMap<String, QuarantineRecord>,
     pub master_public_key: VerifyingKey,
     pub tx: Sender<SystemEvent>,
@@ -190,6 +225,7 @@ impl PolicyEngine {
 
         Self {
             quarantine_blocklist: DashMap::new(),
+            agent_rate_limiters: DashMap::new(),
             group_policies: Arc::new(RwLock::new(initial_policies)),
             master_public_key,
             tx,
@@ -198,11 +234,14 @@ impl PolicyEngine {
     }
 
     /// Persists a quarantine record to durable storage via control journal
-    fn persist_quarantine_to_journal(&self, record: &QuarantineRecord) {
-        let _ = crate::checkpoint::CheckpointEngine::append_control_mutation(
+    fn persist_quarantine_to_journal(
+        &self,
+        record: &QuarantineRecord,
+    ) -> Result<(), anyhow::Error> {
+        crate::checkpoint::CheckpointEngine::append_control_mutation(
             std::path::Path::new(&self.control_journal_path),
             &crate::checkpoint::ControlMutation::Quarantine(record.clone()),
-        );
+        )
     }
 
     /// Exports active quarantined records for checkpointing
@@ -263,7 +302,7 @@ impl PolicyEngine {
         self.quarantine_blocklist.contains_key(agent_hex)
     }
 
-    /// Locks down the agent globally across the OS
+    /// Place an agent into quarantine and durably journals the mutation
     pub fn trigger_quarantine(&self, agent_hex: &str, target: &str, v_type: &str, reason: &str) {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -278,134 +317,119 @@ impl PolicyEngine {
             timestamp,
         };
 
-        // Lock the agent down at network layer instantly.
         self.quarantine_blocklist
             .insert(agent_hex.to_string(), record.clone());
 
-        self.persist_quarantine_to_journal(&record);
+        if let Err(e) = self.persist_quarantine_to_journal(&record) {
+            eprintln!(
+                "[POLICY CRITICAL] Failed to persist quarantine to journal '{}': {} ",
+                self.control_journal_path, e
+            );
+        }
+
+        let _ = self.tx.send(SystemEvent::QuarantineTriggered {
+            record: record.clone(),
+        });
 
         // Fire the durable WAL log
-        let _ = self.tx.send(SystemEvent::AegisInterdiction {
+        let _ = self.tx.send(SystemEvent::PolicyInterdiction {
             agent_id: agent_hex.to_string(),
             attempted_path: target.to_string(),
             rule_broken: v_type.to_string(),
             payload: reason.to_string(),
         });
 
-        let _ = eprintln!(
-            "\n[AEGIS RED ALERT] Unauthorized access attempts by {} on path: {}, Violation Type: {}, Reason: {} ",
+        eprintln!(
+            "\n[POLICY INTERDICTION] Quartantined agent {} on path: '{}' : {}, ({})",
             agent_hex, target, v_type, reason
         );
     }
 
-    /// Validates the cryptographic token structure and executes signature audit at the gateway.
-    // The ultra-fast packet audit (Called once per packet)
-    pub fn authorize_packet_fast(
+    /// Evaluates rate limits (Two-Tier) and namespace ACL for ab already-authenticated agent
+    pub fn authorize_namespace_only(
         &self,
         agent_hex: &str,
         group_name: &str,
-        agent_pub_bytes: &[u8; 32],
-        payload: &[u8],
-        packet_sig_bytes: &[u8; 64],
-        intent_path: &str,
-        packet_timestamp: i64,
-    ) -> Result<(), anyhow::Error> {
-        // Enforce Quarantine Barrier
+        namespace: &str,
+    ) -> Result<(), PolicyError> {
         if self.is_quarantined(agent_hex) {
-            return Err(anyhow::anyhow!(
-                "Security Violation: Agent '{}' is locked in quarantine blocklist",
+            return Err(PolicyError::Quarantined(format!(
+                "Agent '{}' is locked in quarantine blocklist",
                 agent_hex
-            ));
+            )));
         }
 
-        // Freshness Window Check
-        let current_ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-
-        if (current_ts - packet_timestamp).abs() > 30 {
-            self.trigger_quarantine(
-                agent_hex,
-                intent_path,
-                "REPLAY_ATTACK",
-                "Packet timestamp expired (drift > 30s)",
-            );
-
-            return Err(anyhow::anyhow!(
-                "Security Violation: State packet rejected (Anti-replay)"
-            ));
-        };
-
-        //  AUTHENTICITY VERIFICATION: Verify payload integrity against individual Agent Key.
-        let agent_verifying_key = VerifyingKey::from_bytes(agent_pub_bytes)?;
-        let packet_sig = Signature::from_bytes(packet_sig_bytes);
-        if agent_verifying_key.verify(payload, &packet_sig).is_err() {
-            self.trigger_quarantine(
-                agent_hex,
-                &intent_path,
-                "CRYPTO_SPOOF",
-                "Invalid Agent Frame Signature",
-            );
-            return Err(anyhow::anyhow!(
-                "Integrity Audit Failure: Mismatched Agent Handshake "
-            ));
-        }
-
-        // Rate limiting & Dos interdiction (Atomic bucket token)
         let policies_guard = self.group_policies.read();
         let live_policy = policies_guard.get(group_name).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Group Policy mapping '{}' not defined inside active aegis.toml ",
-                group_name
-            )
+            PolicyError::ForbiddenNamespace(format!("Undefined policy group '{}'", group_name))
         })?;
 
-        if !live_policy.rate_limiter.check_and_consume() {
-            self.trigger_quarantine(
-                agent_hex,
-                intent_path,
-                "RATE_LIMIT_EXCEDED",
-                &format!("Agent exceeded group '{}' max TPS quota", group_name),
-            );
+        let agent_bucket = self
+            .agent_rate_limiters
+            .entry(agent_hex.to_string())
+            .or_insert_with(|| {
+                Arc::new(AtomicTokenBucket::new(
+                    live_policy.max_tps,
+                    live_policy.burst_capacity,
+                ))
+            })
+            .value()
+            .clone();
 
-            return Err(anyhow::anyhow!(
-                "Acess Denied: Group Rate Limit Exceeded (DoS Interdiction)"
-            ));
+        if let Err(strikes) = agent_bucket.check_and_consume() {
+            let max_tps = live_policy.max_tps;
+            drop(policies_guard);
+            if strikes >= MAX_CONSECUTIVE_RATE_STRIKES {
+                self.trigger_quarantine(
+                    agent_hex,
+                    namespace,
+                    "SUSTAINED_RATE_FLOOD",
+                    &format!(
+                        "Agent exceeded rate limit {} consecutive times (runaway flood)",
+                        strikes
+                    ),
+                );
+                return Err(PolicyError::Quarantined(format!(
+                    "Agent '{}' quarantined after {} consecutive rate-limit violations",
+                    agent_hex, strikes
+                )));
+            }
+            return Err(PolicyError::RateLimited(format!(
+                "Agent '{}' exceeded rate limit ({} TPS, strike {}/{})",
+                agent_hex, max_tps, strikes, MAX_CONSECUTIVE_RATE_STRIKES
+            )));
         }
 
-        // Clean phantom prefix to prevent security policy evasion
-        let clean_intent = if intent_path.starts_with("phantom_") {
-            intent_path.trim_start_matches("phantom_")
-        } else {
-            intent_path
-        };
+        // Strip `phantom_` prefix so counterfactual replay branches cannot evade namespace rules
+        let clean_ns = namespace.strip_prefix("phantom_").unwrap_or(namespace);
 
         for blocked in &live_policy.blocked_namespaces {
-            let match_found = if blocked.ends_with("*") {
-                clean_intent.starts_with(&blocked[..blocked.len() - 1])
+            let match_found = if let Some(prefix) = blocked.strip_suffix('*') {
+                clean_ns.starts_with(prefix)
             } else {
-                clean_intent == blocked
+                clean_ns == blocked
             };
 
             if match_found {
+                drop(policies_guard);
                 self.trigger_quarantine(
                     agent_hex,
-                    intent_path,
+                    namespace,
                     "NAMESPACE_BREACH",
-                    "Atempted interaction inside expicitely blocked domain",
+                    "Attempted interaction inside explicitly blocked namespace",
                 );
-                return Err(anyhow::anyhow!(
-                    "Access Denied: Namespace explicitely blocked"
-                ));
+                return Err(PolicyError::ForbiddenNamespace(format!(
+                    "Namespace '{}' is explicitly blocked",
+                    namespace
+                )));
             }
         }
 
         for allowed in &live_policy.allowed_namespaces {
-            let match_found = if allowed.ends_with("*") {
-                clean_intent.starts_with(&allowed[..allowed.len() - 1])
+            let match_found = if let Some(prefix) = allowed.strip_suffix('*') {
+                clean_ns.starts_with(prefix)
             } else {
-                allowed == clean_intent
+                allowed == clean_ns
             };
 
             if match_found {
@@ -413,27 +437,62 @@ impl PolicyEngine {
             }
         }
 
-        // Default Deny Fallback
+        drop(policies_guard);
         self.trigger_quarantine(
             agent_hex,
-            intent_path,
+            namespace,
             "NAMESPACE_BREACH",
-            "No explicit allowance match within token permissions",
+            "No matching allowance rule in policy (Default Deny)",
         );
-        Err(anyhow::anyhow!(
-            "Access Denied: Default Deny Policy Tripped"
+        Err(PolicyError::ForbiddenNamespace(
+            "Default Deny Policy Tripped".into(),
         ))
     }
 
-    /// The heavy handshake: Validates Master Certificate AND binds it to the packet's public key
+    /// Full fast-path auth:
+    pub fn authorize_packet_fast(
+        &self,
+        agent_hex: &str,
+        group_name: &str,
+        agent_pub_bytes: &[u8; 32],
+        payload: &[u8],
+        packet_sig_bytes: &[u8; 64],
+        namespace: &str,
+        packet_timestamp: i64,
+    ) -> Result<(), PolicyError> {
+        let agent_verifying_key = VerifyingKey::from_bytes(agent_pub_bytes)
+            .map_err(|_| PolicyError::Unauthenticated("Invalid Ed25519 public key".into()))?;
+
+        let packet_sig = Signature::from_bytes(packet_sig_bytes);
+        if agent_verifying_key.verify(payload, &packet_sig).is_err() {
+            return Err(PolicyError::Unauthenticated(
+                "Invalid Ed25519 packet signature".into(),
+            ));
+        }
+
+        let current_ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        if (current_ts - packet_timestamp).abs() > 30 {
+            return Err(PolicyError::Unauthenticated(
+                "Packet timestamp outside 30s anti-replay window".into(),
+            ));
+        }
+
+        self.authorize_namespace_only(agent_hex, group_name, namespace)
+    }
+
+    /// Validates MAster CA certificate AND binds it to `agent_pub_bytes`. Never quarantines on unauthenticated/forged certs.
     pub fn verify_session_lineage(
         &self,
         cert_bytes: &[u8],
         agent_pub_bytes: &[u8; 32],
-    ) -> Result<(String, String), anyhow::Error> {
+    ) -> Result<(String, String), PolicyError> {
         // Unpack the certificate token
-        let cert: CapabilityCertificate = postcard::from_bytes(cert_bytes)
-            .map_err(|_| anyhow::anyhow!("Malformed Cryptographic Certificate Token"))?;
+        let cert: CapabilityCertificate = postcard::from_bytes(cert_bytes).map_err(|_| {
+            PolicyError::Unauthenticated("Malformed Cryptographic Certificate Token".into())
+        })?;
 
         // Cryptographic binding: derive blake3 agent_hex directly from the incoming packet's pub key
         let mut hasher = blake3::Hasher::new_derive_key("raqim.agent.v1.identity");
@@ -444,22 +503,8 @@ impl PolicyEngine {
 
         // Assert that the Certificate ID matches the key that actually signed the packet
         if cert.agent_hex != derived_agent_hex {
-            self.trigger_quarantine(
-                &derived_agent_hex,
-                "Handshake",
-                "CONFUSED_DEPUTY_SPOOF",
-                "Public key does not match CapabilityCertificate identity",
-            );
-
-            return Err(anyhow::anyhow!(
-                "Security Violation: Certificate identity mismatch with signing key "
-            ));
-        }
-
-        // 2. Short-circuit check if the agent is actively quarantined
-        if self.is_quarantined(&cert.agent_hex) {
-            return Err(anyhow::anyhow!(
-                " Agent is expicitely locked down by firewall "
+            return Err(PolicyError::Unauthenticated(
+                "Public key does not match CapabilityCertificate agent_hex".into(),
             ));
         }
 
@@ -469,19 +514,21 @@ impl PolicyEngine {
             .unwrap()
             .as_secs();
         if current_ts > cert.expiration_timestamp {
-            return Err(anyhow::anyhow!(" Capability Certificate has expired "));
+            return Err(PolicyError::Unauthenticated(
+                " CapabilityCertificate has expired ".into(),
+            ));
         }
 
         // 4. LINEAGE VERIFICATION: Prove token validity against the Master Swarm Key
         let mut cert_unsigned_payload = cert.clone();
         cert_unsigned_payload.master_signature = Vec::new();
-        let serialized_raw = postcard::to_allocvec(&cert_unsigned_payload)?;
+        let serialized_raw = postcard::to_allocvec(&cert_unsigned_payload)
+            .map_err(|_| PolicyError::Unauthenticated("Certificate serializion error".into()))?;
 
-        let master_sig_bytes: &[u8; 64] = cert
-            .master_signature
-            .as_slice()
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("Invalid Master Signature block lengnth"))?;
+        let master_sig_bytes: &[u8; 64] =
+            cert.master_signature.as_slice().try_into().map_err(|_| {
+                PolicyError::Unauthenticated("Invalid Master Signature block lengnth".into())
+            })?;
 
         let master_sig = Signature::from_bytes(master_sig_bytes);
         if self
@@ -489,88 +536,18 @@ impl PolicyEngine {
             .verify(&serialized_raw, &master_sig)
             .is_err()
         {
-            self.trigger_quarantine(
-                &cert.agent_hex,
-                "Handshake",
-                "CRYPTO_SPOOF",
-                "Forged Swarm Lineage Token",
-            );
-            return Err(anyhow::anyhow!(
-                "Lineage Audit Failure: Forged Master Signature"
+            return Err(PolicyError::Unauthenticated(
+                "Forged Master CA signature on CapabilityCertificate".into(),
             ));
+        }
+
+        if self.is_quarantined(&cert.agent_hex) {
+            return Err(PolicyError::Quarantined(format!(
+                "Agent '{}' is locked in quarantine blocklist ",
+                cert.agent_hex
+            )));
         }
 
         Ok((cert.agent_hex, cert.group_name))
-    }
-
-    pub fn authorize_namespace_only(
-        &self,
-        agent_hex: &str,
-        group_name: &str,
-        intent_path: &str,
-    ) -> Result<(), anyhow::Error> {
-        // 1. Short-circuit check if agent is quarantined
-        if self.is_quarantined(agent_hex) {
-            return Err(anyhow::anyhow!(
-                "Security Violation: Agent '{}' is actively quarantined",
-                agent_hex
-            ));
-        }
-
-        // 2. Fetch live policy guard
-        let policies_guard = self.group_policies.read();
-        let live_policy = policies_guard.get(group_name).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Group Policy mapping '{}' not defined in aegis.toml",
-                group_name
-            )
-        })?;
-
-        // 3. Evaluate Blocked Namespaces (Deny rules have absolute priority)
-        for blocked in &live_policy.blocked_namespaces {
-            let match_found = if blocked.ends_with('*') {
-                intent_path.starts_with(&blocked[..blocked.len() - 1])
-            } else {
-                intent_path == blocked
-            };
-
-            if match_found {
-                self.trigger_quarantine(
-                    agent_hex,
-                    intent_path,
-                    "NAMESPACE_BREACH",
-                    "Attempted interaction inside explicitly blocked domain",
-                );
-                return Err(anyhow::anyhow!(
-                    "Access Denied: Namespace '{}' is explicitly blocked for group '{}'",
-                    intent_path,
-                    group_name
-                ));
-            }
-        }
-
-        // 4. Evaluate Allowed Namespaces
-        for allowed in &live_policy.allowed_namespaces {
-            let match_found = if allowed.ends_with('*') {
-                intent_path.starts_with(&allowed[..allowed.len() - 1])
-            } else {
-                allowed == intent_path
-            };
-
-            if match_found {
-                return Ok(());
-            }
-        }
-
-        // 5. Default Deny Fallback
-        self.trigger_quarantine(
-            agent_hex,
-            intent_path,
-            "NAMESPACE_BREACH",
-            "No explicit allowance match within token permissions",
-        );
-        Err(anyhow::anyhow!(
-            "Access Denied: Default Deny Policy Tripped"
-        ))
     }
 }
