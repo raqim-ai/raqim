@@ -4,9 +4,10 @@ use crate::{
 use crc32fast::Hasher as Crc32Hasher;
 use serde::{Deserialize, Serialize};
 use std::{
+    eprintln,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 /// Snapshot representation of a single namespace's active Merkle buffer
@@ -161,13 +162,22 @@ impl CheckpointEngine {
         Ok(())
     }
 
-    /// Replays all valid control mutations from the journal
-    pub fn replay_control_journal(journal_path: &Path) -> Vec<ControlMutation> {
+    /// Atomically rotates `control_journal.bin` ->  `control_journal.bin.compacting` BEFORE taking RAM snapshot so curret mutations are never lost
+    pub fn rotate_journal_before_snapshot(journal_path: &Path) -> Option<PathBuf> {
         if !journal_path.exists() {
-            return Vec::new();
+            return None;
         }
 
-        let mut file = match File::open(journal_path) {
+        let compacting_path = journal_path.with_extension("bin.compacting");
+        if fs::rename(journal_path, &compacting_path).is_ok() {
+            Some(compacting_path)
+        } else {
+            None
+        }
+    }
+
+    fn read_single_journal_file(path: &Path) -> Vec<ControlMutation> {
+        let mut file = match File::open(path) {
             Ok(f) => f,
             Err(_) => return Vec::new(),
         };
@@ -180,17 +190,22 @@ impl CheckpointEngine {
             if file.read_exact(&mut len_buf).is_err() {
                 break;
             }
+
             if file.read_exact(&mut crc_buf).is_err() {
-                eprintln!("[CONTROL JOURNAL WARN] Truncated header in journal. Halting replay.");
+                eprintln!("[CONTROL JOURNAL WARN] Truncated header in journal. Halting replay. ");
                 break;
             }
 
             let entry_len = u32::from_le_bytes(len_buf) as usize;
             let expected_crc = u32::from_le_bytes(crc_buf);
 
+            if entry_len > 16 * 1024 * 1024 {
+                break;
+            }
+
             let mut payload = vec![0u8; entry_len];
             if file.read_exact(&mut payload).is_err() {
-                eprintln!("[CONTROL JOURNAL WARN] Truncated payload in journal. Halting replay.");
+                eprintln!("[CONTROL JOURNAL WARN] Truncated payload in journal. Halting replay. ");
                 break;
             }
 
@@ -198,7 +213,7 @@ impl CheckpointEngine {
             hasher.update(&payload);
             if hasher.finalize() != expected_crc {
                 eprintln!(
-                    "[CONTROL JOURNAL CORRUPTION] CRC32 mismatch in journal entry. Skipping."
+                    "[CONTROL JOURNAL CORRUPTION] CRC32 mismatch in the journal entry. Skipping. "
                 );
                 continue;
             }
@@ -206,6 +221,21 @@ impl CheckpointEngine {
             if let Ok(mutation) = postcard::from_bytes::<ControlMutation>(&payload) {
                 mutations.push(mutation);
             }
+        }
+
+        mutations
+    }
+
+    /// Replays both interrupted `.compacting` journal and active journal in chronological order
+    pub fn replay_control_journal(journal_path: &Path) -> Vec<ControlMutation> {
+        let mut mutations = Vec::new();
+        let compacting_path = journal_path.with_extension("bin.compacting");
+        if compacting_path.exists() {
+            mutations.extend(Self::read_single_journal_file(&compacting_path));
+        }
+
+        if journal_path.exists() {
+            mutations.extend(Self::read_single_journal_file(journal_path));
         }
 
         mutations
