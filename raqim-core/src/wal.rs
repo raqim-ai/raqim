@@ -534,8 +534,8 @@ impl WalEngine {
         highest_tx
     }
 
-    /// Reads trailing thoughts directly from crash-safe WAL file on disk
-    pub fn read_recent_wal_thoughts(&self, wal_path: &str, limit: usize) -> Vec<RecentRecord> {
+    /// Reads trailing records directly from crash-safe WAL file on disk
+    pub fn read_recent_wal_records(&self, wal_path: &str, limit: usize) -> Vec<RecentRecord> {
         let file = match File::open(wal_path) {
             Ok(f) => f,
             Err(_) => return Vec::new(),

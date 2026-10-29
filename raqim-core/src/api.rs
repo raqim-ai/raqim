@@ -1,4 +1,4 @@
-use axum::extract::{Path, Query};
+use axum::extract::{FromRef, Path, Query};
 use axum::http::header::AUTHORIZATION;
 use axum::response::{IntoResponse, Response};
 use axum::{
@@ -18,14 +18,14 @@ use std::{eprintln, format, println};
 
 use serde::{Deserialize, Serialize};
 use std::result::Result::{Err, Ok};
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 use tokio::sync::broadcast::Sender;
 
 use crate::cold_store::ColdStore;
 use crate::compactor::WalCompactor;
 use crate::merkle::{InclusionProof, MerkleEngine};
 use crate::otel::{self, OtelExportRequest};
-use crate::policy::QuarantineRecord;
+use crate::policy::{PolicyError, QuarantineRecord};
 use crate::registry::SwarmRegistry;
 use crate::wal::WalEngine;
 use crate::{config::RaqimConfig, effect_store::EffectStore, policy::PolicyEngine};
@@ -41,6 +41,23 @@ pub enum ApiError {
     NotFound(String),
     RateLimitExceeded(String),
     InternalServerError(String),
+}
+
+impl From<PolicyError> for ApiError {
+    fn from(err: PolicyError) -> Self {
+        match err {
+            PolicyError::Unauthenticated(m) => ApiError::Unauthorized(m),
+            PolicyError::Quarantined(m) => ApiError::Forbidden(m),
+            PolicyError::ForbiddenNamespace(m) => ApiError::Forbidden(m),
+            PolicyError::RateLimited(m) => ApiError::RateLimitExceeded(m),
+        }
+    }
+}
+
+impl From<anyhow::Error> for ApiError {
+    fn from(err: anyhow::Error) -> Self {
+        ApiError::InternalServerError(err.to_string())
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -73,9 +90,9 @@ impl IntoResponse for ApiError {
 #[derive(Clone)]
 pub struct ApiState {
     pub config: Arc<RaqimConfig>,
-
     pub mem_router: Arc<EffectStore>,
     pub merkle: Arc<MerkleEngine>,
+
     pub policy: Arc<PolicyEngine>,
     pub wal: Arc<WalEngine>,
     pub cold_store: Arc<dyn ColdStore>,
@@ -85,10 +102,10 @@ pub struct ApiState {
     pub admin_secret: String,
 
     pub pause_tx: Arc<watch::Sender<bool>>,
-
     pub compactor: Arc<WalCompactor>,
 }
 
+/// Strict Operator Authentication Extractor.
 #[derive(Clone, Debug)]
 pub struct ValidatedIdentity {
     pub tenant_id: String,
@@ -101,38 +118,37 @@ where
 {
     type Rejection = ApiError;
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &ApiState,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let api_state = ApiState::from_ref(state);
+
         // If an Authorization header is provided,  validate it strictky via contant-time comparison
         if let Some(auth_header) = parts
             .headers
             .get(AUTHORIZATION)
             .and_then(|val| val.to_str().ok())
         {
-            if !auth_header.starts_with("Bearer ") {
-                return Err(ApiError::Unauthorized(
-                    "Invalid auth scheme. Use 'Authorization: Bearer <token>'".to_string(),
+            let provided_token = auth_header.strip_prefix("Bearer ").ok_or_else(|| {
+                ApiError::Unauthorized(
+                    "Invalid auth scheme. Expected 'Authorization: Bearer <token>' ".to_string(),
+                )
+            })?;
+
+            if api_state.admin_secret.is_empty() {
+                return Err(ApiError::InternalServerError(
+                    "Admin secret is not initialized on daemon".to_string(),
                 ));
             }
 
-            let provided_token = auth_header.trim_start_matches("Bearer ").trim();
-            // Zero disk I/O
-            let expected_secret = &state.admin_secret;
-
-            if !expected_secret.is_empty()
-                && constant_time_compare(provided_token.as_bytes(), expected_secret.as_bytes())
-            {
+            if constant_time_compare(provided_token.as_bytes(), api_state.admin_secret.as_bytes()) {
                 return Ok(ValidatedIdentity {
-                    tenant_id: "operator_authenticated".to_string(),
+                    tenant_id: api_state.config.tenant_id.clone(),
                     is_admin: true,
                 });
+            } else {
+                return Err(ApiError::Unauthorized(
+                    "Access Denied: Invalid Administrative Bearer Token ".to_string(),
+                ));
             }
-
-            return Err(ApiError::Unauthorized(
-                "Access Denied: Invalid Administrative Bearer Token ".to_string(),
-            ));
         }
 
         Err(ApiError::Unauthorized(
@@ -141,55 +157,49 @@ where
     }
 }
 
-#[derive(Serialize, Clone, Debug)]
-pub struct ActiveAgentNode {
-    pub namespace: String,
-    pub status: String, // Active, Quarantined, Idle
-}
-
 #[derive(Deserialize)]
-pub struct RecentThoughtsParams {
+pub struct RecentRecordParams {
     pub limit: Option<usize>,
 }
 
 pub async fn recent_records_endpoint(
     _auth: ValidatedIdentity,
     State(state): State<ApiState>,
-    Query(params): Query<RecentThoughtsParams>,
+    Query(params): Query<RecentRecordParams>,
 ) -> Result<Json<Vec<RecentRecord>>, ApiError> {
     let limit = params.limit.unwrap_or(50).min(500);
 
-    // 1. Gather thoughts from active RAM buffers
-    let ram_thoughts = state.merkle.get_recent_record_ram(limit);
+    // 1. Gather records from active RAM buffers
+    let ram_records = state.merkle.get_recent_record_ram(limit);
 
-    // 2. Gather thoughts from WAL disk
-    let wal_thoughts = state
+    // 2. Gather records from WAL disk
+    let wal_records = state
         .wal
-        .read_recent_wal_thoughts(&state.config.wal_path, limit);
+        .read_recent_wal_records(&state.config.wal_path, limit);
 
     // 3. Merge and deduplicate by tx_id
     let mut seen = std::collections::HashSet::new();
-    let mut all_thoughts = Vec::new();
+    let mut all_records = Vec::new();
 
-    for t in ram_thoughts {
+    for t in ram_records {
         if seen.insert(t.tx_id.clone()) {
-            all_thoughts.push(t);
+            all_records.push(t);
         }
     }
 
-    for t in wal_thoughts.into_iter().rev() {
+    for t in wal_records.into_iter().rev() {
         if seen.insert(t.tx_id.clone()) {
-            all_thoughts.push(t);
+            all_records.push(t);
         }
     }
 
     // Sort chronologically (oldest first so UI appends cleanly)
-    all_thoughts.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-    if all_thoughts.len() > limit {
-        all_thoughts = all_thoughts.split_off(all_thoughts.len() - limit);
+    all_records.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+    if all_records.len() > limit {
+        all_records = all_records.split_off(all_records.len() - limit);
     }
 
-    Ok(Json(all_thoughts))
+    Ok(Json(all_records))
 }
 
 pub async fn active_quarantine_endpoint(
@@ -228,7 +238,7 @@ async fn lift_quarantine_handler(
     {
         // Append to durable control journal
         let _ = crate::checkpoint::CheckpointEngine::append_control_mutation(
-            std::path::Path::new("./vault/control_journal.bin"),
+            std::path::Path::new(&state.config.control_journal_path),
             &crate::checkpoint::ControlMutation::LiftQuarantine {
                 agent_hex: payload.agent_hex.clone(),
             },
@@ -263,15 +273,32 @@ pub async fn in_doubt_intents_endpoint(
     Json(state.mem_router.get_in_doubt_intents())
 }
 
-#[derive(Deserialize, Clone)]
-pub struct ForkConfig {
-    pub override_seed: Option<u64>,
-    pub inject_network: Option<String>,
-    pub env_overrides: HashMap<String, String>,
-    pub config_overrides: HashMap<String, String>,
+pub async fn redact_record_endpoint(
+    _auth: ValidatedIdentity,
+    State(state): State<ApiState>,
+    Path(tx_param): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let clean_hex = tx_param.trim_start_matches("0x");
+    let tx_id = u128::from_str_radix(clean_hex, 16)
+        .or_else(|_| clean_hex.parse::<u128>())
+        .map_err(|_| ApiError::BadRequest("Invalid tx_id hex".to_string()))?;
+
+    let redacted = state.mem_router.redact_record(tx_id).await?;
+    if redacted {
+        Ok(Json(json!( {
+            "success": true, 
+            "tx_id_hex": format!("{:032x}", tx_id),
+            "message": "PII payload and salt cryptographically shredded (Merkle proof preserved) "
+        } )))
+    } else {
+        Err(ApiError::NotFound(format!(
+            "Transaction {:032x} not found",
+            tx_id
+        )))
+    }
 }
 
-/// Zero-copy Binary Ingress Endpoint ("Point /v1/swarm/ingress")
+/// Zero-copy Binary Ingress Endpoint ("Point /v1/swarm/ingress")         
 pub async fn http_ingress_endpoint(
     State(state): State<ApiState>,
     body: Bytes,
@@ -294,7 +321,7 @@ pub async fn http_ingress_endpoint(
     >(&aligned_buf)
     .map_err(|e| ApiError::BadRequest(format!("Malformed ExecutionRecord: {}", e)))?;
 
-    let path_intent = archived_ingress.intent_path.as_str();
+    let signed_namespace = archived_rec.namespace.as_str();
 
     let agent_pub_key: [u8; 32] = archived_ingress
         .public_key
@@ -324,7 +351,7 @@ pub async fn http_ingress_endpoint(
             &agent_pub_key,
             &record_bytes,
             &packet_sig,
-            &path_intent,
+            &signed_namespace,
             packet_ts_sec,
         )
         .map_err(|e| ApiError::Forbidden(format!("policy Interdiction: {}", e)))?;
@@ -357,18 +384,18 @@ pub async fn fetch_agent_timeline(
     Path(agent_hex): Path<String>,
 ) -> Result<Json<Vec<TimelineNode>>, ApiError> {
     // The scatter: Let the engines do their native work
-    let lance_future = state.cold_store.fetch_historical_timeline(&agent_hex);
+    let cold_future = state.cold_store.fetch_historical_timeline(&agent_hex);
     let wal_future = async {
         state
             .wal
             .fetch_hot_timeline(&agent_hex, &state.config.wal_path)
     };
 
-    let (lance_res, wal_res) = tokio::join!(lance_future, wal_future);
+    let (cold_res, wal_res) = tokio::join!(cold_future, wal_future);
 
     // The Gather
     let mut nodes = wal_res.unwrap_or_default();
-    if let Ok(mut cold_res) = lance_res {
+    if let Ok(mut cold_res) = cold_res {
         nodes.append(&mut cold_res)
     }
 
@@ -376,12 +403,6 @@ pub async fn fetch_agent_timeline(
     nodes.dedup_by_key(|n| n.tx_id);
 
     Ok(Json(nodes))
-}
-
-impl From<anyhow::Error> for ApiError {
-    fn from(err: anyhow::Error) -> Self {
-        ApiError::InternalServerError(err.to_string())
-    }
 }
 
 pub async fn toggle_ingress_endpoint(
@@ -412,14 +433,13 @@ pub struct GroupPolicyTelemetry {
     pub blocked_namespace: Vec<String>,
     pub max_tps: u64,
     pub burst_capacity: u64,
-    pub remaining_tokens: u64,
 }
 
 #[derive(Serialize)]
 pub struct PolicyMetricsData {
     pub total_quarantined: usize,
     pub recent_interdictions: usize,
-    pub signarure_spoofs: usize,
+    pub signature_spoofs: usize,
     pub namespace_breaches: usize,
     pub rate_limit_blocks: usize,
     pub active_policies: Vec<GroupPolicyTelemetry>,
@@ -432,7 +452,7 @@ pub async fn policy_metrics_endpoint(
     let mut metrics = PolicyMetricsData {
         total_quarantined: 0,
         recent_interdictions: 0,
-        signarure_spoofs: 0,
+        signature_spoofs: 0,
         namespace_breaches: 0,
         rate_limit_blocks: 0,
         active_policies: Vec::new(),
@@ -456,9 +476,9 @@ pub async fn policy_metrics_endpoint(
 
         // Tally strict violation types
         match record.violation_type.as_str() {
-            "CRYPTO_SPOOF" => metrics.signarure_spoofs += 1,
+            "CRYPTO_SPOOF" => metrics.signature_spoofs += 1,
             "NAMESPACE_BREACH" => metrics.namespace_breaches += 1,
-            "RATE_LIMIT_EXCEEDED" => metrics.rate_limit_blocks += 1,
+            "SUSTAINED_RATE_FLOOD" | "RATE_LIMIT_EXCEEDED" => metrics.rate_limit_blocks += 1,
             _ => {}
         }
     }
@@ -466,17 +486,12 @@ pub async fn policy_metrics_endpoint(
     // Query live Atomic token bucket across active policies
     let policies_guard = state.policy.group_policies.read();
     for (group_name, policy) in policies_guard.iter() {
-        let current_tokens = policy
-            .rate_limiter
-            .tokens
-            .load(std::sync::atomic::Ordering::Relaxed);
         metrics.active_policies.push(GroupPolicyTelemetry {
             group_name: group_name.clone(),
             allowed_namspace: policy.allowed_namespaces.clone(),
             blocked_namespace: policy.blocked_namespaces.clone(),
-            max_tps: policy.rate_limiter.max_tps,
-            burst_capacity: policy.rate_limiter.burst_capacity,
-            remaining_tokens: current_tokens,
+            max_tps: policy.max_tps,
+            burst_capacity: policy.burst_capacity,
         });
     }
 
@@ -569,14 +584,23 @@ pub struct PreflightEffectResponse {
     pub allowed: bool,
     pub agent_hex: String,
     pub namespace: String,
+    pub intent_tx_id_hex: String,
 }
 
-/// Pre-flight policy audit (/v1/effect/preflight)
+/// Pre-flight Policy Audit & Write-Ahead Intent Recorder (`POST /v1/effect/preflight`)
+/// 1. Verifies lineage & Ed25519 signature First
+/// 2. If denied by namespace policy: commits `ExecutionStage::Denied` to WAL & Merkle tree, then returns 403
+/// 3. If allowed: commits `ExecutionStage::Intent` to WAL & `pending_intents` BEFORE returning 200 OK
 pub async fn preflight_effect_handler(
-    _auth: ValidatedIdentity,
     State(state): State<ApiState>,
     Json(payload): Json<PreflightEffectRequest>,
 ) -> Result<Json<PreflightEffectResponse>, ApiError> {
+    let agent_id_bytes = hex::decode(&payload.agent_hex)
+        .map_err(|_| ApiError::BadRequest("Invalid agent_hex format".to_string()))?;
+    let agent_id: [u8; 16] = agent_id_bytes
+        .try_into()
+        .map_err(|_| ApiError::BadRequest("agent_hex must be 16 bytes".to_string()))?;
+
     let pub_key_bytes = hex::decode(&payload.public_key_hex)
         .map_err(|_| ApiError::BadRequest("Invalid pub_key_hex format".to_string()))?;
 
@@ -594,7 +618,12 @@ pub async fn preflight_effect_handler(
     let capability_cert = hex::decode(&payload.capability_cert_hex)
         .map_err(|_| ApiError::BadRequest("Invalid capability_cert_hex format".to_string()))?;
 
-    // policy barrier 1: Lineage Verification
+    let call_signature_bytes = hex::decode(&payload.call_signature_hex)
+        .map_err(|_| ApiError::BadRequest("Invalid call_signature_hex format".to_string()))?;
+    let call_signature_hash: [u8; 32] = call_signature_bytes
+        .try_into()
+        .map_err(|_| ApiError::BadRequest("call_signature_hex must be 32 bytes".to_string()))?;
+
     let (verified_agent_hex, group_name) = state
         .policy
         .verify_session_lineage(&capability_cert, &pub_key)
@@ -617,31 +646,63 @@ pub async fn preflight_effect_handler(
         payload.namespace, payload.step_ordinal, payload.call_signature_hex, payload.timestamp
     );
 
-    // policy Barrier 2: Fast-path policy audit (anti-replay, signature, rate-limiting, and namespace ACL)
-    state
-        .policy
-        .authorize_packet_fast(
-            &payload.agent_hex,
-            &group_name,
-            &pub_key,
-            canonical_attestation.as_bytes(),
-            &signature,
-            &payload.namespace,
-            payload.timestamp,
-        )
-        .map_err(|e| ApiError::Forbidden(format!("policy Interdiction: {}", e)))?;
+    match state.policy.authorize_packet_fast(
+        &payload.agent_hex,
+        &group_name,
+        &pub_key,
+        canonical_attestation.as_bytes(),
+        &signature,
+        &payload.namespace,
+        payload.timestamp,
+    ) {
+        Ok(()) => {
+            // Write-Ahead Intent committed to NVMe WAL before function executes!
+            let intent_tx_id = state
+                .mem_router
+                .record_intent_or_denial(
+                    agent_id,
+                    payload.step_ordinal,
+                    call_signature_hash,
+                    &payload.namespace,
+                    true,
+                    b"PREFLIGHT_INTENT_AUTHORIZED".to_vec(),
+                )
+                .await?;
 
-    Ok(Json(PreflightEffectResponse {
-        allowed: true,
-        agent_hex: payload.agent_hex,
-        namespace: payload.namespace,
-    }))
+            Ok(Json(PreflightEffectResponse {
+                allowed: true,
+                agent_hex: payload.agent_hex,
+                namespace: payload.namespace,
+                intent_tx_id_hex: format!("{:032x}", intent_tx_id),
+            }))
+        }
+
+        Err(PolicyError::ForbiddenNamespace(reason)) => {
+            // Authenticated policy violation: seal `ExecutionStage::Denied` into wal and merkle engine
+            let _ = state
+                .mem_router
+                .record_intent_or_denial(
+                    agent_id,
+                    payload.step_ordinal,
+                    call_signature_hash,
+                    &payload.namespace,
+                    false,
+                    reason.as_bytes().to_vec(),
+                )
+                .await;
+
+            Err(ApiError::Forbidden(format!(
+                "Policy Interdiction: {}",
+                reason
+            )))
+        }
+
+        Err(other_err) => Err(ApiError::from(other_err)),
+    }
 }
 
 /// Records live side-effect into WAL + Merkle DAG
 pub async fn record_effect_handler(
-    _auth: ValidatedIdentity,
-
     State(state): State<ApiState>,
     Json(payload): Json<RecordEffectRequest>,
 ) -> Result<Json<RecordEffectResponse>, ApiError> {
@@ -742,7 +803,6 @@ pub async fn record_effect_handler(
 
 /// Fetches a recoorded effect for deterministic replay
 pub async fn get_effect_handler(
-    _auth: ValidatedIdentity,
     State(state): State<ApiState>,
     Json(payload): Json<GetEffectRequest>,
 ) -> Result<Json<GetEffectResponse>, ApiError> {
@@ -807,7 +867,7 @@ pub async fn get_state_proof_handler(
             success: true,
             proof: Some(proof.clone()),
             message: if proof.is_active_buffer {
-                "Proof generated against active workspace buffer (un-crystallines)".to_string()
+                "Proof generated against active workspace buffer".to_string()
             } else {
                 "proof generated against immutable Merkle Batch archive.".to_string()
             },
@@ -824,7 +884,7 @@ pub async fn get_state_proof_handler(
 pub async fn trigger_compaction_endpoint(
     State(state): State<ApiState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    println!("[ADMIN] Manual on-demand WAL compaction requested via HTTP API... ");
+    println!("[ADMIN] Manual WAL compaction requested via Admin Socket...");
 
     let compactor = state.compactor.clone();
 
@@ -832,7 +892,7 @@ pub async fn trigger_compaction_endpoint(
         match compactor.trigger_safe_compaction().await {
             Ok(count) => {
                 println!(
-                    "[ADMIN SUCCESS] Background compaction complete. Archived {} thoughts to LanceDB.",
+                    "[ADMIN SUCCESS] Background compaction complete. Archived {} records to coldDB.",
                     count
                 )
             }
@@ -856,18 +916,18 @@ pub async fn export_agent_timeline_otel(
     State(state): State<ApiState>,
     Path(agent_hex): Path<String>,
 ) -> Result<Json<OtelExportRequest>, ApiError> {
-    // Scatter-gather historical timeline from lanceDB and WAL
-    let lance_future = state.cold_store.fetch_historical_timeline(&agent_hex);
+    // Scatter-gather historical timeline from coldDB and WAL
+    let cold_future = state.cold_store.fetch_historical_timeline(&agent_hex);
     let wal_future = async {
         state
             .wal
             .fetch_hot_timeline(&agent_hex, &state.config.wal_path)
     };
 
-    let (lance_res, wal_res) = tokio::join!(lance_future, wal_future);
+    let (cold_res, wal_res) = tokio::join!(cold_future, wal_future);
 
     let mut nodes = wal_res.unwrap_or_default();
-    if let Ok(mut cold_res) = lance_res {
+    if let Ok(mut cold_res) = cold_res {
         nodes.append(&mut cold_res);
     }
 
@@ -927,6 +987,7 @@ pub fn build_data_router(state: ApiState) -> axum::Router {
 // ==================================================================
 // ROUTER 2: Operator Admin Plane (Unix Domain Socket `./vault/admin.sock`) [0600]
 // ==================================================================
+// Protectd by both OS filesystem `0600` permissions AND `ValidatedIdentity` Bearer token Verification.
 
 pub fn build_admin_router(state: ApiState) -> axum::Router {
     axum::Router::new()
@@ -938,11 +999,14 @@ pub fn build_admin_router(state: ApiState) -> axum::Router {
             "/v1/policy/quarantine_list",
             get(active_quarantine_endpoint),
         )
-        .route("/v1/aegis/quarantine_list", get(active_quarantine_endpoint))
+        .route(
+            "/v1/policy/quarantine_list",
+            get(active_quarantine_endpoint),
+        )
         .route("/v1/admin/quarantine/lift", post(lift_quarantine_handler))
         .route("/v1/policy/metrics", get(policy_metrics_endpoint))
-        .route("/v1/aegis/metrics", get(policy_metrics_endpoint))
         .route("/v1/admin/in_doubt", get(in_doubt_intents_endpoint))
+        .route("/v1/admin/redact/{tx_id}", post(redact_record_endpoint))
         .route("/v1/admin/timeline/{agent_hex}", get(fetch_agent_timeline))
         .route("/v1/admin/records/recent", get(recent_records_endpoint))
         .route("/v1/admin/cluster/info", get(cluster_info_endpoint))
