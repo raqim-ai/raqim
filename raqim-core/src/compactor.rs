@@ -42,7 +42,7 @@ pub struct WalCompactor {
     control_journal_path: String,
     cold_store: Arc<dyn ColdStore>,
     merkle: Arc<MerkleEngine>,
-    aegis: Arc<PolicyEngine>,
+    policy: Arc<PolicyEngine>,
     registry: Arc<SwarmRegistry>,
     memory_router: Arc<EffectStore>,
     tx: Sender<SystemEvent>,
@@ -57,7 +57,7 @@ impl WalCompactor {
         control_journal_path: &str,
         cold_store: Arc<dyn ColdStore>,
         merkle: Arc<MerkleEngine>,
-        aegis: Arc<PolicyEngine>,
+        policy: Arc<PolicyEngine>,
         registry: Arc<SwarmRegistry>,
         memory_router: Arc<EffectStore>,
         tx: Sender<SystemEvent>,
@@ -70,7 +70,7 @@ impl WalCompactor {
             control_journal_path: control_journal_path.to_string(),
             cold_store,
             merkle,
-            aegis,
+            policy,
             registry,
             memory_router,
             tx,
@@ -84,7 +84,7 @@ impl WalCompactor {
             match manifest.state {
                 CompactionState::Pending => {
                     println!(
-                        "[COMPACTOR RECOVERY] Interrupted PENDING compaction detected for '{}'. Resuming LanceDB ingestion...",
+                        "[COMPACTOR RECOVERY] Interrupted PENDING compaction detected for '{}'. Resuming...",
                         manifest.target_file
                     );
 
@@ -311,7 +311,11 @@ impl WalCompactor {
             }
         };
 
-        // Crystallize atomic StateCheckpointt before committing and deleting the rotated segment
+        // Step 1: Atomically rotate `control_journal.bin` -> `control_journal.bin.compacting` BEFORE snapshotting RAM so concurrrent mutations are never lost!
+        let journal_path = Path::new(&self.control_journal_path);
+        let rotated_journal = CheckpointEngine::rotate_journal_before_snapshot(&journal_path);
+
+        // Step 2: Snapshot RAM state
         let checkpoint = StateCheckpoint {
             version: 1,
             timestamp: SystemTime::now()
@@ -321,23 +325,26 @@ impl WalCompactor {
             last_tx_id: max_compacted_tx,
             merkle_state: self.merkle.export_checkpoint_state(),
             effects: self.memory_router.export_effects(),
-            quarantines: self.aegis.export_quarantines(),
+            quarantines: self.policy.export_quarantines(),
             active_agents: self.registry.export_agents(),
         };
 
+        // Step 3: Write checkpooint Atomically (Abort compaction if this fails!)
         if let Err(e) = CheckpointEngine::write_checkpoint_atomically(
             Path::new(&self.checkpoint_path),
             &checkpoint,
         ) {
-            eprintln!(
-                "[COMPACTOR CRITICAL] Failed to write state checkpoint: {}",
-                e
-            );
-        } else {
-            CheckpointEngine::truncate_control_journal(Path::new(&self.control_journal_path));
+            eprintln!("[COMPACTOR CRITICAL] Failed to write state checkpoint: {}. Aborting segment deletion! ", e);
+
+            return 0;
         }
 
-        // 2PC State 2: COMMITED
+        // Step 4: Now that `state_checkpoint.bin` is safely on disk, remove the `.compacting` journal
+        if let Some(compacting_journal) = rotated_journal {
+            let _ = fs::remove_file(compacting_journal);
+        }
+
+        // Step 5: 2pc state 2 -> COMMITED
         let commited_manifest = CompactionManifest {
             target_file: processing_path.to_string(),
             state: CompactionState::Committed,
