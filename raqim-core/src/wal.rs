@@ -50,9 +50,11 @@ impl std::fmt::Display for WalError {
             WalError::EnginePoisoned(msg) => {
                 write!(f, "WAL engine poisoned (fail-closed): {}", msg)
             }
+
             WalError::MidFileCorruption(msg) => {
                 write!(f, "Fatal mid-write WAL corruption: {}", msg)
             }
+
             WalError::Io(e) => write!(f, "I/O error during WAL operation: {}", e),
         }
     }

@@ -227,7 +227,10 @@ impl EffectStore {
         ))
     }
 
-    /// Write-Ahead Intent / Denial Recorder: Seals a pre-execution `Intent` (or `Denied` interdicion ) into the WAL & Merkle DAG BEFORE any external tool or function body runs.
+    /// Write-Ahead intent / Denial Recorder:
+    /// 1. Prepares the leaf hash.
+    /// 2. Persists to WAL (`fdatasync`) FIRST.
+    /// 3. Commits to `MerkleEngine` and `pending_intents` ONLY after disk durability succeeds.
     pub async fn record_intent_or_denial(
         &self,
         agent_id: [u8; 16],
@@ -252,25 +255,31 @@ impl EffectStore {
             call_signature_hash,
         );
 
-        let (sealed_record, optional_batch) = self.merkle.seal_record(unsealed);
-        let tx_id = sealed_record.tx_id;
+        let prepared = self.merkle.prepare_record(unsealed);
+        let tx_id = prepared.tx_id;
 
+        // DURABILITY FIRST
+        self.wal_engine.append(prepared.clone()).await?;
+
+        // Now update RAM
         if allowed {
             let key = EffectKey::derive(&agent_id, step_ordinal, &call_signature_hash);
-            self.pending_intents.insert(key, sealed_record.clone());
+            self.pending_intents.insert(key, prepared.clone());
         }
 
-        if let Some(batch) = optional_batch {
+        if let Some((batch, records)) = self.merkle.commit_prepared_record(record) {
             let _ = self
                 .event_tx
-                .send(SystemEvent::MerkleBatchCrystallized { batch });
+                .send(SystemEvent::MerkleBatchCrystallized { batch, records });
         }
 
-        self.wal_engine.append(sealed_record).await?;
         Ok(tx_id)
     }
 
-    /// Post-Execution Outcome Recorder: Resolves any pending `Intent`, seals the `Outcome` into MErkle DAG & WAL and caches the output in `effect_idx` for 0(1) $0.00 replay    
+    /// Post-Execution Outcome Recorder:
+    /// 1. Prepares the leaf hash.
+    /// 2. Persists to the WAL (`fdatasync`) FIRST.
+    /// 3. Resolves `pending_intents` updates `effect_index`, and commits to `MerkleEngine`.       
     pub async fn record_effect(
         &self,
         agent_id: [u8; 16],
@@ -288,30 +297,58 @@ impl EffectStore {
             call_signature_hash,
         );
 
-        let (sealed_record, optional_batch) = self.merkle.seal_record(unsealed);
-        let tx_id = sealed_record.tx_id;
+        let prepared = self.merkle.prepare_record(unsealed);
+        let tx_id = prepared.tx_id;
 
-        // Calculate RAM Lookup Key
-        let effect_key = EffectKey::derive(&agent_id, step_ordinal, &call_signature_hash);
-
-        // Resolve the write-ahead intent (no longer in-doubt!)
-        self.pending_intents.remove(&effect_key);
-        self.effect_index.insert(effect_key, sealed_record.clone());
+        // 1. DURABILITY FIRST
+        self.wal_engine.append(prepared.clone()).await?;
 
         let _ = CheckpointEngine::append_control_mutation(
             std::path::Path::new(&self.config.control_journal_path),
-            &ControlMutation::RecordEffect(sealed_record.clone()),
+            &ControlMutation::RecordEffect(prepared.clone()),
         );
 
-        if let Some(batch) = optional_batch {
+        // Now update the RAM state
+        let effect_key = EffectKey::derive(&agent_id, step_ordinal, &call_signature_hash);
+        self.pending_intents.remove(&effect_key);
+        self.effect_index.insert(effect_key, prepared.clone());
+
+        if let Some((batch, records)) = self.merkle.commit_prepared_record(prepared) {
             let _ = self
                 .event_tx
-                .send(SystemEvent::MerkleBatchCrystallized { batch });
+                .send(SystemEvent::MerkleBatchCrystallized { batch, records });
         }
 
-        self.wal_engine.append(sealed_record).await?;
-
         Ok(tx_id)
+    }
+
+    /// NDPA / GDPR Right-to-Erasure: Scrub `payload_bytes` and `payload_salt` in RAM and ColdStore
+    /// while preserving `payload_hash` and `leaf_hash` so Merkle inclucion proofs stay 100% valid.
+    pub async fn redact_record(&self, target_tx_id: u128) -> Result<bool, anyhow::Error> {
+        let mut found = false;
+
+        for mut entry in self.effect_index.iter_mut() {
+            if entry.value().tx_id == target_tx_id {
+                entry.value_mut().redact_pii();
+                found = true;
+            }
+        }
+
+        for entry in self.merkle.active_buffers.iter() {
+            let mut buf = entry.value().write();
+            for rec in buf.accumulated_records.iter_mut() {
+                if rec.tx_id == target_tx_id {
+                    rec.redact_pii();
+                    found = true;
+                }
+            }
+        }
+
+        if self.cold_store.redact_by_txid(target_tx_id).await? {
+            found = true;
+        }
+
+        Ok(found)
     }
 
     /// Get Effect (Replay mode): Perform 0(1) Ram lookup to fetch recorded payload
@@ -324,11 +361,9 @@ impl EffectStore {
         let record_key = EffectKey::derive(agent_id, step_ordinal, call_signature_hash);
 
         // O(1) sharded RAM lookup
-        if let Some(record) = self.effect_index.get(&record_key) {
-            return Some(record.value().clone());
-        }
-
-        None
+        self.effect_index
+            .get(&record_key)
+            .map(|r| r.value().clone())
     }
 
     /// Returns all write-ahead `Intent` records that never received a matching `Outcome` (e.g., interrupted mid-execution by a process crash or network failure).

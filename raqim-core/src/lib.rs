@@ -304,6 +304,7 @@ pub enum SystemEvent {
 
     MerkleBatchCrystallized {
         batch: MerkleBatch,
+        records: Vec<ExecutionRecord>,
     },
 
     QuarantineTriggered {
