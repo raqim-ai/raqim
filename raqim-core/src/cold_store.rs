@@ -30,6 +30,9 @@ pub trait ColdStore: Send + Sync {
     /// Durably archives a slice of the compacted record from a rotated WAL seg
     async fn archive_batch(&self, logs: &[ExecutionRecord]) -> Result<usize, anyhow::Error>;
 
+    /// Erases PII
+    async fn redact_by_txid(&self, target_tx_id: u128) -> Result<bool, anyhow::Error>;
+
     /// Reconstruct the chronological timeline metadata for a specific agent
     async fn fetch_historical_timeline(
         &self,
@@ -333,6 +336,48 @@ impl ColdStore for SegmentColdStore {
         Ok(count)
     }
 
+    async fn redact_by_txid(&self, target_tx_id: u128) -> Result<bool, anyhow::Error> {
+        let Some(ptr_ref) = self.tx_index.get(&target_tx_id) else {
+            return Ok(false);
+        };
+
+        let ptr = *ptr_ref.value();
+        drop(ptr_ref);
+
+        let mut record = self.read_single_frame_at(ptr)?;
+        if record.is_redacted() {
+            return Ok(true);
+        }
+
+        // Overwrite payload_bytes in-place with zero bytes of the exact same length so the rkyv frame size and all subseqent byte in `cold_history.idx` remains 100% invariant
+        record.payload_bytes = vec![0u8; record.payload_bytes.len()];
+        record.payload_salt = [0u8; 16];
+
+        let _guard = self.write_lock.lock().await;
+        let payload_bytes = to_bytes::<rkyv::rancor::Error>(&record)
+            .map_err(|e| anyhow::anyhow!("rkyv serialization failed: {}", e))?;
+
+        let payload_len = payload_bytes.len() as u32;
+        let crc = crc32fast::hash(&payload_bytes);
+        let frame_total = 8 + payload_len;
+
+        if frame_total != ptr.total_frame_bytes {
+            return Err(anyhow::anyhow!("Redacted frame size mismatch"));
+        }
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.history_file_path)?;
+        file.seek(SeekFrom::Start(ptr.offset))?;
+        file.write_all(&payload_len.to_le_bytes())?;
+        file.write_all(&crc.to_le_bytes())?;
+        file.write_all(&payload_bytes)?;
+        file.sync_data()?;
+
+        Ok(true)
+    }
+
     async fn fetch_historical_timeline(
         &self,
         agent_hex: &str,
@@ -417,7 +462,7 @@ impl ColdStore for SegmentColdStore {
     }
 
     async fn log_system_event(&self, event: &SystemEvent) {
-        if matches!(event, SystemEvent::ThoughtCommitted { .. }) {
+        if matches!(event, SystemEvent::RecordCommitted { .. }) {
             return;
         }
         let ts = SystemTime::now()
