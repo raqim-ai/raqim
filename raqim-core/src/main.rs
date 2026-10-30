@@ -30,7 +30,7 @@ use tokio_util::sync::CancellationToken;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("==================================================================");
-    println!("Bismillah. Booting Hardened Raqim Core Daemon v.0.2.0");
+    println!("Bismillah. Booting Hardened Raqim Core Daemon v.0.2.0             ");
     println!("==================================================================");
 
     let boot_start = std::time::Instant::now();
@@ -152,6 +152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .to_string()
         }
     };
+
     // 1. BOOT SEQUENCE: INIITIALIZE ALL LAYERS (Wrapped in Arc for fearless concurrency)
     let merkle = Arc::new(MerkleEngine::new());
 
@@ -589,7 +590,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let task_event_tx = event_tx.clone();
                     let task_policy = policy.clone();
                     let task_registry = registry.clone();
-                    let task_mem_router = effect_store.clone();
                     let task_pause_rx = pause_rx.clone();
 
                 // Spawn into the joinset
