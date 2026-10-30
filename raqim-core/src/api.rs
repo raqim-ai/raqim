@@ -90,7 +90,7 @@ impl IntoResponse for ApiError {
 #[derive(Clone)]
 pub struct ApiState {
     pub config: Arc<RaqimConfig>,
-    pub mem_router: Arc<EffectStore>,
+    pub effect_store: Arc<EffectStore>,
     pub merkle: Arc<MerkleEngine>,
 
     pub policy: Arc<PolicyEngine>,
@@ -270,7 +270,7 @@ pub async fn in_doubt_intents_endpoint(
     _auth: ValidatedIdentity,
     State(state): State<ApiState>,
 ) -> Json<Vec<ExecutionRecord>> {
-    Json(state.mem_router.get_in_doubt_intents())
+    Json(state.effect_store.get_in_doubt_intents())
 }
 
 pub async fn redact_record_endpoint(
@@ -283,7 +283,7 @@ pub async fn redact_record_endpoint(
         .or_else(|_| clean_hex.parse::<u128>())
         .map_err(|_| ApiError::BadRequest("Invalid tx_id hex".to_string()))?;
 
-    let redacted = state.mem_router.redact_record(tx_id).await?;
+    let redacted = state.effect_store.redact_record(tx_id).await?;
     if redacted {
         Ok(Json(json!( {
             "success": true, 
@@ -523,7 +523,7 @@ pub async fn cluster_info_endpoint(
         "wal_size_mb": (wal_size as f64 ) / (1024.0 * 1024.0),
         "buffer_load": pending_wal_items,
         "cold_records": cold_records,
-        "in_doubt_intents": state.mem_router.get_in_doubt_intents().len()
+        "in_doubt_intents": state.effect_store.get_in_doubt_intents().len()
     });
 
     Ok(Json(payload))
@@ -658,7 +658,7 @@ pub async fn preflight_effect_handler(
         Ok(()) => {
             // Write-Ahead Intent committed to NVMe WAL before function executes!
             let intent_tx_id = state
-                .mem_router
+                .effect_store
                 .record_intent_or_denial(
                     agent_id,
                     payload.step_ordinal,
@@ -680,7 +680,7 @@ pub async fn preflight_effect_handler(
         Err(PolicyError::ForbiddenNamespace(reason)) => {
             // Authenticated policy violation: seal `ExecutionStage::Denied` into wal and merkle engine
             let _ = state
-                .mem_router
+                .effect_store
                 .record_intent_or_denial(
                     agent_id,
                     payload.step_ordinal,
@@ -778,7 +778,7 @@ pub async fn record_effect_handler(
     let is_forked = payload.namespace.starts_with("phantom_");
 
     match state
-        .mem_router
+        .effect_store
         .record_effect(
             agent_id,
             payload.step_ordinal,
@@ -819,7 +819,7 @@ pub async fn get_effect_handler(
     })?;
 
     match state
-        .mem_router
+        .effect_store
         .get_effect(&agent_id, payload.step_ordinal, &call_signature_hash)
     {
         Some(record) => {

@@ -8,7 +8,7 @@ use raqim_core::policy::{PolicyConfigFile, PolicyEngine};
 
 use axum::http::Method;
 use raqim_core::cold_store::{ColdStore, SegmentColdStore};
-use raqim_core::compactor::WalCompactor;
+use raqim_core::compactor::{CompactionState, WalCompactor};
 use raqim_core::config::RaqimConfig;
 
 use raqim_core::effect_store::EffectStore;
@@ -19,6 +19,7 @@ use raqim_core::{execute_raqim_cascade, ExecutionRecord, IngressEnvelope, System
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use std::{eprintln, fs, println};
 
 #[cfg(unix)]
@@ -123,16 +124,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .try_into()
         .expect("FATAL: Master key bytes is corruped (expected 32 bytes)");
     let master_signing_key = SigningKey::from_bytes(&key_array);
-    let master_public_key = master_signing_key.verifying_key().to_bytes();
+    let master_verifying_key = master_signing_key.verifying_key();
+    let master_public_key = master_verifying_key.to_bytes();
 
     // Load or generate Operator Admin Secret (`RAQIM_ADMIN_SECRET` env var overrides file )
     let admin_secret_path = key_dir.join("admin.secret");
 
     let admin_secret = match std::env::var("RAQIM_ADMIN_SECRET") {
-        Ok(val) if !val.trim().is_empty() => val.trim().to_string(), 
+        Ok(val) if !val.trim().is_empty() => val.trim().to_string(),
         _ => {
-
-
             if !admin_secret_path.exists() {
                 let mut secret_bytes = [0u8; 32];
                 use rand_core::RngCore;
@@ -142,14 +142,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    let _ = fs::set_permissions(&admin_secret_path, fs::Permissions::from_mode(0o600));
+                    let _ =
+                        fs::set_permissions(&admin_secret_path, fs::Permissions::from_mode(0o600));
                 }
 
-                fs::read_to_string(&admin_secret_path).expect("FATAL: Failed to read ./ca-keys/admin.secret").trim().to_string()
-
+                fs::read_to_string(&admin_secret_path)
+                    .expect("FATAL: Failed to read ./ca-keys/admin.secret")
+                    .trim()
+                    .to_string()
+            }
         }
-    }
-
     };
 
     let merkle = Arc::new(MerkleEngine::new());
@@ -157,35 +159,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. BOOT SEQUENCE: INIITIALIZE ALL LAYERS (Wrapped in Arc for fearless concurrency)
     let merkle = Arc::new(MerkleEngine::new());
 
-
-
-    // LEAK-PROOF BROADCAST RECEIVER LOOP: Spawn consumer loop to detect lagging and evict slow readers automatically
-    let mut system_events_subscriber = event_tx.subscribe();
-    tokio::spawn(async move {
-        loop {
-            match system_events_subscriber.recv().await {
-                Ok(event) => {
-                    // Normal ingestion processing
-                    if let SystemEvent::SystemBoot { message } = event {
-                        println!("[BUS PROCESSING] Ingested boot message: {}", message);
-                    }
-                }
-
-                // Memory Safeguard: Clear internal lags forcefully to protect RAM
-                Err(broadcast::error::RecvError::Lagged(_)) => {}
-
-                Err(broadcast::error::RecvError::Closed) => break,
-            }
-        }
-    });
-
-    // THE KERNEL PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path }.TOML HOT-RELOAD WATCHER
-    let policy_path_str = "policy.toml";
+    // Policy Manifest Initialization & Hot-Reload watcher
+    let policy_path_str = &config.policy_path.clone();
 
     // Ensure policy manifest target exists beofre running file watcher
     if !Path::new(policy_path_str).exists() {
         let default_toml = r#"
-        # Default Raqim PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path } Policy Manifest (Auto-Generated)
+        # Default Raqim Policy Policy Manifest (Auto-Generated)
         [groups.admin_group]
         allowed_namespaces = ["*"]
         blocked_namespaces = []
@@ -199,7 +179,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         burst_capacity = 20
         "#;
         fs::write(policy_path_str, default_toml)?;
-        println!("[PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path }] Auto-generated default policy.toml configuration file.");
+        println!(
+            "[POLICY] Bootstrapped default policy file at {} ",
+            policy_path_str
+        );
     }
 
     let initial_content = fs::read_to_string(policy_path_str)?;
@@ -215,7 +198,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.control_journal_path.clone(),
     ));
 
-    let PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path }_clone = policy.clone();
+    let policy_clone = policy.clone();
+    let watched_policy_path = policy_path_str.clone();
     let (watch_tx, mut watch_rx) = tokio::sync::mpsc::channel::<Result<Event, notify::Error>>(10);
 
     // Spawn synchronous notify loop hooked directly to OS virtual filesystem events
@@ -227,48 +211,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         notify::RecursiveMode::NonRecursive,
     )?;
 
-    //  Async task consuming events transmitted out of the notify bridge loop
     tokio::spawn(async move {
-        println!(
-            "[KERNEL WATCHER] Listening for direct kernel modification on: {}... ",
-            policy_path_str
-        );
-
         while let Some(Ok(event)) = watch_rx.recv().await {
-            // Check if modification contains a data close op (File update commit complete)
             if event.kind.is_modify() {
-                println!("[KERNEL WATCHER] Change detected on policy file. Re-parsing metrics... ");
-
-                // Read and re-parse file delta safely
-                if let Ok(content) = fs::read_to_string("policy.toml") {
+                if let Ok(content) = fs::read_to_string(&watched_policy_path) {
                     match toml::from_str::<PolicyConfigFile>(&content) {
-                        Ok(parsed_cfg) => {
-                            let fresh_policies = parsed_cfg.to_group_policies();
-                            PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path }_clone.reload_policies(fresh_policies);
-                        }
-                        Err(e) => {
-                            // FAIL-SAFE
-                            eprintln!(
-                                "[PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path } CONFIG ERROR] Invalid policy.toml syntax: {}. Retaining previous security policies in RAM.",
-                                e
-                            );
-                        }
+                        Ok(cfg) => policy_clone.reload_policies(cfg.to_group_policies()),
+                        Err(e) => eprintln!(
+                            "[POLICY ERROR] Invalid syntax in {}: {}. Retaining active policies.",
+                            watched_policy_path, e
+                        ),
                     }
                 }
             }
         }
     });
 
-    // Emit Initial system boot signal
-    let _ = event_tx.send(SystemEvent::SystemBoot {
-        message: "Raqim Sovereign Core Active.".to_string(),
-    });
+    let (wal, wal_handle) = WalEngine::start(config.wal_path.clone()).await;
 
-    let (wal, handle) = WalEngine::start(config.wal_path.clone()).await;
-
-    // 1. Boot global Quarantine network subscriber
-
-    let mem_router = Arc::new(EffectStore::new(
+    let effect_store = Arc::new(EffectStore::new(
         config.clone(),
         merkle.clone(),
         cold_store.clone(),
@@ -276,28 +237,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         event_tx.clone(),
     ));
 
-    // 2. Wire SystemEvent subscriber loop for outbound local quarantine events
-    let mut system_rx = event_tx.subscribe();
-
-    // ============================
-    // THE PHOENIX HYDRATION PROTOCOL: Unified Checkpoint + Control Journal + WAL Replay
-    // ============================
+    // ============================================================================
+    // THE PHOENIX HYDRATION PROTOCOL: Checkpoint + Control Journal + WAL Replay
+    // =============================================================================
 
     // 1. Stage 1: State Checkpoint Hydration
     let checkpoint_file = Path::new(&config.checkpoint_path);
+    let mut checkpoint_last_tx_id: u128 = 0;
     if let Some(checkpoint) = CheckpointEngine::load_checkpoint(checkpoint_file) {
         println!(
-            "[PHOENIX] State checkpoint detected from timestamp {}. Hydrating system core...",
-            checkpoint.timestamp
+            "[PHOENIX] State checkpoint detected (last_tx_id: {:032x}). Hydrating...",
+            checkpoint.last_tx_id
         );
+        checkpoint_last_tx_id = checkpoint.last_tx_id;
         merkle.hydrate_from_checkpoint(checkpoint.merkle_state);
-        mem_router.hydrate_effects(checkpoint.effects);
+        effect_store.hydrate_effects(checkpoint.effects);
         policy.hydrate_quarantines(checkpoint.quarantines);
         registry.hydrate_agents(checkpoint.active_agents);
         println!("[PHOENIX] Checkpoint core hydration successful.");
-    } else {
-        // Fallback for legacy quarantine.json if migrating from pre-checkpoint versions
-        policy.hydrate_quarantine_from_disk();
     }
 
     // 2. Stage 2: Control Journal Replay (Mutations occurring after last checkpoint)
@@ -319,7 +276,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     policy.quarantine_blocklist.remove(&agent_hex);
                 }
                 ControlMutation::RecordEffect(record) => {
-                    mem_router.record_effect_direct(record);
+                    effect_store.record_effect_direct(record);
                 }
                 ControlMutation::TouchAgent(process) => {
                     registry
@@ -331,36 +288,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("[PHOENIX] Control journal replay complete.");
     }
 
-    // 3. Stage 3: Trailing WAL Replay
+    // 3. Stage 3: Strongly-Typed 2PC Compaction Manifest & Trailing WAL replay
     println!(
         "[INITIALIZATION] Phoenix protocol: Commencing state rehydration scanning from active WAL frame sequences..."
     );
-    let manifest_path = &config.manifest_path;
     let mut files_to_scan = Vec::new();
 
-    // 2PC MANIFEST CHECK
-    if Path::new(&manifest_path).exists() {
-        if let Ok(content) = fs::read_to_string(manifest_path) {
-            if let Ok(json_manifest) = serde_json::from_str::<serde_json::Value>(&content) {
-                let state = json_manifest["state"].as_str().unwrap_or("");
-                let target_file = json_manifest["target_file"].as_str().unwrap_or("");
+    if let Some(manifest) = WalCompactor::read_manifest(&config.manifest_path) {
+        {
+            match manifest.state {
+                CompactionState::Committed => {
+                    println!(
+                        "[PHOENIX] Purging already-committed WAL segment '{}' ",
+                        manifest.target_file
+                    );
 
-                if state == "Committed" {
-                    // Prevent Schizophrenia (Duplication): Data is in LanceDB, but WAL wasn't deleted.
+                    let _ = fs::remove_file(&manifest.target_file);
+                    WalCompactor::clear_manifest(&config.manifest_path);
+                }
+
+                CompactionState::Pending => {
                     println!(
-                        "[PHONIX] Ghost WAL '{}' detected in COMMITTED state. Erasing to prevent Duplicate RAG Ingestion ",
-                        &target_file
+                        "[PHOENIX] Queuing interrupted PENDING WAL segment '{}' for hydration ",
+                        manifest.target_file
                     );
-                    let _ = fs::remove_file(target_file);
-                    let _ = fs::remove_file(manifest_path);
-                } else if state == "Pending" {
-                    // Prevent Amnesia (Data Loss): File was rotated but never made it to lancedb
-                    println!(
-                        "[PHOENIX] Orphaned WAL '{}' detected in PENDING state. Queuing for RAM Hydration",
-                        &target_file
-                    );
-                    if Path::new(&target_file).exists() {
-                        files_to_scan.push(target_file.to_string());
+
+                    if Path::new(&manifest.target_file).exists() {
+                        files_to_scan.push(manifest.target_file);
                     }
                 }
             }
@@ -375,7 +329,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let witness_engine = Arc::new(WormWitnessEngine::new(
         &config.witness_path,
         master_signing_key.clone(),
-        None,
+        config.worm_remote_url.clone(),
     ));
 
     let mut uncompacted_count = 0;
@@ -426,8 +380,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         archived_batch,
                     ) {
                         for recovered_rec in batch {
+                            if recovered_rec.tx_id <= checkpoint_last_tx_id {
+                                continue;
+                            }
+
                             merkle.hydrate_from_recovery(&recovered_rec);
-                            mem_router.hydrate_record_from_wal(recovered_rec);
+                            effect_store.hydrate_record_from_wal(recovered_rec);
 
                             uncompacted_count += 1
                         }
@@ -448,19 +406,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let anchored_witness = witness_engine.load_local_witness();
     if !anchored_witness.is_empty() {
         merkle
-            .execute_forensic_boot_audit(&anchored_witness, &witness_engine.clone())
+            .execute_forensic_boot_audit(&anchored_witness, &witness_engine, &master_verifying_key)
             .await?;
     }
 
-    // ---  COMPACTION EVENT LISTENENR  (Watermark eviction) ----
-    let mut vault_rx = event_tx.subscribe();
+    // ==============================================================================
+    // BACKGROUND SUBSCRIRBERS: Audit Sinker, WORM witness Anchooring & 60s Flush
+    // ==============================================================================
+    let mut bus_rx = event_tx.subscribe();
     let cold_store_vault = cold_store.clone();
+    let witness_sink = witness_engine.clone();
 
     tokio::spawn(async move {
         println!("[SYSTEM] Audit Vault Telemetry Sinker Active.");
-        while let Ok(event) = vault_rx.recv().await {
+        while let Ok(event) = bus_rx.recv().await {
             if !matches!(event, SystemEvent::ThoughtCommitted { .. }) {
                 cold_store_vault.log_system_event(&event).await;
+
+                if let SystemEvent::MerkleBatchCrystallized { batch, records } = event {
+                    if let Err(e) = witness_sink.anchor_batch(&batch, records).await {
+                        eprintln!("[WORM WITNESS ERROR] Failed to anchor batch #{}:{} ")
+                    }
+                }
+            }
+        }
+    });
+
+    // Periodic 60-second active Merkle buffer crystallization for loq-volume namespaces
+    let merkle_periodic = merkle.clone();
+    let witness_periodic = witness_engine.clone();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(60));
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            for (batch, records) in merkle_periodic.flush_all_active_buffers() {
+                let _ = witness_periodic.anchor_batch(&batch, records).await;
             }
         }
     });
@@ -474,7 +455,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         merkle.clone(),
         policy.clone(),
         registry.clone(),
-        mem_router.clone(),
+        effect_store.clone(),
         event_tx.clone(),
         wal.cmd_sender.clone(),
     ));
@@ -488,7 +469,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_state = ApiState {
         config: config.clone(),
         policy: policy.clone(),
-        mem_router: mem_router.clone(),
+        effect_store: effect_store.clone(),
         merkle: merkle.clone(),
         cold_store: cold_store.clone(),
         wal: wal.clone(),
@@ -501,10 +482,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         compactor: compactor.clone(),
     };
 
-    // 1. OPERATOR ADMIN PAUSE: Bound to Unix Domain Socket (mode 0600)
+    // 1. OPERATOR ADMIN PLANE: Bound to Unix Domain Socket (mode 0600)
     #[cfg(unix)]
     {
-        let admin_sock_path = Path::new("./vault/admin.sock");
+        let admin_sock_path = Path::new(&config.admin_socket_path);
         if let Some(parent) = admin_sock_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
@@ -514,19 +495,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let uds_listener = tokio::net::UnixListener::bind(admin_sock_path)
-            .expect("Failed to bind Admin Socket ./vault/admin.sock");
+            .expect("Failed to bind Unix Admin Socket ");
 
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(admin_sock_path, fs::Permissions::from_mode(0o600));
+
         let admin_app = build_admin_router(api_state.clone());
+        let sock_display = config.admin_socket_path.clone();
         tokio::spawn(async move {
             println!(
-                "[SECURITY] Privileged Admin Socket locked to ./vault/admin.sock (mode 0600) "
+                "[SECURITY] Operator Admin Socket locked to {} (mode 0600 + Bearer Auth) ",
+                sock_display
             );
             axum::serve(uds_listener, admin_app).await.unwrap();
         });
     }
 
+    // AGENT HTTP DATA PLANE: Bound to TCP port (config.port + 1)
     let data_app = build_data_router(api_state);
 
     let api_port = config.port + 1;
@@ -555,7 +540,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     socket.bind(addr).unwrap();
     let listener = socket.listen(1024).unwrap();
     println!(
-        "Organism live on {}:{}. Awaiting LLM Agent TCP Connections...",
+        "[SYSTEM] Binary TCP Ingreess  live on {}:{}",
         config.host, config.port
     );
 
@@ -603,9 +588,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let task_merkle = merkle.clone();
                     let task_wal = wal.clone();
                     let task_event_tx = event_tx.clone();
-                    let task_PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path } = policy.clone();
+                    let task_policy = policy.clone();
                     let task_registry = registry.clone();
-                    let task_mem_router = mem_router.clone();
+                    let task_mem_router = effect_store.clone();
                     let task_pause_rx = pause_rx.clone();
 
                 // Spawn into the joinset
@@ -658,11 +643,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // Prevent malicious massive memory allocation attacks ( Max 1mb per thought )
                     if payload_len > 1024 * 1024 {
-                        eprintln!("[NETWORK WARN] Payload Exceeded 1MB limit. Dropping Connections.");
+                        eprintln!("[NETWORK WARN] Payload Exceeded 1MB limit. Dropping Socket.");
                         break;
                     }
 
-                    // Read the exact payload bytes: Read into the preallocated screatch bufffer.
+                    // Read the exact payload bytes: Read into the preallocated scratch bufffer.
                     // We slice the scratch buffer to the exact length of the incoming payload complately bypassing the OS memory allocator
                     let active_payload_slice : &mut [u8] = &mut payload_scratch_buf[0..payload_len];
 
@@ -673,28 +658,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let archived_ingress = match rkyv::access::<<IngressEnvelope as rkyv::Archive>::Archived, rkyv::rancor::Error>(active_payload_slice) {
                     Ok(valid_archived) => valid_archived,
-                    Err(e) => {
-                        eprintln!("[PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path }] TCP Dropped: Malformed Memory layout (IngressEnvelope): {}", e);
-                        break;
-                    }
+                    Err(e) => break
                 };
 
-                let path_intent = archived_ingress.intent_path.as_str();
-                let record_slice = archived_ingress.record_bytes.as_slice();
-
-
+                    let record_slice = archived_ingress.record_bytes.as_slice();
                     let mut aligned_state_buf: rkyv::util::AlignedVec<16> = rkyv::util::AlignedVec::new();
                     aligned_state_buf.extend_from_slice(record_slice);
 
                     // Validates the memory layout over the aligned buffer allocation
                     let archived_rec = match rkyv::access::<<ExecutionRecord as rkyv::Archive>::Archived, rkyv::rancor::Error>(&aligned_state_buf) {
                         Ok(valid_rec) => valid_rec,
-                        Err(e) => {
-                            eprintln!("[PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path } ERROR] TCP Dropped: Misaligned/Malformed Inner Payload (AgentState): {} ", e);
-                            break;
-                        }
+                        Err(e) => break
                     };
 
+                    let signed_namespace = archived_rec.namespace.as_str();
                     let agent_pub_key: [u8; 32] = archived_ingress.public_key.try_into().unwrap_or([0; 32]);
                     let mut packet_sig = [0u8; 64];
                     packet_sig.copy_from_slice( archived_ingress.signature.as_slice() );
@@ -702,38 +679,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // UNIFIED PERIMETER: Validates lineage, check signature. ONLY verify the heavy Master Certificate on the very first packet.
                     if !session_established {
 
-                            match task_PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path }.verify_session_lineage(archived_ingress.capability_cert.as_slice(), &agent_pub_key) {
+                            match task_policy.verify_session_lineage(archived_ingress.capability_cert.as_slice(), &agent_pub_key) {
                                 Ok((agent_hex, group_name)) => {
-                                    if task_PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path }.is_quarantined(&agent_hex) {
-                                        eprintln!("[PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path } INTERDICTION] Quarantined Agent {} denied connection. Dropping Socket.", agent_hex);
-                                        let mut err_buf = [0u8; 20];
-                                        err_buf[0..4].copy_from_slice(&2u32.to_le_bytes()); // Status 2: Quarantined
-                                        let _ = tokio::io::AsyncWriteExt::write_all(&mut write_half, &err_buf).await;
-                                        break;
-                                    }
                                     session_established = true;
                                     cached_agent_hex = agent_hex;
                                     cached_group_name = group_name;
                                     session_pub_key = agent_pub_key;
                                 }
 
-                                Err(e) => {
-                                    eprintln!("[PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path } INTERDICTION] Handshake Failed: {} ", e);
+                                Err(PolicyError::Quartantined(_)) => {
+                                    let mut err_buf = [0u8; 20];
+                                    err_buf[0..4].copy_from_slice(&2u32.to_le_bytes());
+                                    let _ = tokio::io::AsyncWriteExt::write_all(&mut write_half, &err_buf).await;
                                     break;
                                 }
+
+                                Err(_) => break
                             }
                     }   else {
                         // Enforce Key Consistency: Detect public key swiitching on active session
                         if agent_pub_key != session_pub_key {
-                            eprintln!("[PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path } INTERDICTION] Key Drift Attack detected. Dropping Socket. ");
+                            eprintln!("[SECURITY] Public key drift detected on active TCP session. Dropping. ");
                             break;
                         }
                     }
 
                     // Perform ultrafast packet audit for each packet.
                     let packet_timestamp = (archived_rec.timestamp.to_native() / 1000) as i64;
-                    if let  Err(e) = task_PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path }.authorize_packet_fast(&cached_agent_hex, &cached_group_name, &agent_pub_key, record_slice, &packet_sig, path_intent, packet_timestamp) {
-                        eprintln!("[PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path } INTERDICTION] Fast Audit failed: {} ", e);
+                    if let  Err(e) = task_policy.authorize_packet_fast(&cached_agent_hex, &cached_group_name, &agent_pub_key, record_slice, &packet_sig, path_intent, packet_timestamp) {
+                        eprintln!("[POLICY INTERDICTION] TCP packet rejected: {} ", e);
+                        let mut err_buf = [0u8; 20];
+                        err_buf[0..4].copy_from_slice(&2u32.to_le_bytes());
+                        let _ = tokio::io::AsyncWriteExt::write_all(&mut write_half, &err_buf).await;
                         break;
                     }
 
@@ -741,9 +718,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     let text = String::from_utf8_lossy(archived_rec.payload_bytes.as_slice()).to_string();
 
-                    let mut alias = "Unknown".to_string();
-                    if path_intent == "/system/handshake" {
-                        if text.starts_with("ALIAS=") {
+                    if signed_namespace == "/system/handshake" && text.starts_with("ALIAS=") {
                             let alias = text.replace("ALIAS=", "").trim().to_string();
                             // We do not execute a cascade for handshake. We just register and drop
                             task_registry.touch_agent(&agent_hex, &path_intent, "Connected", &alias);
@@ -758,16 +733,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
 
                             continue;
-                        }
-                    } else {
-                        // O(1) Ram lookup and keep the alias active for normal thought
-                        if let Some(agent_proc) = task_registry.active_agents.get(&agent_hex) {
-                            alias = agent_proc.alias.clone();
-                        }
                     }
 
-                    // --- The Raqim Cascade ---
-                    // If the WAL or the Publisher channel are full, the .await creates a healthy backppressure rather than panicking.
+                    let alias = task_registry.active_agents.get(&cached_agent_hex).map(|p| p.alias.clone()).unwrap_or_else(|| "Unknown".to_string());
+
+
+                    // If the WAL or the Publisher channel are full, the .await creates a healthy backpressure rather than panicking.
                     match execute_raqim_cascade(
                         &archived_rec,
                         task_merkle.clone(),
@@ -823,25 +794,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "[SYSTEM] Draining {} active TCP threads... ",
         tcp_workers.len()
     );
-    while let Some(res) = tcp_workers.join_next().await {
-        if let Err(e) = res {
-            eprint!(
-                "[SYSTEM WARN] A TCP worker panicked during shutdown: {} ",
-                e
-            );
-        }
-    }
+    while tcp_workers.join_next().await.is_some() {}
 
     println!("[SYSTEM] All active thoughts processed and sealed.");
+
+    // Flush and anchor any remaining Merkle buffers before shutdown
+    for (batch, records) in merkle.flush_all_active_buffers() {
+        let _ = witness_engine.anchor_batch(&batch, records).await;
+    }
 
     // Sever the Global Mesh
     let _ = wal.cmd_sender.send(WalCommand::Shutdown).await;
     // Seal the WAL safely to nvme
     drop(wal);
-    println!("[WAL] Senders dropped. Awaiting final io_uring fsync to NVMe... ");
     let _ = handle.await;
 
-    println!("[SYSTEM] Raqim OS terminated cleanly. Zero data loss. AlhamdulliLah.");
+    println!("[SYSTEM] Raqim Core terminated cleanly. Zero data loss. AlhamdulliLah.");
 
     Ok(())
 }
