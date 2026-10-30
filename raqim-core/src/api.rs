@@ -114,6 +114,7 @@ pub struct ValidatedIdentity {
 
 impl<S> FromRequestParts<S> for ValidatedIdentity
 where
+    ApiState: FromRef<S>,
     S: Send + Sync,
 {
     type Rejection = ApiError;
@@ -994,10 +995,6 @@ pub fn build_admin_router(state: ApiState) -> axum::Router {
         .route(
             "/health",
             get(|| async { Json(json!({"status": "ok", "plane": "admin", "version": "0.2.0"})) }),
-        )
-        .route(
-            "/v1/policy/quarantine_list",
-            get(active_quarantine_endpoint),
         )
         .route(
             "/v1/policy/quarantine_list",

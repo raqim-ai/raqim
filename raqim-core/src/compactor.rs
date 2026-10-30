@@ -186,7 +186,7 @@ impl WalCompactor {
     /// Executes on-demand or automated safe WAL rotatiton and LanceDB assimilation
     pub async fn trigger_safe_compaction(self: Arc<Self>) -> Result<usize, anyhow::Error> {
         // Ask the WAL engine to rotate the file and give us the archived filename
-        let (reply_tx, reply_rx) = oneshot::channel::<String>();
+        let (reply_tx, reply_rx) = oneshot::channel();
 
         // Dispatch rotation barrier to the WAL engine
         self.cmd_tx
@@ -197,11 +197,12 @@ impl WalCompactor {
         // Wait for the WAL worker to seal, rename and release the active file
         let archived_filename = reply_rx
             .await
-            .map_err(|_| anyhow::anyhow!("WalEngine dropped the rotation reply channel "))?;
+            .map_err(|_| anyhow::anyhow!("WalEngine dropped rotation reply channel"))?
+            .map_err(|e| anyhow::anyhow!("WalEngine rotation failed: {}", e))?;
 
         println!(
-            "[COMPACTOR] WAL rotated to '{}'. Executing 2PC LanceDB assimilation... ",
-            archived_filename.clone()
+            "[COMPACTOR] WAL rotated to '{}'. Executing 2PC ColdStore assimilation... ",
+            archived_filename
         );
 
         // Ingest the rotates segment into lanceDB

@@ -4,9 +4,8 @@ use rand_core::OsRng;
 use raqim_core::api::{build_admin_router, build_data_router, ApiState};
 use raqim_core::checkpoint::{CheckpointEngine, ControlMutation};
 use raqim_core::merkle::MerkleEngine;
-use raqim_core::policy::{PolicyConfigFile, PolicyEngine};
+use raqim_core::policy::{PolicyConfigFile, PolicyEngine, PolicyError};
 
-use axum::http::Method;
 use raqim_core::cold_store::{ColdStore, SegmentColdStore};
 use raqim_core::compactor::{CompactionState, WalCompactor};
 use raqim_core::config::RaqimConfig;
@@ -145,17 +144,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let _ =
                         fs::set_permissions(&admin_secret_path, fs::Permissions::from_mode(0o600));
                 }
-
-                fs::read_to_string(&admin_secret_path)
-                    .expect("FATAL: Failed to read ./ca-keys/admin.secret")
-                    .trim()
-                    .to_string()
             }
+
+            fs::read_to_string(&admin_secret_path)
+                .expect("FATAL: Failed to read ./ca-keys/admin.secret")
+                .trim()
+                .to_string()
         }
     };
-
-    let merkle = Arc::new(MerkleEngine::new());
-
     // 1. BOOT SEQUENCE: INIITIALIZE ALL LAYERS (Wrapped in Arc for fearless concurrency)
     let merkle = Arc::new(MerkleEngine::new());
 
@@ -420,12 +416,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         println!("[SYSTEM] Audit Vault Telemetry Sinker Active.");
         while let Ok(event) = bus_rx.recv().await {
-            if !matches!(event, SystemEvent::ThoughtCommitted { .. }) {
+            if !matches!(event, SystemEvent::RecordCommitted { .. }) {
                 cold_store_vault.log_system_event(&event).await;
 
                 if let SystemEvent::MerkleBatchCrystallized { batch, records } = event {
                     if let Err(e) = witness_sink.anchor_batch(&batch, records).await {
-                        eprintln!("[WORM WITNESS ERROR] Failed to anchor batch #{}:{} ")
+                        eprintln!(
+                            "[WORM WITNESS ERROR] Failed to anchor batch #{}:{} ",
+                            batch.batch_id, e
+                        )
                     }
                 }
             }
@@ -658,7 +657,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let archived_ingress = match rkyv::access::<<IngressEnvelope as rkyv::Archive>::Archived, rkyv::rancor::Error>(active_payload_slice) {
                     Ok(valid_archived) => valid_archived,
-                    Err(e) => break
+                    Err(_) => break
                 };
 
                     let record_slice = archived_ingress.record_bytes.as_slice();
@@ -668,7 +667,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Validates the memory layout over the aligned buffer allocation
                     let archived_rec = match rkyv::access::<<ExecutionRecord as rkyv::Archive>::Archived, rkyv::rancor::Error>(&aligned_state_buf) {
                         Ok(valid_rec) => valid_rec,
-                        Err(e) => break
+                        Err(_) => break
                     };
 
                     let signed_namespace = archived_rec.namespace.as_str();
@@ -687,7 +686,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     session_pub_key = agent_pub_key;
                                 }
 
-                                Err(PolicyError::Quartantined(_)) => {
+                                Err(PolicyError::Quarantined(_)) => {
                                     let mut err_buf = [0u8; 20];
                                     err_buf[0..4].copy_from_slice(&2u32.to_le_bytes());
                                     let _ = tokio::io::AsyncWriteExt::write_all(&mut write_half, &err_buf).await;
@@ -706,7 +705,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // Perform ultrafast packet audit for each packet.
                     let packet_timestamp = (archived_rec.timestamp.to_native() / 1000) as i64;
-                    if let  Err(e) = task_policy.authorize_packet_fast(&cached_agent_hex, &cached_group_name, &agent_pub_key, record_slice, &packet_sig, path_intent, packet_timestamp) {
+                    if let  Err(e) = task_policy.authorize_packet_fast(&cached_agent_hex, &cached_group_name, &agent_pub_key, record_slice, &packet_sig, &signed_namespace, packet_timestamp) {
                         eprintln!("[POLICY INTERDICTION] TCP packet rejected: {} ", e);
                         let mut err_buf = [0u8; 20];
                         err_buf[0..4].copy_from_slice(&2u32.to_le_bytes());
@@ -721,7 +720,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if signed_namespace == "/system/handshake" && text.starts_with("ALIAS=") {
                             let alias = text.replace("ALIAS=", "").trim().to_string();
                             // We do not execute a cascade for handshake. We just register and drop
-                            task_registry.touch_agent(&agent_hex, &path_intent, "Connected", &alias);
+                            task_registry.touch_agent(&agent_hex, &signed_namespace, "Connected", &alias);
 
                             // Emits 20-byte Hadshake Ack
                             let mut ack_buf = [0u8; 20];
@@ -773,7 +772,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     task_registry.touch_agent(
                         agent_hex.clone().as_str(),
-                        archived_ingress.intent_path.as_str(),
+                        &signed_namespace,
                         "Active",
                         &alias,
                     );
@@ -807,7 +806,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = wal.cmd_sender.send(WalCommand::Shutdown).await;
     // Seal the WAL safely to nvme
     drop(wal);
-    let _ = handle.await;
+    let _ = wal_handle.await;
 
     println!("[SYSTEM] Raqim Core terminated cleanly. Zero data loss. AlhamdulliLah.");
 

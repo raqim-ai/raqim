@@ -267,7 +267,7 @@ impl EffectStore {
             self.pending_intents.insert(key, prepared.clone());
         }
 
-        if let Some((batch, records)) = self.merkle.commit_prepared_record(record) {
+        if let Some((batch, records)) = self.merkle.commit_prepared_record(prepared) {
             let _ = self
                 .event_tx
                 .send(SystemEvent::MerkleBatchCrystallized { batch, records });

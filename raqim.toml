@@ -1,17 +1,11 @@
-[daemon]
-topic = "raqim_default"
-wal_path = "production.wal"
-manifest_path = "compaction.manifest.json"
-lance_path = "./production_semantic.lancedb"
+tenant_id = "local_sovereign"
+port = 8080
+host = "127.0.0.1"
+wal_path = "./production.wal"
+manifest_path = "./compaction.manifest.json"
 witness_path = "./vault/witnesses"
-aegis_path = "aegis.toml"
-
-[storage]
-lance_path = "./production_semantic.lancedb"
-table_name = "agent_history"
-
-[identity]
-tenant_id = "tenant_unilorin_optometry_01"
-node_pub_key_hex = "f9a2e75e921d7b6a43d9281a8cb9219323ef45a2d98412e7cf849201bdca74ff"
-
-license_key = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZW5hbnRfdW5pbG9yaW5fb3B0b21ldHJ5XzAxIiwiZmVhdHVyZXMiOlsiZ2xvYmFsX2NyZHQiLCJnbG9iYWxfYTJhIiwidGltZV90cmF2ZWwiLCJhZWdpcyJdLCJleHAiOjE4OTM0NTYwMDB9.SignatureBypassedForLocalDevProfile"
+policy_path = "./policy.toml"
+checkpoint_path = "./vault/state_checkpoint.bin"
+control_journal_path = "./vault/control_journal.bin"
+cold_store_path = "./vault/cold_segments"
+admin_socket_path = "./vault/admin.sock"

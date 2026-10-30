@@ -254,18 +254,18 @@ pub async fn execute_raqim_cascade(
         call_signature_hash,
     );
     let tx_id = unsealed_record.tx_id;
+
     let text_preview = unsealed_record.payload_text_preview();
 
     // 1. Cryptographically seal into BLAKE3 Merkle DAG
-    let (sealed_record, optional_batch) = merkle.seal_record(unsealed_record);
+    let prepared = merkle.prepare_record(unsealed_record);
 
-    if let Some(batch) = optional_batch {
-        let _ = tx.send(SystemEvent::MerkleBatchCrystallized { batch });
+    // Durability First
+    wal.append(prepared.clone()).await?;
+
+    if let Some((batch, records)) = merkle.commit_prepared_record(prepared) {
+        let _ = tx.send(SystemEvent::MerkleBatchCrystallized { batch, records });
     }
-
-    wal.append(sealed_record)
-        .await
-        .map_err(|e| anyhow::anyhow!("Durability Breach / WAL Saturated: {}", e))?;
 
     let _ = tx.send(SystemEvent::RecordCommitted {
         agent_id: agent_hex,
