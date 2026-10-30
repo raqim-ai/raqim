@@ -30,7 +30,7 @@ use tokio_util::sync::CancellationToken;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("==================================================================");
-    println!("Bismillah. Booting Hardened Raqim Core Daemon v.0.1.2");
+    println!("Bismillah. Booting Hardened Raqim Core Daemon v.0.2.0");
     println!("==================================================================");
 
     let boot_start = std::time::Instant::now();
@@ -64,8 +64,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = Arc::new(RaqimConfig::load_or_bootstrap());
     println!(
-        "[CONFIG] Active Port: {} | WAL Path: {} ",
-        &config.port, &config.wal_path,
+        "[CONFIG] Data Plane TCP: {}:{} | Admin Socket: {} | WAL: {} ",
+        &config.host, &config.port, &config.admin_socket_path, &config.wal_path,
     );
 
     let cold_store: Arc<dyn ColdStore> = Arc::new(SegmentColdStore::new("./vault/cold_segments"));
@@ -74,14 +74,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (event_tx, _event_rx) = broadcast::channel::<SystemEvent>(50_000);
     let registry = Arc::new(SwarmRegistry::new());
 
-    // Securely loads the swarm key from disk. Generate it if it doesn't exist
+    // Load or bootstrap Mater Key & operator Admin secret (mode 0600)
     let key_dir = Path::new("./ca-keys");
+    fs::create_dir_all(key_dir).expect("Failed tp create ./ca-keys directory");
     let key_path = key_dir.join("swarm_master.key");
 
     // Generation Phase (First Boot Only)
     if !key_path.exists() {
         println!("[SECURITY] Initializing Swarm Master Cryptographic Root... ");
-        fs::create_dir_all(key_dir).expect("Failed to create keys directory");
 
         let mut csprng = OsRng;
         let signing_key = SigningKey::generate(&mut csprng);
@@ -102,8 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         use std::os::unix::fs::PermissionsExt;
         let metadata = fs::metadata(&key_path).expect("FATAL: Failed to read master_key metadata");
-        let permissions = metadata.permissions();
-        let mode = permissions.mode();
+        let mode = metadata.permissions().mode();
 
         // Check if group or others have read/write/execute permission
         if mode & 0o77 != 0 {
@@ -122,34 +121,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let key_array: [u8; 32] = key_bytes
         .as_slice()
         .try_into()
-        .expect("FATAL: Master key bytes is corruped (not 32 bytes)");
+        .expect("FATAL: Master key bytes is corruped (expected 32 bytes)");
     let master_signing_key = SigningKey::from_bytes(&key_array);
-
     let master_public_key = master_signing_key.verifying_key().to_bytes();
 
+    // Load or generate Operator Admin Secret (`RAQIM_ADMIN_SECRET` env var overrides file )
     let admin_secret_path = key_dir.join("admin.secret");
-    if !admin_secret_path.exists() {
-        let mut secret_bytes = [0u8; 32];
-        use rand_core::RngCore;
-        OsRng.fill_bytes(&mut secret_bytes);
-        let secret_hex = hex::encode(secret_bytes);
-        fs::write(&admin_secret_path, &secret_hex).expect("Failed to write admin.secret");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&admin_secret_path, fs::Permissions::from_mode(0o600));
+
+    let admin_secret = match std::env::var("RAQIM_ADMIN_SECRET") {
+        Ok(val) if !val.trim().is_empty() => val.trim().to_string(), 
+        _ => {
+
+
+            if !admin_secret_path.exists() {
+                let mut secret_bytes = [0u8; 32];
+                use rand_core::RngCore;
+                OsRng.fill_bytes(&mut secret_bytes);
+                let secret_hex = hex::encode(secret_bytes);
+                fs::write(&admin_secret_path, &secret_hex).expect("Failed to write admin.secret");
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = fs::set_permissions(&admin_secret_path, fs::Permissions::from_mode(0o600));
+                }
+
+                fs::read_to_string(&admin_secret_path).expect("FATAL: Failed to read ./ca-keys/admin.secret").trim().to_string()
+
         }
     }
 
-    let admin_secret = fs::read_to_string(&admin_secret_path)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
+    };
 
-    // ===============================
+    let merkle = Arc::new(MerkleEngine::new());
 
     // 1. BOOT SEQUENCE: INIITIALIZE ALL LAYERS (Wrapped in Arc for fearless concurrency)
     let merkle = Arc::new(MerkleEngine::new());
+
+
 
     // LEAK-PROOF BROADCAST RECEIVER LOOP: Spawn consumer loop to detect lagging and evict slow readers automatically
     let mut system_events_subscriber = event_tx.subscribe();
@@ -171,13 +179,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // THE KERNEL AEGIS.TOML HOT-RELOAD WATCHER
+    // THE KERNEL PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path }.TOML HOT-RELOAD WATCHER
     let policy_path_str = "policy.toml";
 
     // Ensure policy manifest target exists beofre running file watcher
     if !Path::new(policy_path_str).exists() {
         let default_toml = r#"
-        # Default Raqim Aegis Policy Manifest (Auto-Generated)
+        # Default Raqim PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path } Policy Manifest (Auto-Generated)
         [groups.admin_group]
         allowed_namespaces = ["*"]
         blocked_namespaces = []
@@ -191,7 +199,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         burst_capacity = 20
         "#;
         fs::write(policy_path_str, default_toml)?;
-        println!("[AEGIS] Auto-generated default policy.toml configuration file.");
+        println!("[PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path }] Auto-generated default policy.toml configuration file.");
     }
 
     let initial_content = fs::read_to_string(policy_path_str)?;
@@ -207,7 +215,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.control_journal_path.clone(),
     ));
 
-    let aegis_clone = policy.clone();
+    let PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path }_clone = policy.clone();
     let (watch_tx, mut watch_rx) = tokio::sync::mpsc::channel::<Result<Event, notify::Error>>(10);
 
     // Spawn synchronous notify loop hooked directly to OS virtual filesystem events
@@ -236,12 +244,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     match toml::from_str::<PolicyConfigFile>(&content) {
                         Ok(parsed_cfg) => {
                             let fresh_policies = parsed_cfg.to_group_policies();
-                            aegis_clone.reload_policies(fresh_policies);
+                            PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path }_clone.reload_policies(fresh_policies);
                         }
                         Err(e) => {
                             // FAIL-SAFE
                             eprintln!(
-                                "[AEGIS CONFIG ERROR] Invalid policy.toml syntax: {}. Retaining previous security policies in RAM.",
+                                "[PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path } CONFIG ERROR] Invalid policy.toml syntax: {}. Retaining previous security policies in RAM.",
                                 e
                             );
                         }
@@ -595,7 +603,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let task_merkle = merkle.clone();
                     let task_wal = wal.clone();
                     let task_event_tx = event_tx.clone();
-                    let task_aegis = policy.clone();
+                    let task_PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path } = policy.clone();
                     let task_registry = registry.clone();
                     let task_mem_router = mem_router.clone();
                     let task_pause_rx = pause_rx.clone();
@@ -666,7 +674,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let archived_ingress = match rkyv::access::<<IngressEnvelope as rkyv::Archive>::Archived, rkyv::rancor::Error>(active_payload_slice) {
                     Ok(valid_archived) => valid_archived,
                     Err(e) => {
-                        eprintln!("[AEGIS] TCP Dropped: Malformed Memory layout (IngressEnvelope): {}", e);
+                        eprintln!("[PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path }] TCP Dropped: Malformed Memory layout (IngressEnvelope): {}", e);
                         break;
                     }
                 };
@@ -682,7 +690,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let archived_rec = match rkyv::access::<<ExecutionRecord as rkyv::Archive>::Archived, rkyv::rancor::Error>(&aligned_state_buf) {
                         Ok(valid_rec) => valid_rec,
                         Err(e) => {
-                            eprintln!("[AEGIS ERROR] TCP Dropped: Misaligned/Malformed Inner Payload (AgentState): {} ", e);
+                            eprintln!("[PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path } ERROR] TCP Dropped: Misaligned/Malformed Inner Payload (AgentState): {} ", e);
                             break;
                         }
                     };
@@ -694,10 +702,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // UNIFIED PERIMETER: Validates lineage, check signature. ONLY verify the heavy Master Certificate on the very first packet.
                     if !session_established {
 
-                            match task_aegis.verify_session_lineage(archived_ingress.capability_cert.as_slice(), &agent_pub_key) {
+                            match task_PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path }.verify_session_lineage(archived_ingress.capability_cert.as_slice(), &agent_pub_key) {
                                 Ok((agent_hex, group_name)) => {
-                                    if task_aegis.is_quarantined(&agent_hex) {
-                                        eprintln!("[AEGIS INTERDICTION] Quarantined Agent {} denied connection. Dropping Socket.", agent_hex);
+                                    if task_PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path }.is_quarantined(&agent_hex) {
+                                        eprintln!("[PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path } INTERDICTION] Quarantined Agent {} denied connection. Dropping Socket.", agent_hex);
                                         let mut err_buf = [0u8; 20];
                                         err_buf[0..4].copy_from_slice(&2u32.to_le_bytes()); // Status 2: Quarantined
                                         let _ = tokio::io::AsyncWriteExt::write_all(&mut write_half, &err_buf).await;
@@ -710,22 +718,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
 
                                 Err(e) => {
-                                    eprintln!("[AEGIS INTERDICTION] Handshake Failed: {} ", e);
+                                    eprintln!("[PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path } INTERDICTION] Handshake Failed: {} ", e);
                                     break;
                                 }
                             }
                     }   else {
                         // Enforce Key Consistency: Detect public key swiitching on active session
                         if agent_pub_key != session_pub_key {
-                            eprintln!("[AEGIS INTERDICTION] Key Drift Attack detected. Dropping Socket. ");
+                            eprintln!("[PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path } INTERDICTION] Key Drift Attack detected. Dropping Socket. ");
                             break;
                         }
                     }
 
                     // Perform ultrafast packet audit for each packet.
                     let packet_timestamp = (archived_rec.timestamp.to_native() / 1000) as i64;
-                    if let  Err(e) = task_aegis.authorize_packet_fast(&cached_agent_hex, &cached_group_name, &agent_pub_key, record_slice, &packet_sig, path_intent, packet_timestamp) {
-                        eprintln!("[AEGIS INTERDICTION] Fast Audit failed: {} ", e);
+                    if let  Err(e) = task_PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path }.authorize_packet_fast(&cached_agent_hex, &cached_group_name, &agent_pub_key, record_slice, &packet_sig, path_intent, packet_timestamp) {
+                        eprintln!("[PolicyEngine { group_policies, agent_rate_limiters, quarantine_blocklist, master_public_key, tx, control_journal_path } INTERDICTION] Fast Audit failed: {} ", e);
                         break;
                     }
 

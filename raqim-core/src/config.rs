@@ -20,7 +20,7 @@ pub struct CliArgs {
     pub witness_path: Option<String>,
 
     #[arg(short, long, alias = "policy_path")]
-    pub aegis_path: Option<String>,
+    pub policy_path: Option<String>,
 
     #[arg(long)]
     pub tenant_id: Option<String>,
@@ -56,7 +56,7 @@ pub struct RaqimConfig {
     pub wal_path: String,
     pub manifest_path: String,
     pub witness_path: String,
-    pub aegis_path: String,
+    pub policy_path: String,
     pub checkpoint_path: String,
     pub control_journal_path: String,
     pub cold_store_path: String,
@@ -73,7 +73,7 @@ impl Default for RaqimConfig {
             wal_path: "./production.wal".to_string(),
             manifest_path: "./compaction.manifest.json".to_string(),
             witness_path: "./vault/witnesses".to_string(),
-            aegis_path: "./policy.toml".to_string(),
+            policy_path: "./policy.toml".to_string(),
             checkpoint_path: "./vault/state_checkpoint.bin".to_string(),
             control_journal_path: "./vault/control_journal.bin".to_string(),
             cold_store_path: "./vault/cold_segments".to_string(),
@@ -118,8 +118,8 @@ impl RaqimConfig {
         if let Some(wp) = args.witness_path {
             config.witness_path = wp;
         }
-        if let Some(ap) = args.aegis_path {
-            config.aegis_path = ap;
+        if let Some(ap) = args.policy_path {
+            config.policy_path = ap;
         }
         if let Some(tid) = args.tenant_id {
             config.tenant_id = tid;
