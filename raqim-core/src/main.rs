@@ -432,20 +432,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Periodic 60-second active Merkle buffer crystallization for loq-volume namespaces
-    let merkle_periodic = merkle.clone();
-    let witness_periodic = witness_engine.clone();
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(Duration::from_secs(60));
-        ticker.tick().await;
-        loop {
-            ticker.tick().await;
-            for (batch, records) in merkle_periodic.flush_all_active_buffers() {
-                let _ = witness_periodic.anchor_batch(&batch, records).await;
-            }
-        }
-    });
-
     let compactor = Arc::new(WalCompactor::new(
         &config.wal_path,
         &config.manifest_path,

@@ -316,6 +316,13 @@ impl WalCompactor {
         let journal_path = Path::new(&self.control_journal_path);
         let rotated_journal = CheckpointEngine::rotate_journal_before_snapshot(&journal_path);
 
+        // Crystallize any partial active merkle buffers at daily/ compaction boundaries
+        for (batch, records) in self.merkle.flush_all_active_buffers() {
+            let _ = self
+                .tx
+                .send(SystemEvent::MerkleBatchCrystallized { batch, records });
+        }
+
         // Step 2: Snapshot RAM state
         let checkpoint = StateCheckpoint {
             version: 1,
