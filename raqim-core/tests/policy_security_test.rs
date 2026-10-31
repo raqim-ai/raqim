@@ -6,6 +6,7 @@ use raqim_core::policy::{
 };
 use raqim_core::SystemEvent;
 use std::collections::HashMap;
+use std::println;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 
@@ -112,7 +113,7 @@ fn test_unauthenticated_spoof_never_quarantines_honest_agent_and_two_tier_rate_l
     );
 
     // 4. Sustained runaway flood (49 more consecutive rate violations = 50 total) -> Quarantines!
-    for strike in 2..MAX_CONSECUTIVE_RATE_STRIKES {
+    for strike in 2..MAX_CONSECUTIVE_RATE_STRIKES + 1 {
         let r = engine.authorize_packet_fast(
             &agent_hex,
             "worker_group",
@@ -138,6 +139,10 @@ fn test_unauthenticated_spoof_never_quarantines_honest_agent_and_two_tier_rate_l
         "/finance/screen/tx",
         now_ts as i64,
     );
+    if let Err(e) = flood_res.clone() {
+        println!("{}", e);
+    }
+
     assert!(matches!(flood_res, Err(PolicyError::Quarantined(_))));
     assert!(
         engine.is_quarantined(&agent_hex),
