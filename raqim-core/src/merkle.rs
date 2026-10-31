@@ -226,11 +226,14 @@ impl MerkleEngine {
 
             if !buffer.accumulated_leaves.is_empty() {
                 let root = Self::compute_merkle_root(&buffer.accumulated_leaves);
-                let metadata = buffer
+                let metadata: Vec<LeafMetadata> = buffer
                     .accumulated_records
                     .iter()
                     .map(LeafMetadata::from_record)
                     .collect();
+
+                let records = std::mem::take(&mut buffer.accumulated_records);
+
                 let completed_batch = MerkleBatch {
                     batch_id: buffer.current_batch_id,
                     namespace: ns,
@@ -240,7 +243,6 @@ impl MerkleEngine {
                     metadata,
                 };
 
-                let records = std::mem::take(&mut buffer.accumulated_records);
                 self.batch_archive
                     .insert(completed_batch.batch_id, completed_batch.clone());
                 buffer.parent_batch_root = root;
@@ -297,10 +299,10 @@ impl MerkleEngine {
                 let proof_nodes = Self::extract_sibiling_path(&batch.leaves, leaf_index);
                 return Some(InclusionProof {
                     tx_id_hex,
-                    agent_hex: String::new(),
+                    agent_hex: hex::encode(meta.agent_id),
                     step_ordinal: meta.step_ordinal,
                     timestamp: meta.timestamp,
-                    stage: ExecutionStage::Outcome as u8,
+                    stage: meta.stage,
                     namespace: batch.namespace.clone(),
                     call_sig_hex: hex::encode(meta.call_signature_hash),
                     payload_salt_hex: hex::encode(meta.payload_salt),
