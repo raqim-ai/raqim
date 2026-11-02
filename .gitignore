@@ -19,3 +19,4 @@ __pycache__/
 /docs/research
 demo.tape
 .demo_sandbox/
+raqim-core/test_cold_segments_phase0/

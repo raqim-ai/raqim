@@ -3,6 +3,7 @@ use raqim_core::cold_store::{ColdStore, SegmentColdStore};
 use raqim_core::policy::QuarantineRecord;
 use raqim_core::{ExecutionRecord, ExecutionStage};
 use std::path::Path;
+use std::println;
 
 #[tokio::test]
 async fn test_cold_store_o1_index_and_in_place_ndpa_redaction() {
@@ -48,6 +49,10 @@ async fn test_cold_store_o1_index_and_in_place_ndpa_redaction() {
 
     // 3. Verify Record 1's PII and salt are zeroed on disk, while payload_hash is preserved!
     let post_redact_1 = store.fetch_by_txid(tx1).await.unwrap().unwrap();
+    println!(
+        "I honestly want to see how the post_redact_1 looks like, {:?}",
+        post_redact_1
+    );
     assert!(
         post_redact_1.is_redacted(),
         "Record 1 must report is_redacted()"
