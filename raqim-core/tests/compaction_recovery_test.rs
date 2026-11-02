@@ -15,18 +15,18 @@ async fn test_cold_store_o1_index_and_in_place_ndpa_redaction() {
     let rec1 = ExecutionRecord::new(
         agent_id,
         1,
-        "/finance/kyc".to_string(),
-        ExecutionStage::Outcome,
-        [1u8; 32],
         b"BVN:22345678901".to_vec(),
+        ExecutionStage::Outcome,
+        "/finance/kyc".to_string(),
+        [1u8; 32],
     );
     let rec2 = ExecutionRecord::new(
         agent_id,
         2,
-        "/finance/kyc".to_string(),
-        ExecutionStage::Outcome,
-        [2u8; 32],
         b"TRANSFER_APPROVED".to_vec(),
+        ExecutionStage::Outcome,
+        "/finance/kyc".to_string(),
+        [2u8; 32],
     );
 
     let tx1 = rec1.tx_id;
