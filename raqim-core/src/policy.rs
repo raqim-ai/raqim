@@ -9,6 +9,12 @@ use std::{collections::HashMap, sync::Arc};
 use std::{eprintln, format, println};
 use tokio::sync::broadcast::Sender;
 
+use parking_lot::Mutex;
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
+use serde_json::{Map, Value};
+use std::collections::VecDeque;
+use std::fmt;
+
 /// Number of consecutive rate-limit rejections before an afent is deemed a runaway flood and placed into Quarantine.
 pub const MAX_CONSECUTIVE_RATE_STRIKES: u32 = 50;
 
@@ -154,12 +160,39 @@ impl AtomicTokenBucket {
     }
 }
 
+/// Declarative payload inspection rule evaluated on JSON bodies before egress.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct JsonPredicate {
+    /// Namespace pattern this predicate applies to (e.g., "/egress/paystack/transfer" or "/egress/paystack/*").
+    pub namespace: String,
+    /// RFC 6901 JSON Pointer (e.g., "/amount" or "/recipient/currency").
+    pub pointer: String,
+    /// Whether the field must exist in the JSON payload (default: true).
+    #[serde(default = "default_true")]
+    pub required: bool,
+    /// Minimum allowed numeric value.
+    pub min_value: Option<f64>,
+    /// Maximum allowed numeric value (single-request cap).
+    pub max_value: Option<f64>,
+    /// Maximum cumulative sum allowed over a rolling 3,600-second (1-hour) window per agent.
+    pub max_hourly_sum: Option<f64>,
+    /// Explicit allowlist of permitted string values (e.g., ["NGN", "USD"]).
+    #[serde(default)]
+    pub allowed_values: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone)]
 pub struct GroupPolicy {
     pub allowed_namespaces: Vec<String>,
     pub blocked_namespaces: Vec<String>,
     pub max_tps: u64,
     pub burst_capacity: u64,
+    #[serde(default)]
+    pub predicates: Vec<JsonPredicate>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, rkyv::Archive, rkyv::Serialize)]
@@ -177,6 +210,9 @@ pub struct GroupPolicyConfig {
     pub blocked_namespaces: Vec<String>,
     pub max_tps: u64,
     pub burst_capacity: u64,
+
+    #[serde(default)]
+    pub predicates: Vec<JsonPredicate>,
 }
 
 /// Deserialization schema for aegis.toml
@@ -196,6 +232,7 @@ impl PolicyConfigFile {
                     blocked_namespaces: cfg.blocked_namespaces.clone(),
                     max_tps: cfg.max_tps,
                     burst_capacity: cfg.burst_capacity,
+                    predicates: cfg.predicates,
                 },
             );
         }
@@ -211,6 +248,9 @@ pub struct PolicyEngine {
     pub master_public_key: VerifyingKey,
     pub tx: Sender<SystemEvent>,
     pub control_journal_path: String,
+
+    /// Rolling 1-hour numeric velocity ledger keyed by "{agent_hex}:{namespace}:{pointer}"
+    pub budget_ledger: DashMap<String, Mutex<VecDeque<(u64, f64)>>>,
 }
 
 impl PolicyEngine {
@@ -230,6 +270,7 @@ impl PolicyEngine {
             master_public_key,
             tx,
             control_journal_path,
+            budget_ledger: DashMap::new(),
         }
     }
 
@@ -549,5 +590,358 @@ impl PolicyEngine {
         }
 
         Ok((cert.agent_hex, cert.group_name))
+    }
+
+    /// Evaluates the 4 Concentric Egress Lock for an authenticated agent:
+    /// - Lock 1: Connector HTTP Method + path allowlist (`allowed_routes`)
+    /// - Lock 2: Group Namespace ACL & Two-Tier Rate Limit (`authorize_namespace_only`)
+    /// - Lock 3: Strict Anti-smuggling JSON parsing (if body is non-empty)
+    /// - Lock 4: JSON-Pointer Value Predicates & Rolling 1-Hour Velocity Budgets
+    ///
+    /// Returns the validated canonical `Option<Value>` tree on success.
+
+    pub fn authorize_egress_request(
+        &self,
+        agent_hex: &str,
+        group_name: &str,
+        http_method: &str,
+        subpath: &str,
+        namespace: &str,
+        allowed_routes: &[String],
+        body_bytes: &[u8],
+    ) -> Result<Option<Value>, PolicyError> {
+        // Lock 0: Quarantine & Namespace/Rate-Limit check
+        self.authorize_namespace_only(agent_hex, group_name, namespace)?;
+
+        // Lock 1: Connector Method + Path Allowlist (Default Deny if not matched)
+        let normalized_subpath = if subpath.starts_with('/') {
+            subpath.to_string()
+        } else {
+            format!("/{}", subpath)
+        };
+        let route_candidate = format!("{} {}", http_method.to_uppercase(), normalized_subpath);
+
+        let route_allowed = allowed_routes.iter().any(|pattern| {
+            if let Some(prefix) = pattern.strip_suffix('*') {
+                route_candidate.starts_with(prefix)
+            } else {
+                route_candidate == *pattern
+            }
+        });
+
+        if !route_allowed {
+            self.trigger_quarantine(
+                agent_hex,
+                namespace,
+                "CONNECTOR_ROUTE_BREACH",
+                &format!("Disallowed connector route '{}'", route_candidate),
+            );
+            return Err(PolicyError::ForbiddenNamespace(format!(
+                "Route '{}' is not permitted on this connector",
+                route_candidate
+            )));
+        }
+
+        // If request has no body (e.g., GET request), check if any predicate requires a body
+        let policies_guard = self.group_policies.read();
+        let live_policy = policies_guard.get(group_name).ok_or_else(|| {
+            PolicyError::ForbiddenNamespace(format!("Undefined policy group '{}'", group_name))
+        })?;
+
+        let matching_predicates: Vec<JsonPredicate> = live_policy
+            .predicates
+            .iter()
+            .filter(|p| {
+                if let Some(prefix) = p.namespace.strip_suffix('*') {
+                    namespace.starts_with(prefix)
+                } else {
+                    p.namespace == namespace
+                }
+            })
+            .cloned()
+            .collect();
+        drop(policies_guard);
+
+        if body_bytes.is_empty() {
+            if matching_predicates.iter().any(|p| p.required) {
+                self.trigger_quarantine(
+                    agent_hex,
+                    namespace,
+                    "PAYLOAD_PREDICATE_BREACH",
+                    "Empty body on route requiring JSON predicates",
+                );
+                return Err(PolicyError::ForbiddenNamespace(
+                    "Request body is required for predicate evaluation".to_string(),
+                ));
+            }
+            return Ok(None);
+        }
+
+        // Lock 3: Strict Anti-Smuggling JSON Deserialization
+        let json_tree = match parse_json_strict_no_dup_keys(body_bytes) {
+            Ok(tree) => tree,
+            Err(err_msg) => {
+                if err_msg.contains("JSON_SMUGGLING_DETECTED") {
+                    self.trigger_quarantine(
+                        agent_hex,
+                        namespace,
+                        "JSON_SMUGGLING_ATTEMPT",
+                        &err_msg,
+                    );
+                }
+                return Err(PolicyError::ForbiddenNamespace(format!(
+                    "Invalid or smuggled JSON payload: {}",
+                    err_msg
+                )));
+            }
+        };
+
+        // Lock 4: Evaluate JSON-Pointer Value Predicates & Rolling Hourly Velocity Budgets
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        for pred in &matching_predicates {
+            let Some(field_val) = json_tree.pointer(&pred.pointer) else {
+                if pred.required {
+                    self.trigger_quarantine(
+                        agent_hex,
+                        namespace,
+                        "PAYLOAD_PREDICATE_BREACH",
+                        &format!("Missing required JSON field '{}'", pred.pointer),
+                    );
+                    return Err(PolicyError::ForbiddenNamespace(format!(
+                        "Missing required JSON field '{}'",
+                        pred.pointer
+                    )));
+                }
+                continue;
+            };
+
+            // Numeric Bounds & Rolling Budget Check
+            if pred.min_value.is_some() || pred.max_value.is_some() || pred.max_hourly_sum.is_some()
+            {
+                let Some(num) = field_val.as_f64() else {
+                    self.trigger_quarantine(
+                        agent_hex,
+                        namespace,
+                        "PAYLOAD_PREDICATE_BREACH",
+                        &format!("Field '{}' must be a number", pred.pointer),
+                    );
+                    return Err(PolicyError::ForbiddenNamespace(format!(
+                        "Field '{}' must be numeric",
+                        pred.pointer
+                    )));
+                };
+
+                if let Some(min_v) = pred.min_value {
+                    if num < min_v {
+                        self.trigger_quarantine(
+                            agent_hex,
+                            namespace,
+                            "PAYLOAD_PREDICATE_BREACH",
+                            &format!(
+                                "Field '{}' ({}) below min_value ({})",
+                                pred.pointer, num, min_v
+                            ),
+                        );
+                        return Err(PolicyError::ForbiddenNamespace(format!(
+                            "Field '{}' ({}) violates min_value ({})",
+                            pred.pointer, num, min_v
+                        )));
+                    }
+                }
+
+                if let Some(max_v) = pred.max_value {
+                    if num > max_v {
+                        self.trigger_quarantine(
+                            agent_hex,
+                            namespace,
+                            "PAYLOAD_PREDICATE_BREACH",
+                            &format!(
+                                "Field '{}' ({}) exceeds max_value cap ({})",
+                                pred.pointer, num, max_v
+                            ),
+                        );
+                        return Err(PolicyError::ForbiddenNamespace(format!(
+                            "Field '{}' ({}) exceeds max_value cap ({})",
+                            pred.pointer, num, max_v
+                        )));
+                    }
+                }
+
+                if let Some(hourly_cap) = pred.max_hourly_sum {
+                    let ledger_key = format!("{}:{}:{}", agent_hex, namespace, pred.pointer);
+                    let queue_entry = self
+                        .budget_ledger
+                        .entry(ledger_key)
+                        .or_insert_with(|| Mutex::new(VecDeque::new()));
+                    let mut queue = queue_entry.lock();
+
+                    // Evict entries older than 3,600 seconds (1 hour)
+                    let cutoff = now_secs.saturating_sub(3600);
+                    while let Some(&(ts, _)) = queue.front() {
+                        if ts < cutoff {
+                            queue.pop_front();
+                        } else {
+                            break;
+                        }
+                    }
+
+                    let current_hourly_sum: f64 = queue.iter().map(|(_, amt)| *amt).sum();
+                    if current_hourly_sum + num > hourly_cap {
+                        drop(queue);
+                        drop(queue_entry);
+                        self.trigger_quarantine(
+                            agent_hex,
+                            namespace,
+                            "VELOCITY_BUDGET_BREACH",
+                            &format!(
+                                "Cumulative 1h sum ({}) for '{}' exceeds max_hourly_sum ({})",
+                                current_hourly_sum + num,
+                                pred.pointer,
+                                hourly_cap
+                            ),
+                        );
+                        return Err(PolicyError::ForbiddenNamespace(format!(
+                            "Cumulative 1h budget ({}) exceeded for '{}'",
+                            hourly_cap, pred.pointer
+                        )));
+                    }
+
+                    queue.push_back((now_secs, num));
+                }
+            }
+
+            // String / Value Allowlist Check
+            if !pred.allowed_values.is_empty() {
+                let val_str = match field_val {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                if !pred.allowed_values.contains(&val_str) {
+                    self.trigger_quarantine(
+                        agent_hex,
+                        namespace,
+                        "PAYLOAD_PREDICATE_BREACH",
+                        &format!(
+                            "Field '{}' value '{}' not in allowed_values {:?}",
+                            pred.pointer, val_str, pred.allowed_values
+                        ),
+                    );
+                    return Err(PolicyError::ForbiddenNamespace(format!(
+                        "Field '{}' value '{}' is not permitted",
+                        pred.pointer, val_str
+                    )));
+                }
+            }
+        }
+
+        Ok(Some(json_tree))
+    }
+}
+
+// ==============================================================================
+// STRICT ANTI-SMUGGLING JSON PARSER (Rejects Duplicate Keys at Any Depth)
+// ==============================================================================
+
+pub struct StrictJson(pub Value);
+
+impl<'de> Deserialize<'de> for StrictJson {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct StrictVisitor;
+
+        impl<'de> Visitor<'de> for StrictVisitor {
+            type Value = StrictJson;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("any valid JSON value without duplicate object keys")
+            }
+
+            fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E> {
+                Ok(StrictJson(Value::Bool(v)))
+            }
+
+            fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E> {
+                Ok(StrictJson(Value::Number(v.into())))
+            }
+
+            fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E> {
+                Ok(StrictJson(Value::Number(v.into())))
+            }
+
+            fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                let n = serde_json::Number::from_f64(v)
+                    .ok_or_else(|| de::Error::custom("Infinite or NaN float in JSON"))?;
+                Ok(StrictJson(Value::Number(n)))
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> {
+                Ok(StrictJson(Value::String(v.to_string())))
+            }
+
+            fn visit_string<E>(self, v: String) -> Result<Self::Value, E> {
+                Ok(StrictJson(Value::String(v)))
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(StrictJson(Value::Null))
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut vec = Vec::new();
+                while let Some(StrictJson(elem)) = seq.next_element()? {
+                    vec.push(elem);
+                }
+                Ok(StrictJson(Value::Array(vec)))
+            }
+
+            fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut map = Map::new();
+                while let Some(key) = access.next_key::<String>()? {
+                    if map.contains_key(&key) {
+                        return Err(de::Error::custom(format!(
+                            "JSON_SMUGGLING_DETECTED: Duplicate key '{}' in JSON object",
+                            key
+                        )));
+                    }
+                    let StrictJson(val) = access.next_value::<StrictJson>()?;
+                    map.insert(key, val);
+                }
+                Ok(StrictJson(Value::Object(map)))
+            }
+        }
+
+        deserializer.deserialize_any(StrictVisitor)
+    }
+}
+
+/// Parses raw JSON bytes while strictly rejecting duplicate keys at any nesting level.
+pub fn parse_json_strict_no_dup_keys(raw_bytes: &[u8]) -> Result<Value, String> {
+    let StrictJson(val) =
+        serde_json::from_slice::<StrictJson>(raw_bytes).map_err(|e| e.to_string())?;
+    Ok(val)
+}
+
+/// Scrubs configured RFC 6901 JSON Pointers in-place, replacing sensitive fields
+/// with `"[REDACTED_BY_POLICY]"` before the payload ever touches the WAL.
+pub fn redact_json_pointers(val: &mut Value, pointers: &[String]) {
+    for ptr in pointers {
+        if let Some(target) = val.pointer_mut(ptr) {
+            *target = Value::String("[REDACTED_BY_POLICY]".to_string());
+        }
     }
 }
