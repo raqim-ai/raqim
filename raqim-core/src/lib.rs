@@ -8,6 +8,7 @@ pub mod merkle;
 pub mod otel;
 pub mod policy;
 pub mod registry;
+pub mod token;
 pub mod utils;
 pub mod wal;
 pub mod witness;
@@ -147,7 +148,7 @@ impl ExecutionRecord {
     }
 
     pub fn is_redacted(&self) -> bool {
-        self.payload_bytes.is_empty() && self.payload_salt == [0u8; 16]
+        self.payload_salt == [0u8; 16]
     }
 
     /// Helper to display payload as UTF-8 text preview
