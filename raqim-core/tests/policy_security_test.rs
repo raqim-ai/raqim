@@ -1,3 +1,4 @@
+use dashmap::DashMap;
 use ed25519_dalek::{Signer, SigningKey};
 use rand_core::OsRng;
 use raqim_core::policy::{
@@ -50,6 +51,7 @@ fn test_unauthenticated_spoof_never_quarantines_honest_agent_and_two_tier_rate_l
             blocked_namespaces: vec!["/finance/restricted/*".to_string()],
             max_tps: 0,
             burst_capacity: 3,
+            predicates: Vec::new(),
         },
     );
     let cfg = PolicyConfigFile { groups };

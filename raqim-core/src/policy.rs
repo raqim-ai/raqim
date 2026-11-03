@@ -185,7 +185,7 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupPolicy {
     pub allowed_namespaces: Vec<String>,
     pub blocked_namespaces: Vec<String>,
@@ -232,7 +232,7 @@ impl PolicyConfigFile {
                     blocked_namespaces: cfg.blocked_namespaces.clone(),
                     max_tps: cfg.max_tps,
                     burst_capacity: cfg.burst_capacity,
-                    predicates: cfg.predicates,
+                    predicates: cfg.predicates.clone(),
                 },
             );
         }
