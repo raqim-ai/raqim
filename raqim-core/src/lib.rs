@@ -4,6 +4,7 @@ pub mod cold_store;
 pub mod compactor;
 pub mod config;
 pub mod effect_store;
+pub mod egress;
 pub mod merkle;
 pub mod otel;
 pub mod policy;
