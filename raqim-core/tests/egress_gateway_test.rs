@@ -231,3 +231,132 @@ async fn test_egress_gateway_secret_injection_redaction_sse_replay_and_in_doubt(
     let agent_hex = "11223344556677889900aabbccddeeff";
     let workload_token =
         mint_workload_token(&master_key, agent_hex, "fintech_group", 3600).unwrap();
+
+    // =========================================================================
+    // TEST 1: Live Paystack Egress Call (Secret Injection + Redaction)
+    // =========================================================================
+    let req_body = br#"{"amount": 25000, "card": {"cvv": "999"}}"#;
+    let req1 = Request::builder()
+        .method("POST")
+        .uri("/v1/egress/paystack/transfer")
+        .header("authorization", format!("Bearer {}", workload_token))
+        .header("content-type", "application/json")
+        .body(Body::from(req_body.to_vec()))
+        .unwrap();
+
+    let resp1 = app.clone().oneshot(req1).await.unwrap();
+    assert_eq!(resp1.status(), StatusCode::OK);
+    assert_eq!(resp1.headers().get("x-raqim-replay").unwrap(), "MISS");
+    assert_eq!(upstream_hits.load(Ordering::SeqCst), 1);
+
+    // =========================================================================
+    // TEST 2: CI Secret-Grep & CVV Redaction Audit on Disk Files
+    // =========================================================================
+    let wal_disk_bytes = std::fs::read(wal_path).unwrap();
+    let wal_disk_str = String::from_utf8_lossy(&wal_disk_bytes);
+    assert!(
+        !wal_disk_str.contains(CANARY_SECRET),
+        "SECURITY BREACH: Upstream secret leaked into WAL bytes on disk!"
+    );
+    assert!(
+        !wal_disk_str.contains("\"999\""),
+        "PRIVACY BREACH: Unredacted CVV '999' leaked into WAL bytes on disk!"
+    );
+    assert!(
+        wal_disk_str.contains("[REDACTED_BY_POLICY]"),
+        "WAL must contain '[REDACTED_BY_POLICY]' in place of '/card/cvv'"
+    );
+
+    // =========================================================================
+    // TEST 3: Gateway-Level $0.00 Deterministic Replay (`X-Raqim-Mode: replay`)
+    // =========================================================================
+    let req_replay = Request::builder()
+        .method("POST")
+        .uri("/v1/egress/paystack/transfer")
+        .header("authorization", format!("Bearer {}", workload_token))
+        .header("x-raqim-mode", "replay")
+        .header("content-type", "application/json")
+        .body(Body::from(req_body.to_vec()))
+        .unwrap();
+
+    let resp_replay = app.clone().oneshot(req_replay).await.unwrap();
+    assert_eq!(resp_replay.status(), StatusCode::OK);
+    assert_eq!(resp_replay.headers().get("x-raqim-replay").unwrap(), "HIT");
+    // Verify upstream_hits is STILL 1 (upstream was never called during replay!)
+    assert_eq!(
+        upstream_hits.load(Ordering::SeqCst),
+        1,
+        "Replay mode must not contact the upstream server!"
+    );
+
+    // =========================================================================
+    // TEST 4: Zero-Stall SSE Streaming Byte-Tee & Stream Replay
+    // =========================================================================
+    let sse_req = Request::builder()
+        .method("POST")
+        .uri("/v1/egress/openai/v1/chat/completions")
+        .header("authorization", format!("Bearer {}", workload_token))
+        .header("content-type", "application/json")
+        .body(Body::from(br#"{"model":"gpt-4o","stream":true}"#.to_vec()))
+        .unwrap();
+
+    let sse_resp = app.clone().oneshot(sse_req).await.unwrap();
+    assert_eq!(sse_resp.status(), StatusCode::OK);
+    let streamed_bytes = axum::body::to_bytes(sse_resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&streamed_bytes).contains("Bismillah"));
+
+    // Replay the SSE stream for $0.00!
+    let sse_replay_req = Request::builder()
+        .method("POST")
+        .uri("/v1/egress/openai/v1/chat/completions")
+        .header("authorization", format!("Bearer {}", workload_token))
+        .header("x-raqim-mode", "replay")
+        .header("content-type", "application/json")
+        .body(Body::from(br#"{"model":"gpt-4o","stream":true}"#.to_vec()))
+        .unwrap();
+
+    let sse_replay_resp = app.clone().oneshot(sse_replay_req).await.unwrap();
+    assert_eq!(
+        sse_replay_resp.headers().get("x-raqim-replay").unwrap(),
+        "HIT"
+    );
+    let replayed_sse_bytes = axum::body::to_bytes(sse_replay_resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(streamed_bytes, replayed_sse_bytes);
+
+    // =========================================================================
+    // TEST 5: Mid-Call Connection Failure -> Surfaces as `IN_DOUBT` Intent!
+    // =========================================================================
+    assert_eq!(effect_store.get_in_doubt_intents().len(), 0);
+
+    let broken_req = Request::builder()
+        .method("POST")
+        .uri("/v1/egress/broken_bank/wire")
+        .header("authorization", format!("Bearer {}", workload_token))
+        .header("content-type", "application/json")
+        .body(Body::from(br#"{"amount": 5000}"#.to_vec()))
+        .unwrap();
+
+    let broken_resp = app.oneshot(broken_req).await.unwrap();
+    assert_eq!(broken_resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let in_doubt = effect_store.get_in_doubt_intents();
+    assert_eq!(
+        in_doubt.len(),
+        1,
+        "Failed mid-flight upstream call MUST leave its Write-Ahead Intent in IN_DOUBT!"
+    );
+    assert_eq!(in_doubt[0].namespace, "/egress/broken_bank/wire");
+
+    // Cleanup
+    drop(wal);
+    let _ = wal_handle.await;
+    let _ = std::fs::remove_file(wal_path);
+    let _ = std::fs::remove_file(journal_path);
+    let _ = std::fs::remove_file(checkpoint_path);
+    let _ = std::fs::remove_file(manifest_path);
+    let _ = std::fs::remove_dir_all(cold_dir);
+}

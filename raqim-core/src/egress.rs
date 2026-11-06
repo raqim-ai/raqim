@@ -1,7 +1,7 @@
 use axum::body::{Body, Bytes};
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use blake3::Hasher;
 use futures::stream::{self, StreamExt};
 use serde_json::Value;
@@ -15,7 +15,7 @@ use crate::token::{verify_workload_token, TOKEN_PREFIX};
 /// Maximum request/response bodu size buffered for non-streaming REST calss (16MiB)
 pub const MAX_EGRESS_BODY_BYTES: usize = 16 * 1024 * 1024;
 // Max accumulated captured size for streaming SSE response (4 MiB)
-pub const MAX_SSE_CAPTUREED_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_SSE_CAPTURE_BYTES: usize = 4 * 1024 * 1024;
 
 struct SseTeeState<S> {
     inner_stream: S,
@@ -30,7 +30,7 @@ struct SseTeeState<S> {
 }
 
 /// Extract the `rqm_v1` workload token
-fn extract_workload_token(header: &HeaderMap) -> Result<String, ApiError> {
+fn extract_workload_token(headers: &HeaderMap) -> Result<String, ApiError> {
     if let Some(auth_val) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
         if let Some(stripped) = auth_val.strip_prefix("Bearer ") {
             let trimmed = stripped.trim();
@@ -159,7 +159,7 @@ pub async fn egress_proxy_handler(
                 derive_http_call_signature(method.as_str(), &namespace, query_str, &body_bytes);
             let redacted_req = redact_bytes_for_wal(&body_bytes, &connector_cfg.redact_pointers);
             let _ = state
-                .mem_router
+                .effect_store
                 .record_intent_or_denial(
                     agent_id,
                     step_ordinal,
@@ -307,7 +307,7 @@ pub async fn egress_proxy_handler(
             agent_id,
             step_ordinal,
             call_signature_hash,
-            namespace,
+            namespace: namespace.to_string(),
         };
 
         let tee_stream = stream::unfold(initial_tee_state, |mut st| async move {
@@ -379,7 +379,7 @@ pub async fn egress_proxy_handler(
     if status_code.is_success() {
         let wal_resp_bytes = redact_bytes_for_wal(&resp_bytes, &connector_cfg.redact_pointers);
         let outcome_tx_id = state
-            .mem_router
+            .effect_store
             .record_effect(
                 agent_id,
                 step_ordinal,
