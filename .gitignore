@@ -10,6 +10,7 @@ trash.txt
 archive
 /agent_keys
 *.so
+*.bin
 *.pyc
 __pycache__/
 *.pem

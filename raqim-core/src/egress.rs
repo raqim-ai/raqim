@@ -22,7 +22,7 @@ struct SseTeeState<S> {
     accumulated: Vec<u8>,
     errored: bool,
     sealed: bool,
-    mem_router: Arc<EffectStore>,
+    effect_store: Arc<EffectStore>,
     agent_id: [u8; 16],
     step_ordinal: u64,
     call_signature_hash: [u8; 32],
@@ -317,7 +317,7 @@ pub async fn egress_proxy_handler(
             accumulated: Vec::with_capacity(4096),
             errored: false,
             sealed: false,
-            mem_router: state.effect_store.clone(),
+            effect_store: state.effect_store.clone(),
             agent_id,
             step_ordinal,
             call_signature_hash,
@@ -352,7 +352,7 @@ pub async fn egress_proxy_handler(
                     if !st.errored {
                         let captured = std::mem::take(&mut st.accumulated);
                         let _ = st
-                            .mem_router
+                            .effect_store
                             .record_effect(
                                 st.agent_id,
                                 st.step_ordinal,
