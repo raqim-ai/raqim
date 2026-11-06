@@ -223,7 +223,7 @@ pub async fn egress_proxy_handler(
 
     // 7. Commit Write-Ahead `ExecutionStage::Intent` to NVMe WAL (`fdatasync`)!
     let intent_tx_id = state
-        .mem_router
+        .effect_store
         .record_intent_or_denial(
             agent_id,
             step_ordinal,
@@ -303,7 +303,7 @@ pub async fn egress_proxy_handler(
             accumulated: Vec::with_capacity(4096),
             errored: false,
             sealed: false,
-            mem_router: state.mem_router.clone(),
+            mem_router: state.effect_store.clone(),
             agent_id,
             step_ordinal,
             call_signature_hash,

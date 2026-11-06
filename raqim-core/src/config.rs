@@ -47,6 +47,41 @@ pub struct CliArgs {
     pub worm_remote_url: Option<String>,
 }
 
+/// Declarrative config for a named upstream reverse-proxy connectoe
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConnectorConfig {
+    /// Connector identifier in `/v1/egress/{name}/{*path}` (e.g., "openai", "paystack").
+    pub name: String,
+    /// Base upstream URL (e.g., "https://api.openai.com" or "https://api.paystack.co").
+    pub upstream_url: String,
+    /// Name of the host environment variable holding the real API secret (e.g., "OPENAI_API_KEY").
+    pub secret_env: String,
+    /// Upstream HTTP header name for credential injection (default: "Authorization").
+    #[serde(default = "default_auth_header")]
+    pub auth_header: String,
+    /// Prefix prepended to the secret value (default: "Bearer "; use "" for raw key headers like "x-api-key").
+    #[serde(default = "default_auth_prefix")]
+    pub auth_prefix: String,
+    /// Optional idempotency header name (e.g., Some("Idempotency-Key")).
+    /// When set, Raqim automatically injects the write-ahead Intent's unique UUIDv7 `tx_id`!
+    pub idempotency_header: Option<String>,
+    /// Explicit method + path allowlist (e.g., ["POST /v1/chat/completions", "POST /transfer"]).
+    /// Any route not matching this list is rejected and quarantined!
+    #[serde(default)]
+    pub allowed_routes: Vec<String>,
+    /// RFC 6901 JSON Pointers (e.g., ["/card/cvv", "/bvn"]) to scrub before writing to WAL.
+    #[serde(default)]
+    pub redact_pointers: Vec<String>,
+}
+
+fn default_auth_header() -> String {
+    "Authorization".to_string()
+}
+
+fn default_auth_prefix() -> String {
+    "Bearer ".to_string()
+}
+
 /// Unified Configuration Schema ( Used identically for both TOML read & write )
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct RaqimConfig {
@@ -62,6 +97,7 @@ pub struct RaqimConfig {
     pub cold_store_path: String,
     pub admin_socket_path: String,
     pub worm_remote_url: Option<String>,
+    pub connectors: Vec<ConnectorConfig>,
 }
 
 impl Default for RaqimConfig {
@@ -79,6 +115,7 @@ impl Default for RaqimConfig {
             cold_store_path: "./vault/cold_segments".to_string(),
             admin_socket_path: "./vault/admin.sock".to_string(),
             worm_remote_url: None,
+            connectors: Vec::new(),
         }
     }
 }
@@ -147,5 +184,9 @@ impl RaqimConfig {
         }
 
         config
+    }
+
+    pub fn get_connector(&self, name: &str) -> Option<&ConnectorConfig> {
+        self.connectors.iter().find(|c| c.name == name)
     }
 }
