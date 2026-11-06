@@ -140,7 +140,8 @@ pub async fn egress_proxy_handler(
     let is_replay_mode = headers
         .get("x-raqim-mode")
         .and_then(|v| v.to_str().ok())
-        .map(|m| m.eq_ignore_ascii);
+        .map(|m| m.eq_ignore_ascii_case("replay"))
+        .unwrap_or(false);
 
     // 3. Evaluate the 4 Concentric Locks in `PolicyEngine`
     let validated_json_opt = match state.policy.authorize_egress_request(
@@ -195,23 +196,36 @@ pub async fn egress_proxy_handler(
     let call_signature_hash =
         derive_http_call_signature(method.as_str(), &namespace, query_str, &wal_request_bytes);
 
-    // 4. Prepare Canonical Outbound Bytes (Defeats JSON key-order & smuggling drift)
-    //    and Redacted WAL Request Bytes (Guarantees PII/CVVs never touch disk)
-    let (canonical_outbound_body, wal_request_bytes) = match validated_json_opt {
-        Some(mut valid_tree) => {
-            let outbound = serde_json::to_vec(&valid_tree)
-                .map_err(|e| ApiError::InternalServerError(e.to_string()))?;
-            if !connector_cfg.redact_pointers.is_empty() {
-                redact_json_pointers(&mut valid_tree, &connector_cfg.redact_pointers);
-            }
-            let wal_bytes = serde_json::to_vec(&valid_tree).unwrap_or_else(|_| outbound.clone());
-            (outbound, wal_bytes)
-        }
-        None => (body_bytes.to_vec(), body_bytes.to_vec()),
-    };
+    // 5. Gateway-Level $0.00 Deterministic Replay Check (`X-Raqim-Mode: replay`)
+    if is_replay_mode {
+        if let Some(cached_record) =
+            state
+                .effect_store
+                .get_effect(&agent_id, step_ordinal, &call_signature_hash)
+        {
+            let content_type = if cached_record.payload_bytes.starts_with(b"data:") {
+                "text/event-stream"
+            } else {
+                "application/json"
+            };
 
-    let call_signature_hash =
-        derive_http_call_signature(method.as_str(), &namespace, query_str, &wal_request_bytes);
+            let mut resp = Response::new(Body::from(cached_record.payload_bytes));
+            *resp.status_mut() = StatusCode::OK;
+            resp.headers_mut().insert(
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static(content_type),
+            );
+            resp.headers_mut().insert(
+                HeaderName::from_static("x-raqim-replay"),
+                HeaderValue::from_static("HIT"),
+            );
+            resp.headers_mut().insert(
+                HeaderName::from_static("x-raqim-tx-id"),
+                HeaderValue::from_str(&format!("{:032x}", cached_record.tx_id)).unwrap(),
+            );
+            return Ok(resp);
+        }
+    }
 
     // 6. Resolve Upstream Secret from Raqim's Vault/Environment BEFORE network call
     let upstream_secret = std::env::var(&connector_cfg.secret_env).map_err(|_| {
