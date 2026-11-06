@@ -4,7 +4,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{
     extract::{FromRequestParts, State},
     http::{request::Parts, StatusCode},
-    routing::{get, post},
+    routing::{any, get, post},
     Json,
 };
 use base64::Engine;
@@ -23,6 +23,7 @@ use tokio::sync::broadcast::Sender;
 
 use crate::cold_store::ColdStore;
 use crate::compactor::WalCompactor;
+use crate::egress::egress_proxy_handler;
 use crate::merkle::{InclusionProof, MerkleEngine};
 use crate::otel::{self, OtelExportRequest};
 use crate::policy::{PolicyError, QuarantineRecord};
@@ -969,6 +970,10 @@ pub fn build_data_router(state: ApiState) -> axum::Router {
         .route(
             "/health",
             get(|| async { Json(json!({"status": "ok", "version": "0.2.0"})) }),
+        )
+        .route(
+            "/v1/egress/{connector}/{*subpath}",
+            any(egress_proxy_handler),
         )
         .route("/v1/state/proof/{tx_id}", get(get_state_proof_handler))
         .route("/v1/effect/preflight", post(preflight_effect_handler))
