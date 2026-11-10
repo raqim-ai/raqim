@@ -352,6 +352,10 @@ async fn test_egress_gateway_secret_injection_redaction_sse_replay_and_in_doubt(
     assert_eq!(in_doubt[0].namespace, "/egress/broken_bank/wire");
 
     // Cleanup
+    let _ = wal
+        .cmd_sender
+        .send(raqim_core::wal::WalCommand::Shutdown)
+        .await;
     drop(wal);
     let _ = wal_handle.await;
     let _ = std::fs::remove_file(wal_path);
