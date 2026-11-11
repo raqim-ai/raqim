@@ -54,38 +54,58 @@ enum Commands {
         action: PolicyAction,
     },
 
-    /// Temporal Routing & Reality Forking mechanics
-    TimeTravel {
-        #[arg(short, long)]
-        agent_id: String,
+    /// System Health, Key PErmission Audit & In-Doubt crash Reconciliation
+    Doctor {
 
-        #[arg(short, long)]
-        tx_id: Option<String>,
+        /// Only display unresolved in-doubt intents 
+        #[arg(long)]
+        in_doubt: bool,
+
     },
 
-    /// Swarm Infrastructure Observability and Telemetry Mapping
-    Cluster {
-        #[command(subcommand)]
-        action: ClusterAction,
+    /// Live Terminal Stream of Intents, outcomes, and policy Denials 
+    Tail {
+        /// Number of historical records to fetch initially 
+        #[arg(short, long, default_value_t = 25)]
+        limit: usize, 
+    }
+
+    /// Execute NDPA / GDPR In-place PII Erasure on a Transaction ID 
+    Redact {
+        
+        tx_id: String, 
+    },
+
+    /// Trigger manual 2PC WAL Rotation & ColdStore Compaction 
+    Compact, 
+
+    /// Export an Offline-Verifiable Cryptographic Evidence bundle for an agent 
+    Export {
+        /// 32-char hex Agent ID 
+        #[arg(short, long)]
+
+        /// Target output directory for the evidence bundle 
+        #[arg(short, long)]
+        out: Option<String> 
     },
 }
 
 #[derive(Subcommand)]
 enum KeyAction {
-    /// Batch forge cryptographic agents with signed CA
+    /// Offline forge of agent Ed25519 keys (.pem), certificates (.cert) and gateway tokens (.token)
     Forge {
-        // Base name for the agents (e.g finance_bot)
         #[arg(short, long)]
         name: String,
 
-        /// The security group mapping declared in Policy.toml
         #[arg(short, long)]
         group: String,
 
         #[arg(short, long, default_value_t = 1)]
         count: u32,
 
-        /// Target directory for the atomic artifact
+        #[arg(long, default_value_t = 30)]
+        ttl_days: u64, 
+
         #[arg(short, long, default_value = "./ca-keys")]
         out_dir: String,
     },
@@ -95,15 +115,93 @@ enum KeyAction {
 enum PolicyAction {
     List,
 
-    Lift {
-        agent_id: String,
-        #[arg(
-            short,
-            long,
-            default_value = "Quarantine lifted via administrative CLI"
-        )]
-        reason: String,
-    },
+    Lift {agent_id: String}, 
+
+    Metrics 
+}
+
+/// Sends an uthenticated HTTP/1.1 request over the local Unix Domain Socket 
+#[cfg(unix)]
+async fn send_admin_uds_request(socket_path: &str, admin_secret: &str, method: &str, path: &str, json_body: Option<&Value>) -> Result<(u16, String), anyhow::Error> {
+
+    let mut stream = UnixStream::connect(socket_path).await.map_err(|e| {
+        anyhow::anyhow!("Failed to connect to Admin Unix Socket '{}' ({}). Is raqim-core running?", socket_path, e)
+    } )?;
+
+    let body_bytes = match json_body {
+        Some(val) => serde_json::to_vec(val)?, 
+        None => Vec::new()
+    };
+
+    let req_header = format!( "{} {} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", method, path, admin_secret.trim(), body_bytes.len() );
+
+    stream.write_all(req_header.as_bytes()).await?; 
+    if !body_bytes.is_empty() {
+        stream.write_all(&body_bytes).await?;
+    }
+    stream.flush().await?;
+
+    let mut raw_resp = Vec::new(); 
+    stream.read_to_end(&mut raw_resp).await?; 
+    let resp_str = String::from_utf8_lossy(&raw_resp).to_string();
+
+    let (headers_part, body_part) = resp_str.split_once("\r\n\r\n").ok_or_else(|| anyhow::anyhow!("Malformed HTTP response from admin socket"))?;
+    
+    let status_line = headers_part.lines().next().unwrap_or("");
+    let status_code: u16 = status_line.split_whitespace().nth(1).and_then(|s| s.parse().ok() ).unwrap_or(500);
+
+    // Handle chunked transfer encoding if present, otherwise return raw body 
+    let clean_body = if headers_part.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+        decoded_chunked_body(body_part)
+    } else {
+        body_part.to_string()
+    }
+
+    Ok((status_code, clean_body))
+}
+
+fn decode_chunked_body(raw: &str) -> String {
+    let mut out = String::new();
+    let mut rest = raw;
+    while let Some((len_hex, after_len)) = rest.split_once("\r\n") {
+        let Ok(chunk_len) = usize::from_str_radix(len_hex.trim(), 16) else {
+            break;
+        };
+        if chunk_len == 0 {
+            break;
+        }
+        if after_len.len() >= chunk_len {
+            out.push_str(&after_len[..chunk_len]);
+            rest = &after_len[chunk_len..];
+            if rest.starts_with("\r\n") {
+                rest = &rest[2..];
+            }
+        } else {
+            break;
+        }
+    }
+    if out.is_empty() {
+        raw.to_string()
+    } else {
+        out
+    }
+}
+
+fn load_admin_secret(secret_path: &str) -> Result<String, anyhow::Error> {
+    if let Ok(env_val) = std::env::var("RAQIM_ADMIN_SECRET") {
+        if !env_val.trim().is_empty() {
+            return Ok(env_val.trim().to_string());
+        }
+    }
+    fs::read_to_string(secret_path)
+        .map(|s| s.trim().to_string())
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Could not read admin secret at '{}' ({}). Set RAQIM_ADMIN_SECRET or start raqim-core first.",
+                secret_path,
+                e
+            )
+        })
 }
 
 #[derive(Subcommand)]
