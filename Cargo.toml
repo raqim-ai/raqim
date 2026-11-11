@@ -2,8 +2,7 @@
 resolver = "3"
 members = [
     "raqim-core",
-    "raqim-cli"
-, "raqim-mcp", "raqim-py", "raqim-siege"]
+    "raqim-cli", "raqim-py", "raqim-siege"]
 
 [patch.crates-io]
 # This must be the full path to the repository

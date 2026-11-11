@@ -4,15 +4,15 @@ version = "0.2.0"
 edition = "2021"
 
 [dependencies]
-raqim-core = { path = "../raqim-core", default-features = false }
+raqim-core = {path = "../raqim-core", default-features = false}
 rkyv = "0.8.15"
 blake3 = "1.5"
 tokio = { version = "1", features = ["full"] }
 serde_json = "1.0.149"
-reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls-tls"] }
-clap = { version = "4.5", features = ["derive", "env"] }
 serde = { version = "1.0", features = ["derive"] }
-hex = "0.4"
-ed25519-dalek = { version = "2.2.0", default-features = false, features = ["rand_core", "serde"] }
-rand_core = { version = "0.6", features = ["getrandom"] }
+hex =  "0.4"
+rand = "0.8"
 postcard = "1.1.3"
+clap = { version = "4.5", features = ["derive", "env"] } 
+ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
+reqwest = { version = "0.13.2", features = ["blocking", "json"] }
