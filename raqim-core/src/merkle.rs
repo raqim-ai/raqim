@@ -551,7 +551,7 @@ impl MerkleEngine {
             if sibling_bytes.len() != 32 {
                 return false;
             }
-
+            
             if index % 2 == 0 {
                 if index + 1 < level_len {
                     let mut hasher = Hasher::new_derive_key("raqim.merkle.v1.node");

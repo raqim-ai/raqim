@@ -1,52 +1,43 @@
-services: 
-  raqim-daemon: 
-    build: 
+services:
+  raqim-gateway:
+    build:
       context: .
-      dockerfile: Dockerfile.fast
-    user: "1000:1000"
-    image: raqim/core:v0.1.0
-    container_name: raqim-core-daemon
-    restart: unless-stopped
-    dns: 
-      - 8.8.8.8
-      - 1.1.1.1
-    ports: 
-      - "8080:8080"
-      - "8081:8081"
-      - "7447:7447"
+      dockerfile: Dockerfile
+    container_name: raqim-gateway
+    environment:
+      - RAQIM_ENV=production
+      - PAYSTACK_SECRET_KEY=${PAYSTACK_SECRET_KEY:-sk_live_SOVEREIGN_VAULT_SECRET_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-sk_proj_SOVEREIGN_OPENAI_SECRET_KEY}
     volumes:
-      - ./data:/var/lib/raqim/data
-      - ./ca-keys:/var/lib/raqim/ca-keys
-      - ./vault:/var/lib/raqim/vault
-      - ./aegis.toml:/var/lib/raqim/aegis.toml
-      - ./raqim.toml:/var/lib/raqim/raqim.toml
-      - ./.fastembed_cache:/var/lib/raqim/.fastembed_cache
-    environment: 
-    - RUST_LOG=info
-    - RAQIM_PORT=8080
-    - HOME=/var/lib/raqim
-    - FASTEMBED_CACHE_PATH=/var/lib/raqim/data/.cache
+      - ./ca-keys:/app/ca-keys:ro
+      - ./vault:/app/vault
+      - ./raqim.toml:/app/raqim.toml:ro
+      - ./policy.toml:/app/policy.toml:ro
+    networks:
+      - agent_jail_net
+      - egress_wan_net
+    ports:
+      - "127.0.0.1:8081:8081"
 
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8081/v1/dashboard/cards || exit 1"] 
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 15s
+  compromised-agent:
+    image: python:3.12-slim
+    container_name: compromised-agent
+    depends_on:
+      - raqim-gateway
+    environment:
+      # Notice: ZERO real Paystack or OpenAI keys exist in this container!
+      - OPENAI_BASE_URL=http://raqim-gateway:8081/v1/egress/openai/v1
+      - PAYSTACK_BASE_URL=http://raqim-gateway:8081/v1/egress/paystack
+      - RAQIM_WORKLOAD_TOKEN=${RAQIM_WORKLOAD_TOKEN}
+    volumes:
+      - ./scripts:/app/scripts:ro
+    networks:
+      - agent_jail_net
+    command: ["python3", "/app/scripts/compromised_agent_sim.py"]
 
-    # The Frontend
-  raqim-console: 
-    build: 
-      context: ./raqim-console
-      dockerfile: Dockerfile.fast
-    image: raqim/console:v0.1.0
-    container_name: raqim-console-ui
-    restart: unless-stopped
-    ports: 
-    - "3000:3000"
-    environment: 
-    - NEXT_PUBLIC_RAQIM_DAEMON_URL=http://localhost:8081
-    - RAQIM_INTERNAL_DAEMON_URL=http://raqim-daemon:8081
-    depends_on: 
-      raqim-daemon: 
-        condition: service_healthy
+networks:
+  agent_jail_net:
+    driver: bridge
+    internal: true 
+  egress_wan_net:
+    driver: bridge

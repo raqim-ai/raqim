@@ -66,7 +66,7 @@ flowchart TB
         WORM["External WORM / TSA (not wired)"]
         UP["Upstream APIs (Phase 1, not built)"]
     end
-    AG -->|"plaintext TCP, loopback by default"| TCP
+i    AG -->|"plaintext TCP, loopback by default"| TCP
     AG -->|"plaintext HTTP, CORS *"| HTTP
     TCP --> PE --> WAL
     HTTP --> PE

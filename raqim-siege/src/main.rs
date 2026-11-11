@@ -205,7 +205,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     intent_path: agent.namespace.clone(),
                     public_key: agent.pub_key_bytes,
                     signature: signature.to_bytes(),
-                    state_bytes,
+                    state_bytes, 
                     capability_cert: agent.cert_bytes.clone(),
                 };
 
