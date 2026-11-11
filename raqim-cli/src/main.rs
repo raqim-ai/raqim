@@ -215,235 +215,112 @@ enum ClusterAction {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let http_client = Client::builder().build()?;
 
     match &cli.command {
-        // 1. Crytographic Key Generation
+
+        // =====================================================================
+        // 1. OFFLINE CRYPTOGRAPHIC KEY & WORKLOAD TOKEN FORGE
+        // =====================================================================
         Commands::Keys {
             action:
                 KeyAction::Forge {
                     name,
                     group,
                     count,
+                    ttl_days,
                     out_dir,
                 },
         } => {
-            println!("==========================================================");
-            println!("Bismillah. Initiating Sovereign Fleet Forge... ");
-            println!("Target Security Group [{}] ", group);
-            println!("Requested Fleet Size [{}]", count);
-            println!("Output Directory [{}]", out_dir);
-            println!("===========================================================");
+            println!("==================================================================");
+            println!("Bismillah. Raqim Offline Cryptographic Identity Forge");
+            println!("Target Group: [{}] | Count: [{}] | TTL: [{} days]", group, count, ttl_days);
+            println!("==================================================================");
 
             let workspace = Path::new(out_dir);
             fs::create_dir_all(workspace)?;
 
-            let mint_url = format!("{}/v1/admin/ca/mint", cli.daemon_url);
-            let mut success_count = 0;
+            // Load or initialize the offline Master Signing Key (`swarm_master.key`)
+            let master_key_path = workspace.join("swarm_master.key");
+            let master_signing_key = if master_key_path.exists() {
+                let bytes = fs::read(&master_key_path)?;
+                let arr: [u8; 32] = bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| "swarm_master.key must be 32 bytes")?;
+                SigningKey::from_bytes(&arr)
+            } else {
+                println!("[FORGE] Initializing new Master Root Key at {:?}", master_key_path);
+                let key = SigningKey::generate(&mut OsRng);
+                fs::write(&master_key_path, key.to_bytes())?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&master_key_path, fs::Permissions::from_mode(0o600))?;
+                }
+                key
+            };
+
+            let ttl_seconds = ttl_days.saturating_mul(86_400);
+            let expiration = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                .saturating_add(ttl_seconds);
 
             for i in 1..=*count {
-                let agent_alias: String = if *count > 1 {
+                let alias = if *count > 1 {
                     format!("{}_{:02}", name, i)
                 } else {
                     name.clone()
                 };
 
-                // Local cryptographic generation
-                let mut csprng = OsRng;
-                let signing_key = SigningKey::generate(&mut csprng);
-                let public_key_bytes = signing_key.verifying_key().to_bytes();
+                let agent_signing_key = SigningKey::generate(&mut OsRng);
+                let pub_key_bytes = agent_signing_key.verifying_key().to_bytes();
 
-                // Identity Hash Derivation
                 let mut hasher = Hasher::new_derive_key("raqim.agent.v1.identity");
-                hasher.update(&public_key_bytes);
-                let mut derived_16_bytes = [0u8; 16];
-                hasher.finalize_xof().fill(&mut derived_16_bytes);
-                let agent_hex = hex::encode(derived_16_bytes);
+                hasher.update(&pub_key_bytes);
+                let mut derived_16 = [0u8; 16];
+                hasher.finalize_xof().fill(&mut derived_16);
+                let agent_hex = hex::encode(derived_16);
 
-                // Request Capability passport from the Daemon Control Plane
-                let payload = json!({"agent_hex": agent_hex.clone(), "group": group.clone() });
+                // 1. Sign binary CapabilityCertificate (for SDK / TCP)
+                let mut cert = CapabilityCertificate {
+                    agent_hex: agent_hex.clone(),
+                    group_name: group.clone(),
+                    expiration_timestamp: expiration,
+                    master_signature: Vec::new(),
+                };
+                let unsigned_bytes = postcard::to_allocvec(&cert)?;
+                cert.master_signature = master_signing_key.sign(&unsigned_bytes).to_bytes().to_vec();
+                let cert_bytes = postcard::to_allocvec(&cert)?;
 
-                let req = http_client.post(&mint_url).json(&payload);
+                // 2. Mint `rqm_v1` Ed25519 Workload Token (for Zero-Secret HTTP Egress Gateway)
+                let workload_token =
+                    mint_workload_token(&master_signing_key, &agent_hex, group, ttl_seconds)?;
 
-                match req.send().await {
-                    Ok(response) if response.status().is_success() => {
-                        let cert_hex: String = response.json().await?;
-                        let cert_bytes = hex::decode(cert_hex)?;
+                let pem_path = workspace.join(format!("{}.pem", alias));
+                let cert_path = workspace.join(format!("{}.cert", alias));
+                let token_path = workspace.join(format!("{}.token", alias));
 
-                        // Atomic bundling in the Workspace
-                        let key_path = workspace.join(format!("{}.pem", agent_alias));
-                        let cert_path = workspace.join(format!("{}.cert", agent_alias));
+                fs::write(&pem_path, agent_signing_key.to_bytes())?;
+                fs::write(&cert_path, &cert_bytes)?;
+                fs::write(&token_path, &workload_token)?;
 
-                        fs::write(&key_path, signing_key.to_bytes())?;
-                        fs::write(&cert_path, cert_bytes)?;
-
-                        // Set strict Unix permissions for the private key
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::PermissionsExt;
-                            fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))?;
-                        }
-
-                        println!("  [OK] Forged Agent: {} -> {} ", agent_alias, agent_hex);
-                        success_count += 1;
-                    }
-
-                    Ok(response) => {
-                        eprintln!(
-                            "   [FAIL] Agent: [{}]: CA Minting Rejected - (Status Code: {})",
-                            agent_alias,
-                            response.status()
-                        )
-                    }
-
-                    Err(e) => {
-                        eprintln!(
-                            "   [FAIL] Agent: {} - Daemom unreacheable at {} ({}) ",
-                            agent_alias, mint_url, e
-                        );
-                    }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&pem_path, fs::Permissions::from_mode(0o600))?;
+                    fs::set_permissions(&token_path, fs::Permissions::from_mode(0o600))?;
                 }
-            }
 
-            println!(
-                "\n✅ Fleet Forge Complete. Successfully generated {}/{} secure artifacts in {} ",
-                success_count, count, out_dir
-            );
-        }
-
-        // 2. Policy GateKeeper Management
-        Commands::Policy {
-            action: PolicyAction::List,
-        } => {
-            let url = format!("{}/v1/admin/quarantine", cli.daemon_url);
-            let res = http_client.get(&url).send().await?;
-
-            if res.status().is_success() {
-                let records: Vec<QuarantineRecord> = res.json().await?;
-                println!(
-                    "🔒 Active Policy Quarantine Perimeters ({} Isolated):",
-                    records.len()
-                );
-                if records.is_empty() {
-                    println!("  None. All cryptographic gates clear.");
-                } else {
-                    for r in records {
-                        println!(
-                            "   -> Agent:{} | Target: {} | Reason: {}",
-                            r.agent_hex, r.attemped_path, r.violation_type,
-                        );
-                    }
-                }
-            } else {
-                eprintln!(
-                    "❌ Operational Error: Failed to extract firewall status: {}",
-                    res.status()
-                );
+                println!("  [OK] Agent '{}' -> ID: {}", alias, agent_hex);
+                println!("       ├─ SDK Private Key : {}", pem_path.display());
+                println!("       ├─ SDK Certificate : {}", cert_path.display());
+                println!("       └─ Gateway Token   : {} ({}...)", token_path.display(), &workload_token[..24]);
             }
         }
 
-        Commands::Policy {
-            action: PolicyAction::Lift { agent_id, reason },
-        } => {
-            let url = format!("{}/v1/admin/quarantine/lift", cli.daemon_url);
-            let res = http_client
-                .post(&url)
-                .json(&json!({"agent_hex": agent_id, "system_prompt_override": reason}))
-                .send()
-                .await?;
-
-            if res.status().is_success() {
-                println!(
-                    "🔓 Quarantine lifted and context re-seeded for agent: {}",
-                    agent_id
-                );
-            } else {
-                eprintln!(
-                    "❌ Operational Error: Reset signal refused by kernel: {}",
-                    res.status()
-                );
-            }
-        }
-
-        // 3. Historical timeline Inspection
-        Commands::TimeTravel { agent_id, tx_id: _ } => {
-            let url = format!(
-                "{}/v1/admin/time_travel/timeline/{}",
-                cli.daemon_url, agent_id
-            );
-
-            let res = http_client.get(&url).send().await?;
-
-            if res.status().is_success() {
-                let timeline: Vec<serde_json::Value> = res.json().await?;
-                println!(" ⌛ Historical Causal Timeline for Agent [{}]", agent_id);
-                if timeline.is_empty() {
-                    println!("  No commited states found for this identity");
-                } else {
-                    for (idx, node) in timeline.iter().enumerate() {
-                        println!(
-                            "  Step #{:02} | Tx: 0x{:032x} | Status: {:<12} | Payload: {}",
-                            idx + 1,
-                            node["tx_id"].as_u64().unwrap_or(0),
-                            node["agent_status"].as_str().unwrap_or(""),
-                            node[" payload_preview"].as_str().unwrap_or("")
-                        );
-                    }
-                }
-            } else {
-                eprintln!("❌ Timeline query failed: HTTP {}", res.status());
-            }
-        }
-
-        Commands::Cluster {
-            action: ClusterAction::Info,
-        } => {
-            let url = format!("{}/v1/admin/cluster/info", cli.daemon_url);
-            let res = http_client.get(&url).send().await?;
-
-            if res.status().is_success() {
-                let info: serde_json::Value = res.json().await?;
-                println!("🌐 Raqim Core Kernel Metrics:");
-                println!("  Node Identity Hash: {}", info["node_id"]);
-                println!("  Highest Transaction: {}", info["highest_tx_id"]);
-                println!(
-                    "  Active WAL Size: {:.2}MB ({} bytes)",
-                    info["wal_size_mb"].as_f64().unwrap_or(0.0),
-                    info["wal_bytes"]
-                );
-                println!(
-                    "  Cumulative CRRDT Ops  : {}  ",
-                    info["cumulative_crdt_ops"]
-                );
-            } else {
-                eprintln!("❌  Telemetry query failed: HTTP {}", res.status())
-            }
-        }
-
-        Commands::Cluster {
-            action: ClusterAction::Topology,
-        } => {
-            let url = format!("{}/v1/admin/cluster/topology", cli.daemon_url);
-
-            let res = http_client.get(&url).send().await?;
-
-            if res.status().is_success() {
-                let shards: Vec<serde_json::Value> = res.json().await?;
-                println!("🧠 Allocated Swarm Brain Shards  (Loro CRDT): ");
-                for s in shards {
-                    println!(
-                        "  Shard Space: [{:<20}] | Timelines: {} | Ops: {:<8} | Est. RAM: {:.2} MB",
-                        s["namespace"].as_str().unwrap_or(""),
-                        s["active_timelines"],
-                        s["total_crdt_operations"],
-                        s["estimated_ram_mb"].as_f64().unwrap_or(0.0)
-                    )
-                }
-            } else {
-                eprintln!("❌  Topology query failed: HTTP {}", res.status());
-            }
-        }
     }
 
-    Ok(())
+    
 }
