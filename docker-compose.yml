@@ -38,6 +38,6 @@ services:
 networks:
   agent_jail_net:
     driver: bridge
-    internal: true 
+    internal: true
   egress_wan_net:
     driver: bridge
