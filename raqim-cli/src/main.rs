@@ -6,7 +6,11 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::Path;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{fs, println};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(unix)]
+use tokio::net::UnixStream;
 
 #[derive(Clone, Debug, Serialize, Deserialize, rkyv::Archive, rkyv::Serialize)]
 pub struct QuarantineRecord {
@@ -20,13 +24,17 @@ pub struct QuarantineRecord {
 #[derive(Parser)]
 #[command(
     name = "raqim",
-    about = "Raqim OS Administrative Command Line Interface",
-    version = "1.0.0"
+    about = "Raqim v0.2.0 Sovereign Execution-Integrity & Gateway Operator CLI ",
+    version = "0.2.0"
 )]
 struct Cli {
-    /// URL of the Raqim OS Daemon Control plane
-    #[arg(short, long, default_value = "http://127.0.0.1:8081", global = true)]
-    daemon_url: String,
+    /// Path to Operator Admin Unixx Domain Socket (mode 0600)
+    #[arg(long, default_value = "./vault/admin.sock", global = true)]
+    admin_socket: String,
+
+    /// Path to the Operator Admin Bearer Secret file
+    #[arg(long, default_value = "http://127.0.0.1:8081", global = true)]
+    data_url: String,
 
     #[command(subcommand)]
     command: Commands,
@@ -34,16 +42,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Cryptographic Identity & Fleet Provisioning
+    /// Offline Cryptographic Identity & Workload Token Provisioning
     Keys {
         #[command(subcommand)]
         action: KeyAction,
     },
 
-    /// Aegis Cryptographic Firewall & Quarantine Diagnostics
-    Aegis {
+    /// Pre-Execution PolicyEngine & Quarantine management
+    Policy {
         #[command(subcommand)]
-        action: AegisAction,
+        action: PolicyAction,
     },
 
     /// Temporal Routing & Reality Forking mechanics
@@ -70,7 +78,7 @@ enum KeyAction {
         #[arg(short, long)]
         name: String,
 
-        /// The security group mapping declared in aegis.toml
+        /// The security group mapping declared in Policy.toml
         #[arg(short, long)]
         group: String,
 
@@ -84,7 +92,7 @@ enum KeyAction {
 }
 
 #[derive(Subcommand)]
-enum AegisAction {
+enum PolicyAction {
     List,
 
     Lift {
@@ -205,9 +213,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
-        // 2. Aegis GateKeeper Management
-        Commands::Aegis {
-            action: AegisAction::List,
+        // 2. Policy GateKeeper Management
+        Commands::Policy {
+            action: PolicyAction::List,
         } => {
             let url = format!("{}/v1/admin/quarantine", cli.daemon_url);
             let res = http_client.get(&url).send().await?;
@@ -215,7 +223,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if res.status().is_success() {
                 let records: Vec<QuarantineRecord> = res.json().await?;
                 println!(
-                    "🔒 Active Aegis Quarantine Perimeters ({} Isolated):",
+                    "🔒 Active Policy Quarantine Perimeters ({} Isolated):",
                     records.len()
                 );
                 if records.is_empty() {
@@ -236,8 +244,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Commands::Aegis {
-            action: AegisAction::Lift { agent_id, reason },
+        Commands::Policy {
+            action: PolicyAction::Lift { agent_id, reason },
         } => {
             let url = format!("{}/v1/admin/quarantine/lift", cli.daemon_url);
             let res = http_client
