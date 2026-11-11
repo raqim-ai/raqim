@@ -320,7 +320,266 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-    }
+          // ======================================================================
+    // 2. DOCTOR: PERMISSION AUDIT, KERNEL METRICS & IN-DOUBT RECONCILIATION
+    // ======================================================================
+    Commands::Doctor { in_doubt } => {
+            let secret = load_admin_secret(&cli.admin_secret_path)?;
+
+            if !*in_doubt {
+                println!("==================================================================");
+                println!("Raqim v0.2.0 System Doctor & Security Posture Check");
+                println!("==================================================================");
+
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    for path_str in ["./ca-keys/swarm_master.key", &cli.admin_secret_path, &cli.admin_socket] {
+                        if let Ok(meta) = fs::metadata(path_str) {
+                            let mode = meta.permissions().mode() & 0o777;
+                            if mode & 0o077 == 0 {
+                                println!("  [PASS] Permission check '{}' -> {:04o}", path_str, mode);
+                            } else {
+                                println!("  [WARN] Insecure permissions on '{}' -> {:04o} (Expected 0600)", path_str, mode);
+                            }
+                        }
+                    }
+                }
+
+                let (status, info_body) =
+                    send_admin_uds_request(&cli.admin_socket, &secret, "GET", "/v1/admin/cluster/info", None).await?;
+                if status == 200 {
+                    let info: Value = serde_json::from_str(&info_body)?;
+                    println!("  [PASS] Admin Socket Connected ({})", cli.admin_socket);
+                    println!("         ├─ Highest TxID   : {}", info["highest_tx_id"].as_str().unwrap_or("0x0"));
+                    println!("         ├─ Active WAL     : {:.2} MB ({} bytes)", info["wal_size_mb"].as_f64().unwrap_or(0.0), info["wal_bytes"]);
+                    println!("         └─ ColdStore Recs : {}", info["cold_records"]);
+                } else {
+                    eprintln!("  [FAIL] Admin Socket returned HTTP {}: {}", status, info_body);
+                }
+            }
+
+            let (status, doubt_body) =
+                send_admin_uds_request(&cli.admin_socket, &secret, "GET", "/v1/admin/in_doubt", None).await?;
+            if status == 200 {
+                let intents: Vec<ExecutionRecord> = serde_json::from_str(&doubt_body)?;
+                if intents.is_empty() {
+                    println!("  [PASS] In-Doubt Intents: 0 (All write-ahead intents resolved cleanly).");
+                } else {
+                    println!("\n  [ALERT] {} UNRESOLVED IN-DOUBT INTENT(S) DETECTED:", intents.len());
+                    for rec in intents {
+                        println!(
+                            "    -> Intent TxID / Idempotency-Key: {:032x} | Agent: {} | Step: {} | Path: {}",
+                            rec.tx_id,
+                            hex::encode(rec.agent_id),
+                            rec.step_ordinal,
+                            rec.namespace
+                        );
+                    }
+                }
+            }
+        }
+
+        // =====================================================================
+        // 3. POLICY & QUARANTINE MANAGEMENT
+        // =====================================================================
+        Commands::Policy { action } => {
+            let secret = load_admin_secret(&cli.admin_secret_path)?;
+            match action {
+                PolicyAction::List => {
+                    let (status, body) = send_admin_uds_request(
+                        &cli.admin_socket,
+                        &secret,
+                        "GET",
+                        "/v1/policy/quarantine_list",
+                        None,
+                    )
+                    .await?;
+                    if status == 200 {
+                        let records: Vec<QuarantineRecord> = serde_json::from_str(&body)?;
+                        println!("Active Quarantine Blocklist ({} Isolated):", records.len());
+                        for r in records {
+                            println!(
+                                "  -> Agent: {} | Violation: {} | Path: {} | Detail: {}",
+                                r.agent_hex, r.violation_type, r.attemped_path, r.payload_preview
+                            );
+                        }
+                    } else {
+                        eprintln!("Failed to fetch quarantine list (HTTP {}): {}", status, body);
+                    }
+                }
+                PolicyAction::Lift { agent_id } => {
+                    let payload = json!({ "agent_hex": agent_id });
+                    let (status, body) = send_admin_uds_request(
+                        &cli.admin_socket,
+                        &secret,
+                        "POST",
+                        "/v1/admin/quarantine/lift",
+                        Some(&payload),
+                    )
+                    .await?;
+                    if status == 200 {
+                        println!("[OK] Quarantine lifted for agent {}", agent_id);
+                    } else {
+                        eprintln!("[FAIL] HTTP {}: {}", status, body);
+                    }
+                }
+                PolicyAction::Metrics => {
+                    let (status, body) = send_admin_uds_request(
+                        &cli.admin_socket,
+                        &secret,
+                        "GET",
+                        "/v1/policy/metrics",
+                        None,
+                    )
+                    .await?;
+                    if status == 200 {
+                        let val: Value = serde_json::from_str(&body)?;
+                        println!("{}", serde_json::to_string_pretty(&val)?);
+                    } else {
+                        eprintln!("[FAIL] HTTP {}: {}", status, body);
+                    }
+                }
+            }
+        }
+
+    // =====================================================================
+        // 4. LIVE TERMINAL STREAM (`raqim tail`)
+        // =====================================================================
+        Commands::Tail { limit } => {
+            let secret = load_admin_secret(&cli.admin_secret_path)?;
+            println!("==================================================================");
+            println!("Raqim Live Execution Stream (Polling {} — Ctrl+C to exit)", cli.admin_socket);
+            println!("==================================================================");
+
+            let mut seen_tx_ids: HashSet<String> = HashSet::new();
+            let path = format!("/v1/admin/records/recent?limit={}", limit);
+
+            loop {
+                if let Ok((200, body)) =
+                    send_admin_uds_request(&cli.admin_socket, &secret, "GET", &path, None).await
+                {
+                    if let Ok(records) = serde_json::from_str::<Vec<RecentRecord>>(&body) {
+                        for rec in records {
+                            if seen_tx_ids.insert(rec.tx_id.clone()) {
+                                let badge = match rec.status.as_str() {
+                                    "OUTCOME" => "\x1b[32m[OUTCOME]\x1b[0m",
+                                    "INTENT" => "\x1b[33m[INTENT ]\x1b[0m",
+                                    "DENIED" => "\x1b[31m[DENIED ]\x1b[0m",
+                                    _ => "\x1b[36m[SYSTEM ]\x1b[0m",
+                                };
+                                println!(
+                                    "{} tx={} agent={}.. path={} | {}",
+                                    badge,
+                                    &rec.tx_id[..12],
+                                    &rec.agent_hex[..8.min(rec.agent_hex.len())],
+                                    rec.intent_path,
+                                    rec.text
+                                );
+                            }
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+        
 
     
+    // =====================================================================
+        // 5. NDPA / GDPR IN-PLACE PII REDACTION (`raqim redact <tx_id>`)
+        // =====================================================================
+        Commands::Redact { tx_id } => {
+            let secret = load_admin_secret(&cli.admin_secret_path)?;
+            let path = format!("/v1/admin/redact/{}", tx_id.trim_start_matches("0x"));
+            let (status, body) =
+                send_admin_uds_request(&cli.admin_socket, &secret, "POST", &path, None).await?;
+            if status == 200 {
+                println!("[OK] {}", body);
+            } else {
+                eprintln!("[FAIL] HTTP {}: {}", status, body);
+            }
+        }
+
+        // =====================================================================
+        // 6. MANUAL COMPACTION TRIGGER (`raqim compact`)
+        // =====================================================================
+        Commands::Compact => {
+            let secret = load_admin_secret(&cli.admin_secret_path)?;
+            let (status, body) = send_admin_uds_request(
+                &cli.admin_socket,
+                &secret,
+                "POST",
+                "/v1/admin/compactor/trigger",
+                None,
+            )
+            .await?;
+            println!("HTTP {}: {}", status, body);
+        }
+
+        // =====================================================================
+        // 7. OFFLINE EVIDENCE BUNDLE EXPORT (`raqim export --agent <hex>`)
+        // =====================================================================
+        Commands::Export { agent, out } => {
+            let secret = load_admin_secret(&cli.admin_secret_path)?;
+            let out_dir_str = out
+                .clone()
+                .unwrap_or_else(|| format!("./evidence-{}", &agent[..8.min(agent.len())]));
+            let out_dir = Path::new(&out_dir_str);
+            let proofs_dir = out_dir.join("proofs");
+            fs::create_dir_all(&proofs_dir)?;
+
+            let timeline_path = format!("/v1/admin/timeline/{}", agent);
+            let (status, body) =
+                send_admin_uds_request(&cli.admin_socket, &secret, "GET", &timeline_path, None)
+                    .await?;
+            if status != 200 {
+                eprintln!("[FAIL] Could not export timeline (HTTP {}): {}", status, body);
+                return Ok(());
+            }
+
+            let nodes: Vec<Value> = serde_json::from_str(&body)?;
+            let http = reqwest::Client::new();
+            let mut events_jsonl = String::new();
+            let mut proof_count = 0usize;
+
+            for node in &nodes {
+                events_jsonl.push_str(&serde_json::to_string(node)?);
+                events_jsonl.push('\n');
+
+                if let Some(tx_num) = node["tx_id"].as_u64().or_else(|| None) {
+                    let _ = tx_num;
+                }
+                // Extract u128 tx_id from JSON number or string
+                let tx_raw = node["tx_id"].to_string().replace('"', "");
+                if let Ok(tx_u128) = tx_raw.parse::<u128>() {
+                    let tx_hex = format!("{:032x}", tx_u128);
+                    let proof_url = format!("{}/v1/state/proof/{}", cli.data_url, tx_hex);
+                    if let Ok(resp) = http.get(&proof_url).send().await {
+                        if let Ok(proof_json) = resp.json::<Value>().await {
+                            if proof_json["success"].as_bool() == Some(true) {
+                                let proof_file = proofs_dir.join(format!("{}.json", tx_hex));
+                                fs::write(
+                                    proof_file,
+                                    serde_json::to_string_pretty(&proof_json["proof"])?,
+                                )?;
+                                proof_count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+
+            fs::write(out_dir.join("events.jsonl"), events_jsonl)?;
+            println!(
+                "[OK] Exported {} timeline events and {} cryptographic inclusion proofs to '{}'",
+                nodes.len(),
+                proof_count,
+                out_dir.display()
+            );
+        }
+
+    }
+
+    Ok(())
 }
