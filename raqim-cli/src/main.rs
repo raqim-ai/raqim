@@ -1,25 +1,18 @@
 use blake3::Hasher;
 use clap::{Parser, Subcommand};
-use ed25519_dalek::SigningKey;
-use rand::rngs::OsRng;
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
-use serde_json::json;
+use ed25519_dalek::{Signer, SigningKey};
+use rand_core::OsRng;
+use raqim_core::policy::{CapabilityCertificate, QuarantineRecord};
+use raqim_core::token::mint_workload_token;
+use raqim_core::{ExecutionRecord, RecentRecord};
+use serde_json::{json, Value};
+use std::collections::HashSet;
+use std::fs;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use std::{fs, println};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::net::UnixStream;
-
-#[derive(Clone, Debug, Serialize, Deserialize, rkyv::Archive, rkyv::Serialize)]
-pub struct QuarantineRecord {
-    pub agent_hex: String,
-    pub violation_type: String,
-    pub attemped_path: String,
-    pub payload_preview: String,
-    pub timestamp: u64,
-}
 
 #[derive(Parser)]
 #[command(
@@ -33,7 +26,11 @@ struct Cli {
     admin_socket: String,
 
     /// Path to the Operator Admin Bearer Secret file
-    #[arg(long, default_value = "http://127.0.0.1:8081", global = true)]
+    #[arg(long, default_value = "./ca-keys/admin.secret", global = true)]
+    admin_secret_path: String,
+
+    /// URL of Agent HTTP Data Plane (used for public proof exports)
+    #[arg(short, long, default_value = "http:127.0.0.1:8081", global = true)]
     data_url: String,
 
     #[command(subcommand)]
@@ -56,37 +53,33 @@ enum Commands {
 
     /// System Health, Key PErmission Audit & In-Doubt crash Reconciliation
     Doctor {
-
-        /// Only display unresolved in-doubt intents 
+        /// Only display unresolved in-doubt intents
         #[arg(long)]
         in_doubt: bool,
-
     },
 
-    /// Live Terminal Stream of Intents, outcomes, and policy Denials 
+    /// Live Terminal Stream of Intents, outcomes, and policy Denials
     Tail {
-        /// Number of historical records to fetch initially 
+        /// Number of historical records to fetch initially
         #[arg(short, long, default_value_t = 25)]
-        limit: usize, 
-    }
-
-    /// Execute NDPA / GDPR In-place PII Erasure on a Transaction ID 
-    Redact {
-        
-        tx_id: String, 
+        limit: usize,
     },
 
-    /// Trigger manual 2PC WAL Rotation & ColdStore Compaction 
-    Compact, 
+    /// Execute NDPA / GDPR In-place PII Erasure on a Transaction ID
+    Redact { tx_id: String },
 
-    /// Export an Offline-Verifiable Cryptographic Evidence bundle for an agent 
+    /// Trigger manual 2PC WAL Rotation & ColdStore Compaction
+    Compact,
+
+    /// Export an Offline-Verifiable Cryptographic Evidence bundle for an agent
     Export {
-        /// 32-char hex Agent ID 
+        /// 32-char hex Agent ID
         #[arg(short, long)]
+        agent: String,
 
-        /// Target output directory for the evidence bundle 
+        /// Target output directory for the evidence bundle
         #[arg(short, long)]
-        out: Option<String> 
+        out: Option<String>,
     },
 }
 
@@ -104,7 +97,7 @@ enum KeyAction {
         count: u32,
 
         #[arg(long, default_value_t = 30)]
-        ttl_days: u64, 
+        ttl_days: u64,
 
         #[arg(short, long, default_value = "./ca-keys")]
         out_dir: String,
@@ -115,47 +108,65 @@ enum KeyAction {
 enum PolicyAction {
     List,
 
-    Lift {agent_id: String}, 
+    Lift { agent_id: String },
 
-    Metrics 
+    Metrics,
 }
 
-/// Sends an uthenticated HTTP/1.1 request over the local Unix Domain Socket 
+/// Sends an uthenticated HTTP/1.1 request over the local Unix Domain Socket
 #[cfg(unix)]
-async fn send_admin_uds_request(socket_path: &str, admin_secret: &str, method: &str, path: &str, json_body: Option<&Value>) -> Result<(u16, String), anyhow::Error> {
-
+async fn send_admin_uds_request(
+    socket_path: &str,
+    admin_secret: &str,
+    method: &str,
+    path: &str,
+    json_body: Option<&Value>,
+) -> Result<(u16, String), anyhow::Error> {
     let mut stream = UnixStream::connect(socket_path).await.map_err(|e| {
-        anyhow::anyhow!("Failed to connect to Admin Unix Socket '{}' ({}). Is raqim-core running?", socket_path, e)
-    } )?;
+        anyhow::anyhow!(
+            "Failed to connect to Admin Unix Socket '{}' ({}). Is raqim-core running?",
+            socket_path,
+            e
+        )
+    })?;
 
     let body_bytes = match json_body {
-        Some(val) => serde_json::to_vec(val)?, 
-        None => Vec::new()
+        Some(val) => serde_json::to_vec(val)?,
+        None => Vec::new(),
     };
 
     let req_header = format!( "{} {} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", method, path, admin_secret.trim(), body_bytes.len() );
 
-    stream.write_all(req_header.as_bytes()).await?; 
+    stream.write_all(req_header.as_bytes()).await?;
     if !body_bytes.is_empty() {
         stream.write_all(&body_bytes).await?;
     }
     stream.flush().await?;
 
-    let mut raw_resp = Vec::new(); 
-    stream.read_to_end(&mut raw_resp).await?; 
+    let mut raw_resp = Vec::new();
+    stream.read_to_end(&mut raw_resp).await?;
     let resp_str = String::from_utf8_lossy(&raw_resp).to_string();
 
-    let (headers_part, body_part) = resp_str.split_once("\r\n\r\n").ok_or_else(|| anyhow::anyhow!("Malformed HTTP response from admin socket"))?;
-    
-    let status_line = headers_part.lines().next().unwrap_or("");
-    let status_code: u16 = status_line.split_whitespace().nth(1).and_then(|s| s.parse().ok() ).unwrap_or(500);
+    let (headers_part, body_part) = resp_str
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| anyhow::anyhow!("Malformed HTTP response from admin socket"))?;
 
-    // Handle chunked transfer encoding if present, otherwise return raw body 
-    let clean_body = if headers_part.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+    let status_line = headers_part.lines().next().unwrap_or("");
+    let status_code: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(500);
+
+    // Handle chunked transfer encoding if present, otherwise return raw body
+    let clean_body = if headers_part
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked")
+    {
         decoded_chunked_body(body_part)
     } else {
         body_part.to_string()
-    }
+    };
 
     Ok((status_code, clean_body))
 }
@@ -217,7 +228,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match &cli.command {
-
         // =====================================================================
         // 1. OFFLINE CRYPTOGRAPHIC KEY & WORKLOAD TOKEN FORGE
         // =====================================================================
@@ -233,7 +243,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             println!("==================================================================");
             println!("Bismillah. Raqim Offline Cryptographic Identity Forge");
-            println!("Target Group: [{}] | Count: [{}] | TTL: [{} days]", group, count, ttl_days);
+            println!(
+                "Target Group: [{}] | Count: [{}] | TTL: [{} days]",
+                group, count, ttl_days
+            );
             println!("==================================================================");
 
             let workspace = Path::new(out_dir);
@@ -249,7 +262,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .map_err(|_| "swarm_master.key must be 32 bytes")?;
                 SigningKey::from_bytes(&arr)
             } else {
-                println!("[FORGE] Initializing new Master Root Key at {:?}", master_key_path);
+                println!(
+                    "[FORGE] Initializing new Master Root Key at {:?}",
+                    master_key_path
+                );
                 let key = SigningKey::generate(&mut OsRng);
                 fs::write(&master_key_path, key.to_bytes())?;
                 #[cfg(unix)]
@@ -271,7 +287,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let alias = if *count > 1 {
                     format!("{}_{:02}", name, i)
                 } else {
-                    name.clone()
+                    name.clone();
                 };
 
                 let agent_signing_key = SigningKey::generate(&mut OsRng);
@@ -291,7 +307,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     master_signature: Vec::new(),
                 };
                 let unsigned_bytes = postcard::to_allocvec(&cert)?;
-                cert.master_signature = master_signing_key.sign(&unsigned_bytes).to_bytes().to_vec();
+                cert.master_signature =
+                    master_signing_key.sign(&unsigned_bytes).to_bytes().to_vec();
                 let cert_bytes = postcard::to_allocvec(&cert)?;
 
                 // 2. Mint `rqm_v1` Ed25519 Workload Token (for Zero-Secret HTTP Egress Gateway)
@@ -316,14 +333,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  [OK] Agent '{}' -> ID: {}", alias, agent_hex);
                 println!("       ├─ SDK Private Key : {}", pem_path.display());
                 println!("       ├─ SDK Certificate : {}", cert_path.display());
-                println!("       └─ Gateway Token   : {} ({}...)", token_path.display(), &workload_token[..24]);
+                println!(
+                    "       └─ Gateway Token   : {} ({}...)",
+                    token_path.display(),
+                    &workload_token[..24]
+                );
             }
         }
 
-          // ======================================================================
-    // 2. DOCTOR: PERMISSION AUDIT, KERNEL METRICS & IN-DOUBT RECONCILIATION
-    // ======================================================================
-    Commands::Doctor { in_doubt } => {
+        // ======================================================================
+        // 2. DOCTOR: PERMISSION AUDIT, KERNEL METRICS & IN-DOUBT RECONCILIATION
+        // ======================================================================
+        Commands::Doctor { in_doubt } => {
             let secret = load_admin_secret(&cli.admin_secret_path)?;
 
             if !*in_doubt {
@@ -334,11 +355,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    for path_str in ["./ca-keys/swarm_master.key", &cli.admin_secret_path, &cli.admin_socket] {
+                    for path_str in [
+                        "./ca-keys/swarm_master.key",
+                        &cli.admin_secret_path,
+                        &cli.admin_socket,
+                    ] {
                         if let Ok(meta) = fs::metadata(path_str) {
                             let mode = meta.permissions().mode() & 0o777;
                             if mode & 0o077 == 0 {
-                                println!("  [PASS] Permission check '{}' -> {:04o}", path_str, mode);
+                                println!(
+                                    "  [PASS] Permission check '{}' -> {:04o}",
+                                    path_str, mode
+                                );
                             } else {
                                 println!("  [WARN] Insecure permissions on '{}' -> {:04o} (Expected 0600)", path_str, mode);
                             }
@@ -346,27 +374,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                let (status, info_body) =
-                    send_admin_uds_request(&cli.admin_socket, &secret, "GET", "/v1/admin/cluster/info", None).await?;
+                let (status, info_body) = send_admin_uds_request(
+                    &cli.admin_socket,
+                    &secret,
+                    "GET",
+                    "/v1/admin/cluster/info",
+                    None,
+                )
+                .await?;
                 if status == 200 {
                     let info: Value = serde_json::from_str(&info_body)?;
                     println!("  [PASS] Admin Socket Connected ({})", cli.admin_socket);
-                    println!("         ├─ Highest TxID   : {}", info["highest_tx_id"].as_str().unwrap_or("0x0"));
-                    println!("         ├─ Active WAL     : {:.2} MB ({} bytes)", info["wal_size_mb"].as_f64().unwrap_or(0.0), info["wal_bytes"]);
+                    println!(
+                        "         ├─ Highest TxID   : {}",
+                        info["highest_tx_id"].as_str().unwrap_or("0x0")
+                    );
+                    println!(
+                        "         ├─ Active WAL     : {:.2} MB ({} bytes)",
+                        info["wal_size_mb"].as_f64().unwrap_or(0.0),
+                        info["wal_bytes"]
+                    );
                     println!("         └─ ColdStore Recs : {}", info["cold_records"]);
                 } else {
-                    eprintln!("  [FAIL] Admin Socket returned HTTP {}: {}", status, info_body);
+                    eprintln!(
+                        "  [FAIL] Admin Socket returned HTTP {}: {}",
+                        status, info_body
+                    );
                 }
             }
 
-            let (status, doubt_body) =
-                send_admin_uds_request(&cli.admin_socket, &secret, "GET", "/v1/admin/in_doubt", None).await?;
+            let (status, doubt_body) = send_admin_uds_request(
+                &cli.admin_socket,
+                &secret,
+                "GET",
+                "/v1/admin/in_doubt",
+                None,
+            )
+            .await?;
             if status == 200 {
                 let intents: Vec<ExecutionRecord> = serde_json::from_str(&doubt_body)?;
                 if intents.is_empty() {
-                    println!("  [PASS] In-Doubt Intents: 0 (All write-ahead intents resolved cleanly).");
+                    println!(
+                        "  [PASS] In-Doubt Intents: 0 (All write-ahead intents resolved cleanly)."
+                    );
                 } else {
-                    println!("\n  [ALERT] {} UNRESOLVED IN-DOUBT INTENT(S) DETECTED:", intents.len());
+                    println!(
+                        "\n  [ALERT] {} UNRESOLVED IN-DOUBT INTENT(S) DETECTED:",
+                        intents.len()
+                    );
                     for rec in intents {
                         println!(
                             "    -> Intent TxID / Idempotency-Key: {:032x} | Agent: {} | Step: {} | Path: {}",
@@ -405,7 +460,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             );
                         }
                     } else {
-                        eprintln!("Failed to fetch quarantine list (HTTP {}): {}", status, body);
+                        eprintln!(
+                            "Failed to fetch quarantine list (HTTP {}): {}",
+                            status, body
+                        );
                     }
                 }
                 PolicyAction::Lift { agent_id } => {
@@ -443,13 +501,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-    // =====================================================================
+        // =====================================================================
         // 4. LIVE TERMINAL STREAM (`raqim tail`)
         // =====================================================================
         Commands::Tail { limit } => {
             let secret = load_admin_secret(&cli.admin_secret_path)?;
             println!("==================================================================");
-            println!("Raqim Live Execution Stream (Polling {} — Ctrl+C to exit)", cli.admin_socket);
+            println!(
+                "Raqim Live Execution Stream (Polling {} — Ctrl+C to exit)",
+                cli.admin_socket
+            );
             println!("==================================================================");
 
             let mut seen_tx_ids: HashSet<String> = HashSet::new();
@@ -483,8 +544,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
         }
-        
-    
+
         // =====================================================================
         // 5. NDPA / GDPR IN-PLACE PII REDACTION (`raqim redact <tx_id>`)
         // =====================================================================
@@ -533,7 +593,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 send_admin_uds_request(&cli.admin_socket, &secret, "GET", &timeline_path, None)
                     .await?;
             if status != 200 {
-                eprintln!("[FAIL] Could not export timeline (HTTP {}): {}", status, body);
+                eprintln!(
+                    "[FAIL] Could not export timeline (HTTP {}): {}",
+                    status, body
+                );
                 return Ok(());
             }
 
@@ -577,7 +640,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 out_dir.display()
             );
         }
-
     }
 
     Ok(())

@@ -255,7 +255,7 @@ impl EffectStore {
             call_signature_hash,
         );
 
-        let tx_id = prepared.tx_id;
+        let tx_id = unsealed.tx_id;
 
         let prepared = self.merkle.prepare_record(unsealed);
 
@@ -266,7 +266,7 @@ impl EffectStore {
         if allowed {
             let key = EffectKey::derive(&agent_id, step_ordinal, &call_signature_hash);
             self.pending_intents.insert(key, prepared.clone());
-        } 
+        }
 
         if let Some((batch, records)) = self.merkle.commit_prepared_record(prepared) {
             let _ = self

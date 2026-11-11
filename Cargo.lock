@@ -5470,6 +5470,7 @@ dependencies = [
  "hex",
  "postcard",
  "rand 0.8.5",
+ "rand_core 0.6.4",
  "raqim-core",
  "reqwest 0.13.2",
  "rkyv",
