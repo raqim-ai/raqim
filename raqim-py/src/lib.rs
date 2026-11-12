@@ -55,7 +55,6 @@ pub struct ExecutionRecord {
 
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 pub struct IngressEnvelope {
-    pub intent_path: String,
     pub public_key: [u8; 32],
     pub signature: [u8; 64],
     pub record_bytes: Vec<u8>,

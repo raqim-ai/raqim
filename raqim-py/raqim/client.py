@@ -21,8 +21,6 @@ from typing import (
 import blake3
 import httpx
 import concurrent.futures
-import websockets
-import zenoh
 
 from raqim_core import RaqimCryptoCore  
 
@@ -192,7 +190,6 @@ class RaqimClient:
         """
         Enterprise Ignition Sequence: 
         - Emits /system/handshake over TCPP to trigger JIT CRDT memory hydration
-        - Mounts zenoh control subscriber for Aegis out-of-band context eviction
         """
         # 1. TCP Handshake Protocol (Registers Alias with RAM Process Table)
         await self.commit_thought(
@@ -202,14 +199,7 @@ class RaqimClient:
         )
         print(f"[BOOT] Agent '{self.alias}' ({self.agent_hex[:8]}...) registered.")
 
-        # 2. Establish Zenoh Control Plane for Aegis Circuit Breakers
-        try:
-            self._zenoh_session = zenoh.open(zenoh.Config())
-            control_topic = f"raqim/{self.tenant}/control/{self.agent_hex}"
-            self._zenoh_session.declare_subscriber(control_topic, self._handle_os_control_override)
-        except Exception as e: 
-            print(f"[BOOT WARN] Zenoh control plane unavailable: {e}. Running in local-only mode.")
-    
+
     def register_eviction_hook(self, callback: Callable[[str], None]): 
         """
             Registers the developer callback for Aegis FORCE_CONTEXT_EVICTION events.
@@ -300,15 +290,6 @@ class RaqimClient:
             writer.close()
             await writer.wait_closed()
 
-    async def query_memory(self, intent_path: str, query: str, limit: int = 5) -> list[str]:
-        """Queries Raqim's Unified Hybrid Search Router (LanceDB + Hot RAM Buffer)."""
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                f"{self.http_url}/v1/swarm/memory",
-                params={"namespace": intent_path, "query": query, "limit": limit},
-            )
-            resp.raise_for_status()
-            return resp.json()
 
     # @raqim.trace DECORATOR 
     def trace(self, namespace: str = "/default", model: Optional[str] = None, system: Optional[str] = None, custom_signature: Optional[str] = None) -> Callable[..., Any]: 
@@ -629,86 +610,7 @@ class RaqimClient:
             asyncio.set_event_loop(loop)
             return loop
     
-    # A2A Websocket Swarm router 
-    async def connect_swarm(self):
-        """Connect  background WebSocket Multiplexer to Raqim's A2A gateway"""
-        self._ws_connection = await websockets.connect(self.ws_url)
-        asyncio.create_task(self._websocket_listener())
-
-    async def _websocket_listener(self):
-        """The Background Router matching incoming A2A tp suspended Futures"""
-        if not self._ws_connection: 
-            return 
-        try:
-            async for message in self._ws_connection:
-                data = json.loads(message)
-                msg_type = data.get("type")
-
-                if msg_type == "QuestionAnswered":
-                    # We got an answer! Wake up the specific suspended function.
-                    req_id = data["request_id"]
-                    if req_id in self._pending_requests:
-                        future = self._pending_requests.pop(req_id)
-                        future.set_result(data.get("answer")) 
-                
-                elif msg_type == "IncomingQuestion":
-                    # Someone is asking us a question!
-                    cap = data.get("capability")
-                    if cap and cap in self._capabilities:
-                        handler = self._capabilities[cap]
-                        # Execute the user's AI logic
-                        answer_bytes = await handler(bytes(data.get("question")))
-                        
-                        # Send the reply back up the socket
-                        reply = {
-                            "type": "ReplyToQuestion",
-                            "request_id": data.get("request_id"),
-                            "answer": list(answer_bytes), 
-                            "responder_hex": self.agent_hex
-                        }
-                        await self._ws_connection.send(json.dumps(reply))
-                        
-        except websockets.ConnectionClosed:
-            print("[RAQIM] Swarm WebSocket connection closed.")
-
-    async def ask_swarm(self, capability: str, question: bytes, sender_hex: str) -> bytes:
-        """Suspends the Python coroutine until the answer arrives over A2A network"""
-        if not self._ws_connection:
-            raise RaqimClientError("Must call `await client.connect_swarm()` before querying swarm.")
-
-        request_id = str(uuid.uuid4())
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[bytes] = loop.create_future()
-        self._pending_requests[request_id] = future
-
-        # True crytography
-        signature = self.crypto_core.sign_payload(question)
-
-        ask_msg = {
-            "type": "AskQuestion",
-            "request_id": request_id,
-            "capability": capability,
-            "question": list(question),
-            "sender_hex": sender_hex,
-            "public_key": list(self.crypto_core.pub_key_bytes),
-            "signature": list(signature),
-            "capability_cert": self.cert_hex
-        }
-
-        await self._ws_connection.send(json.dumps(ask_msg))
-        
-        # ZERO CPU YIELD: Suspends Python execution until the _websocket_listener wakes it up
-        return await asyncio.wait_for(future, timeout=15.0)
-
-    async def serve_capability(self, capability: str, handler: Callable[[bytes], Awaitable[bytes]]):
-        """Exposes an AI logic capability to the global swarm."""
-        if not self._ws_connection:
-            raise RaqimClientError("Must call `await client.connect_swarm() first.")
-            
-        self._capabilities[capability] = handler
-        msg = {"type": "RegisterCapability", "capability": capability}
-        await self._ws_connection.send(json.dumps(msg))
-
+    
     # Otel Export Engine
     async def export_to_otel(self, endpoint: str, headers: Optional[Dict[str, str]] = None, timeout: float = 10.0 ) -> Dict[str, Any]: 
         """
@@ -810,34 +712,76 @@ class RaqimClient:
 
 # Zero Dependency Offline merkle proof verifier
 def verify_state_proof_offline(payload_bytes: bytes, agent_id_str: str, proof_dict: dict) -> bool:
-    agent_id_bytes = bytes.fromhex(agent_id_str)
-    
-    hasher = blake3.blake3(derive_key_context="raqim.merkle.v1.leaf")
-    hasher.update(payload_bytes)
-    hasher.update(agent_id_bytes)
-    current_hash = hasher.digest(length=32)
-    
-    # Handle both snake_case and camelCase JSON keys
-    index = proof_dict.get("leaf_index")
-    if index is None:
-        index = proof_dict.get("leafIndex", 0)
-        
-    sibling_hashes = proof_dict.get("sibling_hashes_hex") or proof_dict.get("siblingHashesHex", [])
-    merkle_root = proof_dict.get("merkle_root_hex") or proof_dict.get("merkleRootHex", "")
-    
+    """
+    Zero-Dependency Offline Cryptographic Merkle Proof Verifier (v0.2.0).
+    Verifies both the salted payload commitment (`raqim.payload.v1`) AND
+    the full action envelope leaf hash (`raqim.merkle.v1.leaf`).
+    """
+    try:
+        tx_id_hex = (proof_dict.get("txIdHex") or proof_dict.get("tx_id_hex", "")).removeprefix("0x")
+        tx_id = int(tx_id_hex, 16)
+        agent_id_bytes = bytes.fromhex(agent_id_str)
+        step_ordinal = int(proof_dict.get("stepOrdinal", proof_dict.get("step_ordinal", 0)))
+        timestamp_ms = int(proof_dict.get("timestampMs", proof_dict.get("timestamp_ms", 0)))
+        stage = int(proof_dict.get("stage", 2))
+        namespace = proof_dict.get("namespace", "")
+        call_sig_hex = proof_dict.get("callSignatureHex") or proof_dict.get("call_signature_hex", "")
+        salt_hex = proof_dict.get("payloadSaltHex") or proof_dict.get("payload_salt_hex", "")
+        expected_payload_hash_hex = proof_dict.get("payloadHashHex") or proof_dict.get("payload_hash_hex", "")
+
+        call_sig_bytes = bytes.fromhex(call_sig_hex)
+        salt_bytes = bytes.fromhex(salt_hex)
+    except Exception:
+        return False
+
+    # 1. Verify salted payload commitment: BLAKE3("raqim.payload.v1", salt || payload_bytes)
+    p_hasher = blake3.blake3(derive_key_context="raqim.payload.v1")
+    p_hasher.update(salt_bytes)
+    p_hasher.update(payload_bytes)
+    computed_payload_hash = p_hasher.digest(length=32)
+
+    if computed_payload_hash.hex() != expected_payload_hash_hex:
+        return False
+
+    # 2. Compute full envelope leaf hash: BLAKE3("raqim.merkle.v1.leaf", envelope_fields)
+    ns_bytes = namespace.encode("utf-8")
+    leaf_hasher = blake3.blake3(derive_key_context="raqim.merkle.v1.leaf")
+    leaf_hasher.update(tx_id.to_bytes(16, "little"))
+    leaf_hasher.update(agent_id_bytes)
+    leaf_hasher.update(step_ordinal.to_bytes(8, "little"))
+    leaf_hasher.update(timestamp_ms.to_bytes(8, "little", signed=True))
+    leaf_hasher.update( bytes([stage]) )
+    leaf_hasher.update(len(ns_bytes).to_bytes(4, "little"))
+    leaf_hasher.update(ns_bytes)
+    leaf_hasher.update(call_sig_bytes)
+    leaf_hasher.update(computed_payload_hash)
+    current_hash = leaf_hasher.digest(length=32)
+
+    # 3. Traverse Merkle path with odd-node domain separation (`raqim.merkle.v1.node_odd`)
+    index = int(proof_dict.get("leafIndex", proof_dict.get("leaf_index", 0)))
+    level_len = int(proof_dict.get("totalLeavesInTree", proof_dict.get("total_leaves_in_tree", 64)))
+    sibling_hashes = proof_dict.get("siblingHashesHex") or proof_dict.get("sibling_hashes_hex", [])
+    merkle_root = proof_dict.get("merkleRootHex") or proof_dict.get("merkle_root_hex", "")
+
     for sibling_hex in sibling_hashes:
         sibling_bytes = bytes.fromhex(sibling_hex)
-        node_hasher = blake3.blake3(derive_key_context="raqim.merkle.v1.node")
-        
         if index % 2 == 0:
-            node_hasher.update(current_hash)
-            node_hasher.update(sibling_bytes)
+            if index + 1 < level_len:
+                node_hasher = blake3.blake3(derive_key_context="raqim.merkle.v1.node")
+                node_hasher.update(current_hash)
+                node_hasher.update(sibling_bytes)
+                current_hash = node_hasher.digest(length=32)
+            else:
+                odd_hasher = blake3.blake3(derive_key_context="raqim.merkle.v1.node_odd")
+                odd_hasher.update(current_hash)
+                current_hash = odd_hasher.digest(length=32)
         else:
+            node_hasher = blake3.blake3(derive_key_context="raqim.merkle.v1.node")
             node_hasher.update(sibling_bytes)
             node_hasher.update(current_hash)
-            
-        current_hash = node_hasher.digest(length=32)
-        index //= 2
-        
-    return current_hash.hex() == merkle_root
+            current_hash = node_hasher.digest(length=32)
 
+        index //= 2
+        level_len = (level_len + 1) // 2
+
+    return current_hash.hex() == merkle_root
