@@ -30,7 +30,7 @@ struct Cli {
     admin_secret_path: String,
 
     /// URL of Agent HTTP Data Plane (used for public proof exports)
-    #[arg(short, long, default_value = "http:127.0.0.1:8081", global = true)]
+    #[arg(short, long, default_value = "http://127.0.0.1:8081", global = true)]
     data_url: String,
 
     #[command(subcommand)]
@@ -163,7 +163,7 @@ async fn send_admin_uds_request(
         .to_ascii_lowercase()
         .contains("transfer-encoding: chunked")
     {
-        decoded_chunked_body(body_part)
+        decode_chunked_body(body_part)
     } else {
         body_part.to_string()
     };
@@ -287,7 +287,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let alias = if *count > 1 {
                     format!("{}_{:02}", name, i)
                 } else {
-                    name.clone();
+                    name.clone()
                 };
 
                 let agent_signing_key = SigningKey::generate(&mut OsRng);
