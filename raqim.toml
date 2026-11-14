@@ -9,3 +9,13 @@ checkpoint_path = "./vault/state_checkpoint.bin"
 control_journal_path = "./vault/control_journal.bin"
 cold_store_path = "./vault/cold_segments"
 admin_socket_path = "./vault/admin.sock"
+
+[[connectors]]
+name = "paystack"
+upstream_url = "https://api.paystack.co"
+secret_env = "PAYSTACK_SECRET_KEY"
+auth_header = "Authorization"
+auth_prefix = "Bearer "
+idempotency_header = "Idempotency-Key"
+allowed_routes = ["POST /transfer", "GET /transaction/*"]
+redact_pointers = ["/card/cvv", "/bvn"]

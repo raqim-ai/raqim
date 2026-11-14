@@ -215,7 +215,7 @@ async fn run_tcp_benchmark(
 
         handles.push(tokio::spawn(async move {
             let agent = &agent_ref[worker_id];
-            let mut stream = match TcpStream::connect(target_addr).await {
+            let stream = match TcpStream::connect(target_addr).await {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("[WORKER {}] Connect failed: {}", worker_id, e);
@@ -237,11 +237,11 @@ async fn run_tcp_benchmark(
                 let record = ExecutionRecord::new(
                     agent.agent_id,
                     round_idx as u64,
-                    agent.namespace.clone(),
-                    ExecutionStage::Outcome,
-                    [0u8; 32],
                     format!("Siege v0.2.0 Record #{} [Worker {}]", global_idx, worker_id)
                         .into_bytes(),
+                    ExecutionStage::Outcome,
+                    agent.namespace.clone(),
+                    [0u8; 32],
                 );
 
                 let record_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&record)
@@ -453,7 +453,7 @@ async fn run_egress_benchmark(
         workers,
         elapsed,
         &mut all_samples,
-        ¬es,
+        &notes,
     );
     Ok(())
 }
