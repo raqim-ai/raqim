@@ -5492,14 +5492,17 @@ dependencies = [
 name = "raqim-py"
 version = "0.1.2"
 dependencies = [
+ "base64 0.23.1",
  "blake3",
  "ed25519-dalek 3.0.0",
  "hex",
  "postcard",
  "pyo3",
+ "rand_core 0.6.4",
  "raqim-core",
  "rkyv",
  "serde",
+ "serde_json",
  "uuid",
 ]
 
