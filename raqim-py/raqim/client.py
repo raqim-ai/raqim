@@ -272,10 +272,12 @@ class RaqimClient:
         subpath: str,
         json_body: Optional[Dict[str, Any]] = None,
         step_ordinal: Optional[int] = None,
+        raw_body: Optional[bytes] = None,
     ) -> httpx.Response:
         """
         Dispatches a zero-secret HTTP call through `/v1/egress/{connector}/{subpath}`
         using the agent's `rqm_v1` workload token.
+        Pass `raw_body` to send exact wire bytes (e.g., adversarial parser tests).
         """
         if not self.workload_token:
             raise RaqimClientError("workload_token (`rqm_v1...`) is required for egress_request")
@@ -291,8 +293,11 @@ class RaqimClient:
             headers["X-Raqim-Step"] = str(step_ordinal)
 
         http = self._get_http_client()
+        if raw_body is not None:
+            headers.setdefault("Content-Type", "application/json")
+            return await http.request(method.upper(), url, headers=headers, content=raw_body)
         return await http.request(method.upper(), url, headers=headers, json=json_body)
-
+    
     def trace(
         self,
         namespace: str = "/default",

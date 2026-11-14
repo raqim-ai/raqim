@@ -68,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &config.host, &config.port, &config.admin_socket_path, &config.wal_path,
     );
 
-    let cold_store: Arc<dyn ColdStore> = Arc::new(SegmentColdStore::new("./vault/cold_segments"));
+    let cold_store: Arc<dyn ColdStore> = Arc::new(SegmentColdStore::new(&config.cold_store_path));
 
     // THE INTERNAL EVENT BUS
     let (event_tx, _event_rx) = broadcast::channel::<SystemEvent>(50_000);

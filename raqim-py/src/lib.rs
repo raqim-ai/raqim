@@ -207,13 +207,13 @@ impl RaqimCryptoCore {
 
     /// Static helper: Mints a binary `CapabilityCertificate` signed by the Master Key at `master_key_path`.
     #[staticmethod]
-    fn forge_certificate_from_master(
-        py: Python<'_>,
+    fn forge_certificate_from_master<'py>(
+        py: Python<'py>,
         master_key_path: &str,
         agent_hex: &str,
         group_name: &str,
         ttl_seconds: u64,
-    ) -> PyResult<Bound<'_, PyBytes>> {
+    ) -> PyResult<Bound<'py, PyBytes>> {
         let master_bytes = std::fs::read(master_key_path)?;
         let master_arr: [u8; 32] = master_bytes.as_slice().try_into().map_err(|_| {
             pyo3::exceptions::PyValueError::new_err("Master key must be exactly 32 bytes")

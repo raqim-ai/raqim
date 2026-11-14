@@ -559,7 +559,7 @@ impl MerkleEngine {
                     hasher.update(&sibling_bytes);
                     current_hash = hasher.finalize().into()
                 } else {
-                    let mut hasher = Hasher::new_derive_key("raim.merkle.v1.node_odd");
+                    let mut hasher = Hasher::new_derive_key("raqim.merkle.v1.node_odd");
                     hasher.update(&current_hash);
                     current_hash = hasher.finalize().into();
                 }

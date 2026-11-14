@@ -79,3 +79,43 @@ fn test_envelope_commitment_blocks_stage_and_metadata_tampering() {
         "Case B crystallized batch proof must verify with full LeafMetadata!"
     );
 }
+
+#[test]
+fn test_odd_boundary_leaf_verify_inclusion() {
+    let engine = MerkleEngine::new();
+    let agent_id = [9u8; 16];
+    let mut recs = Vec::new();
+    for i in 0..5u64 {
+        let rec = ExecutionRecord::new(
+            agent_id,
+            i,
+            format!("odd_payload_{}", i).into_bytes(),
+            ExecutionStage::Outcome,
+            "/finance/odd".to_string(),
+            [i as u8; 32],
+        );
+        recs.push(rec.clone());
+        let _ = engine.seal_record(rec);
+    }
+    for rec in &recs {
+        let p = engine
+            .generate_proof_for_tx(rec.tx_id)
+            .expect("Proof must exist for every odd-tree leaf");
+        assert!(
+            MerkleEngine::verify_inclusion(&rec.payload_bytes, &agent_id, &p),
+            "Active odd-tree inclusion verification failed for leaf seq={}",
+            rec.step_ordinal
+        );
+    }
+    let _ = engine.flush_all_active_buffers();
+    for rec in &recs {
+        let p = engine
+            .generate_proof_for_tx(rec.tx_id)
+            .expect("Archived proof must exist for every odd-tree leaf");
+        assert!(
+            MerkleEngine::verify_inclusion(&rec.payload_bytes, &agent_id, &p),
+            "Archived odd-tree inclusion verification failed for leaf seq={}",
+            rec.step_ordinal
+        );
+    }
+}
