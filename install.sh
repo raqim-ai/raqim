@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Raqim Sovereign Runtime & Tooling Installer (Linux & macOS)
-# Installs: raqim-core, raqim-cli, raqim-mcp
+# Installs: raqim-core, raqim-cli
 # ==============================================================================
 set -euo pipefail
 
@@ -71,7 +71,7 @@ if [ -z "$TAG" ]; then
     echo -e "🔍 Discovering latest release from GitHub..."
     TAG=$(curl -sSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep -o '"tag_name": *"[^"]*"' | head -n 1 | cut -d '"' -f 4 || echo "")
     if [ -z "$TAG" ]; then
-        TAG="v0.1.1"
+        TAG="v0.2.0"
     fi
 fi
 
@@ -100,7 +100,7 @@ mkdir -p "$INSTALL_DIR"
 tar -xzf "${TMP_DIR}/${TARGET}" -C "$TMP_DIR"
 
 # Install binaries (handle both root or dist subdirectories)
-for bin in raqim-core raqim-cli raqim-mcp; do
+for bin in raqim-core raqim-cli; do
     FOUND_BIN=$(find "$TMP_DIR" -type f -name "$bin" | head -n 1)
     if [ -n "$FOUND_BIN" ]; then
         chmod +x "$FOUND_BIN"
@@ -152,16 +152,16 @@ echo "=================================================================="
 echo -e "${GREEN}${BOLD}Alhamdulillah! Raqim installation completed successfully.${RESET}"
 echo "=================================================================="
 echo -e "Binaries installed:"
-echo -e "  • ${BOLD}raqim-core${RESET} : The sovereign microkernel and WAL engine"
-echo -e "  • ${BOLD}raqim-cli${RESET}  : Administrative PKI forge, cert minting, and WAL tools"
-echo -e "  • ${BOLD}raqim-mcp${RESET}  : Model Context Protocol bridge for Claude Desktop / Cursor"
+echo -e "  • ${BOLD}raqim-core${RESET} : Zero-secret egress gateway, policy gate & WAL daemon"
+echo -e "  • ${BOLD}raqim-cli${RESET}  : Offline workload token forge, doctor, tail, redact & export"
 echo ""
 echo -e "To activate Raqim in your current terminal session:"
 echo -e "  ${CYAN}export PATH=\"\$PATH:${INSTALL_DIR}\"${RESET}"
 echo ""
 echo -e "Get started:"
 echo -e "  ${BOLD}raqim-core --help${RESET}"
-echo -e "  ${BOLD}raqim-cli forge --help${RESET}"
+echo -e "  ${BOLD}raqim-cli keys forge --help${RESET}"
+echo -e "  ${BOLD}raqim-cli doctor${RESET}"
 echo -e "  ${BOLD}pip install raqim${RESET}  # Python SDK"
 echo "=================================================================="
 

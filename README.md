@@ -8,9 +8,16 @@
 [![Cold Boot](https://img.shields.io/badge/Cold_Boot-9.80_ms-blue)](#verified-hardware-benchmarks-v020)
 [![Durable Throughput](https://img.shields.io/badge/True_fdatasync_ACK-7%2C175_TPS-brightgreen)](#verified-hardware-benchmarks-v020)
 [![Replay Cost](https://img.shields.io/badge/Deterministic_Replay-%240.00_Cost-success)](#verified-hardware-benchmarks-v020)
+[![Live Demo Video](https://img.shields.io/badge/%E2%96%B6_Watch_5--Min_Live_Demo-Google_Drive-red?logo=googledrive)](https://drive.google.com/file/d/1xf8hsq4NnoqFph0PAgrjLhZkExakCEmY/view?usp=sharing)
 
 <p align="center">
-  <img src="assets/raqim-thumbnail.svg" width="100%" alt="Exposed Agent Keys vs Raqim v0.2.0 Airlock" />
+  <a href="https://drive.google.com/file/d/1xf8hsq4NnoqFph0PAgrjLhZkExakCEmY/view?usp=sharing">
+    <img src="assets/raqim-thumbnail.svg" width="100%" alt="Exposed Agent Keys vs Raqim v0.2.0 Airlock" />
+  </a>
+</p>
+
+<p align="center">
+  <strong>▶️ <a href="https://drive.google.com/file/d/1xf8hsq4NnoqFph0PAgrjLhZkExakCEmY/view?usp=sharing">Watch the Full 5-Minute Live Demo Video (Voiceover + All 6 Security Acts)</a></strong>
 </p>
 
 ---

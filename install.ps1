@@ -1,6 +1,6 @@
 # ==============================================================================
 # Raqim Sovereign Runtime & Tooling Installer (Windows PowerShell)
-# Installs: raqim-core.exe, raqim-cli.exe, raqim-mcp.exe
+# Installs: raqim-core.exe, raqim-cli.exe
 # ==============================================================================
 $ErrorActionPreference = "Stop"
 
@@ -27,7 +27,7 @@ if (-not $Tag) {
         $Release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -Headers @{"User-Agent"="RaqimInstaller"}
         $Tag = $Release.tag_name
     } catch {
-        $Tag = "v0.1.1"
+        $Tag = "v0.2.0"
     }
 }
 
@@ -47,7 +47,7 @@ try {
 
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 
-    $Binaries = @("raqim-core.exe", "raqim-cli.exe", "raqim-mcp.exe")
+    $Binaries = @("raqim-core.exe", "raqim-cli.exe")
     foreach ($bin in $Binaries) {
         $Found = Get-ChildItem -Path $TmpDir -Filter $bin -Recurse -File | Select-Object -First 1
         if ($Found) {
@@ -70,15 +70,15 @@ try {
     Write-Host "Alhamdulillah! Raqim installation completed successfully." -ForegroundColor Green
     Write-Host "=================================================================="
     Write-Host "Binaries installed in $InstallDir:"
-    Write-Host "  * raqim-core.exe : Sovereign microkernel daemon"
-    Write-Host "  * raqim-cli.exe  : Administrative PKI forge and WAL tooling"
-    Write-Host "  * raqim-mcp.exe  : Model Context Protocol bridge"
+    Write-Host "  * raqim-core.exe : Zero-secret egress gateway, policy gate & WAL daemon"
+    Write-Host "  * raqim-cli.exe  : Offline workload token forge, doctor, tail, redact & export"
     Write-Host ""
     Write-Host "Restart your terminal or run:"
     Write-Host "  `$env:Path += ';$InstallDir'" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "Get started:"
     Write-Host "  raqim-core.exe --help"
+    Write-Host "  raqim-cli.exe keys forge --help"
     Write-Host "  pip install raqim"
     Write-Host "=================================================================="
 }
