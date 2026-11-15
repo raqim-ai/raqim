@@ -9,7 +9,7 @@ Proves all 6 enterprise security & durability invariants live on bare metal:
   ACT 3: Zero-Leak Disk Audit, Full-Envelope Merkle Proof, NDPA Redaction & CRC
   ACT 4: Mid-Payment Upstream Drop & `In-Doubt` Intent Reconciliation
   ACT 5: Zero-Stall SSE Byte-Tee, $0.00 HTTP Replay & Counterfactual Forking
-  ACT 6: The Phoenix Moment (`kill -9` SIGKILL & Sub-50ms State Rehydration)
+  ACT 6: The Phoenix Moment (`kill -9` SIGKILL & Live Crash Rehydration)
 ================================================================================
 """
 
@@ -50,10 +50,31 @@ from raqim.client import (
 )
 
 
+def _should_pause() -> bool:
+    return os.getenv("DEMO_PAUSE", "0") == "1"
+
+
+async def beat(label: str):
+    if _should_pause():
+        await asyncio.to_thread(input, f"\n{Style.DIM}[Enter -> {label}]{Style.RESET} ")
+
+
+def _format_error_reason(resp: httpx.Response) -> str:
+    try:
+        data = resp.json()
+        code = data.get("error_code", "DENIED")
+        msg = data.get("message", resp.text)
+        return f"{code}: {msg}"
+    except Exception:
+        return resp.text.strip()
+
+
 async def main():
     print_banner()
     clean_demo_sandbox()
     daemon_proc = await ensure_daemon_running()
+
+    await beat("Act 1: Zero-Secret Provisioning & Admin Isolation")
 
     # ==========================================================================
     # ACT 1: ZERO-SECRET IDENTITY & ADMIN PLANE ISOLATION
@@ -96,6 +117,8 @@ async def main():
             r = await http.post(f"{DAEMON_HTTP}{admin_route}", json={"agent_hex": hex_1})
             assert r.status_code in (404, 405), f"Admin route {admin_route} exposed on TCP ({r.status_code})!"
     print(f"  {Style.GREEN}✔{Style.RESET} Admin Plane Isolation   : All `/v1/admin/*` routes returned {Style.BOLD}HTTP 404{Style.RESET} on TCP Data Plane")
+
+    await beat("Act 2: ₦25k Legit Payout vs. ₦5M Drain, Smuggling & Velocity Attacks")
 
     # ==========================================================================
     # ACT 2: THE 4 CONCENTRIC EGRESS LOCKS (LIVE PAYSTACK AIRLOCK)
@@ -145,6 +168,7 @@ async def main():
         assert r_cap.status_code == 403, f"Expected 403 on over-cap transfer, got {r_cap.status_code}"
         assert UPSTREAM_STATS["paystack_hits"] == 1, "Blocked transfer reached Paystack upstream!"
         print(f"  {Style.BG_RED}{Style.WHITE} ✖ [LOCK 2 BLOCKED IN {block_latency_ms:.2f}ms] {Style.RESET} Polite ₦5,000,000 transfer exceeded `/amount <= 50000` cap -> {Style.RED}QUARANTINED{Style.RESET}")
+        print(f"    └─ Gateway Verdict   : {Style.DIM}{_format_error_reason(r_cap)}{Style.RESET}")
 
         # 2C. Attack 2: JSON Duplicate-Key Smuggling (`{"amount": 100, "amount": 50000000}`)
         smuggled_raw = b'{"amount": 100, "amount": 50000000, "currency": "NGN"}'
@@ -156,6 +180,7 @@ async def main():
         assert r_smug.status_code == 403, f"Expected 403 on duplicate-key JSON, got {r_smug.status_code}"
         assert UPSTREAM_STATS["paystack_hits"] == 1
         print(f"  {Style.BG_RED}{Style.WHITE} ✖ [LOCK 3 BLOCKED] {Style.RESET} Duplicate-key JSON smuggling (`amount:100` + `amount:50M`) -> {Style.RED}QUARANTINED{Style.RESET}")
+        print(f"    └─ Gateway Verdict   : {Style.DIM}{_format_error_reason(r_smug)}{Style.RESET}")
 
         # 2D. Attack 3: Rolling 1-Hour Velocity Drain (3x ₦40,000 = ₦120,000 > ₦100,000/hr cap)
         for idx in (1, 2):
@@ -174,6 +199,9 @@ async def main():
         assert r_v3.status_code == 403, f"3rd velocity transfer (120k > 100k/hr) must be blocked!"
         assert UPSTREAM_STATS["paystack_hits"] == 3  # Only 1 (primary) + 2 (within cap) hit upstream
         print(f"  {Style.BG_RED}{Style.WHITE} ✖ [LOCK 4 BLOCKED] {Style.RESET} Velocity drain (3x ₦40k = ₦120k > ₦100k/hr rolling cap) -> {Style.RED}QUARANTINED{Style.RESET}")
+        print(f"    └─ Gateway Verdict   : {Style.DIM}{_format_error_reason(r_v3)}{Style.RESET}")
+
+    await beat("Act 3: On-Disk Secret Audit, NDPA Erasure & WAL Bit-Flip")
 
     # ==========================================================================
     # ACT 3: ZERO-LEAK DISK AUDIT, ENVELOPE MERKLE PROOF, NDPA ERASURE & CRC
@@ -188,7 +216,7 @@ async def main():
     assert PAYSTACK_CANARY_SECRET not in wal_raw_text, "CRITICAL: Paystack secret leaked into WAL!"
     assert "22345678901" not in wal_raw_text, "CRITICAL: Customer BVN leaked into WAL!"
     assert "[REDACTED_BY_POLICY]" in wal_raw_text, "Expected [REDACTED_BY_POLICY] marker in WAL"
-    print(f"  {Style.GREEN}✔{Style.RESET} Disk Secret-Grep Audit  : {Style.GREEN}0 secrets, 0 raw BVNs on NVMe{Style.RESET} (`/bvn` scrubbed pre-WAL)")
+    print(f"  {Style.GREEN}✔{Style.RESET} Disk Secret-Grep Audit  : {Style.GREEN}0 secrets, 0 raw BVNs on Disk{Style.RESET} (`/bvn` scrubbed pre-WAL)")
 
     # 3B. Offline Merkle Proof on the Authorized Paystack Receipt + Tamper Rejection
     async with httpx.AsyncClient(timeout=3.0) as http:
@@ -222,7 +250,9 @@ async def main():
     # 3D. Physical Mid-File WAL Bit-Flip Detection
     corrupt_caught, corrupt_line, flip_off = await test_mid_file_wal_corruption_halt()
     assert corrupt_caught, "Engine failed to detect mid-file WAL CRC32 corruption!"
-    print(f"  {Style.GREEN}✔{Style.RESET} Mid-File WAL Bit-Flip   : Flipped byte {flip_off} -> {Style.YELLOW}{corrupt_line[:68]}...{Style.RESET}")
+    print(f"  {Style.GREEN}✔{Style.RESET} Mid-File WAL Bit-Flip   : Flipped byte {flip_off} (inside frame 0) -> {Style.YELLOW}{corrupt_line}{Style.RESET}")
+
+    await beat("Act 4: Bank Connection Drop & In-Doubt Reconciliation")
 
     # ==========================================================================
     # ACT 4: MID-PAYMENT CRASH & IN-DOUBT INTENT RECONCILIATION
@@ -250,12 +280,14 @@ async def main():
     print(f"  {Style.GREEN}✔{Style.RESET} Operator Admin Query (`/v1/admin/in_doubt`) surfaced exact unresolved Intent:")
     print(f"    └─ Idempotency-Key / TxID: {Style.CYAN}{doubt_tx_hex}{Style.RESET} | Path: {in_doubt_list[0]['namespace']}")
 
+    await beat("Act 5: Streaming LLM $0.00 Byte-Tee Replay & Counterfactual Fork")
+
     # ==========================================================================
     # ACT 5: ZERO-STALL SSE BYTE-TEE, $0.00 GATEWAY REPLAY & FORKING
     # ==========================================================================
     print_header(
         "ACT 5: ZERO-STALL SSE STREAMING BYTE-TEE & $0.00 REPLAY",
-        "Streaming LLM tokens captured inline via Byte-Tee and replayed in <1ms with zero upstream calls",
+        "Streaming LLM tokens captured inline via Byte-Tee and replayed deterministically with zero upstream calls",
     )
 
     # 5A. Live Streaming OpenAI SSE Call through Gateway
@@ -317,12 +349,14 @@ async def main():
     assert treasury.is_forked and out_forked["risk"] == "HIGH" and local_exec_count == 2
     print(f"  {Style.GREEN}✔{Style.RESET} Counterfactual Forking     : Replay hit = 0 executions; mutated arg forked cleanly onto `phantom_`")
 
+    await beat("Act 6: kill -9 Phoenix Resurrection & Empirical Scorecard")
+
     # ==========================================================================
-    # ACT 6: THE PHOENIX MOMENT (SIGKILL & SUB-50ms REHYDRATION)
+    # ACT 6: THE PHOENIX MOMENT (SIGKILL & PROCESS REHYDRATION)
     # ==========================================================================
     print_header(
         "ACT 6: THE PHOENIX MOMENT",
-        "Uncatchable `SIGKILL (kill -9)` -> Sub-50ms Recovery with Root, Quarantine & In-Doubt Invariance",
+        "Uncatchable `SIGKILL (kill -9)` -> Process Resurrection with Root, Quarantine & In-Doubt Invariance",
     )
 
     print(f"  Issuing {Style.RED}SIGKILL (kill -9){Style.RESET} to `raqim-core` (PID: {daemon_proc.pid})...")
@@ -358,7 +392,7 @@ async def main():
         ("TCP Admin Plane Exposure", "404 Not Found (Isolated to UDS 0600)"),
         ("Live Paystack Transfer (Injected Key)", f"{live_transfer_ms:.2f} ms (HTTP 200 + Idempotency-Key)"),
         ("Polite ₦5M Cap / Smuggling / Velocity", f"ALL 3 BLOCKED & QUARANTINED ({block_latency_ms:.2f} ms)"),
-        ("NVMe WAL Secret & BVN Leak Grep", "0 LEAKS ([REDACTED_BY_POLICY])"),
+        ("On-Disk WAL Secret & BVN Leak Grep", "0 LEAKS ([REDACTED_BY_POLICY])"),
         ("NDPA In-Place Redaction + Proof", "100% VALID Offline After Salt Erasure"),
         ("Mid-File WAL Bit-Flip Check", f"DETECTED & HALTED (Byte Offset {flip_off})"),
         ("Mid-Payment Drop Reconciliation", "1 In-Doubt Intent Surfaced via Admin UDS"),
