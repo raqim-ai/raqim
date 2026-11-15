@@ -55,7 +55,7 @@ os.environ["no_proxy"] = "*"
 
 import blake3
 import httpx
-from raqim_core import RaqimCryptoCore
+from raqim import RaqimCryptoCore
 
 # ==============================================================================
 # CANARY SECRETS (Injected ONLY into raqim-core child env — NEVER in agent env!)
@@ -311,7 +311,7 @@ port = {DAEMON_TCP_PORT}
 wal_path = "./demo.wal"
 manifest_path = "./compaction.manifest.json"
 witness_path = "./vault/witnesses"
-aegis_path = "./policy.toml"
+policy_path = "./policy.toml"
 checkpoint_path = "./vault/state_checkpoint.bin"
 control_journal_path = "./vault/control_journal.bin"
 cold_store_path = "./vault/cold_segments"

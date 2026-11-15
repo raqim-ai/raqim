@@ -20,7 +20,10 @@ from typing import (
 import blake3
 import httpx
 
-from raqim_core import RaqimCryptoCore
+try:
+    from .raqim_core import RaqimCryptoCore
+except ImportError:
+    from raqim_core import RaqimCryptoCore
 
 
 class ReplayDivergedError(Exception):
@@ -679,12 +682,25 @@ def verify_state_proof_offline(
         )
         tx_id = int(tx_id_hex, 16)
         agent_id_bytes = bytes.fromhex(agent_id_str)
-        step_ordinal = int(proof_dict.get("stepOrdinal", proof_dict.get("step_ordinal", 0)))
-        timestamp_ms = int(proof_dict.get("timestampMs", proof_dict.get("timestamp_ms", 0)))
+        step_ordinal = int(
+            next(
+                (proof_dict[k] for k in ("stepOrdinal", "step_ordinal") if k in proof_dict),
+                0,
+            )
+        )
+        timestamp_ms = int(
+            next(
+                (proof_dict[k] for k in ("timestamp", "timestampMs", "timestamp_ms") if k in proof_dict),
+                0,
+            )
+        )
         stage = int(proof_dict.get("stage", 2))
         namespace = proof_dict.get("namespace", "")
-        call_sig_hex = proof_dict.get("callSignatureHex") or proof_dict.get(
-            "call_signature_hex", ""
+        call_sig_hex = (
+            proof_dict.get("callSigHex")
+            or proof_dict.get("call_sig_hex")
+            or proof_dict.get("callSignatureHex")
+            or proof_dict.get("call_signature_hex", "")
         )
         salt_hex = proof_dict.get("payloadSaltHex") or proof_dict.get("payload_salt_hex", "")
         expected_payload_hash_hex = proof_dict.get("payloadHashHex") or proof_dict.get(
