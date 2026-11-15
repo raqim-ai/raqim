@@ -1,47 +1,42 @@
-# Raqim Security & Threat Model
+# Raqim Security & Threat Model (`v0.2.0`)
 
 | Field | Value |
 | :--- | :--- |
-| **Component** | `raqim-core` (single-node daemon) |
-| **Code version audited** | `0.1.2` (commit `9f82e7c` + uncommitted `api.rs` change) |
-| **Document revision** | 2026-10-23 |
-| **Methodology** | STRIDE per trust boundary, then checked against the source |
+| **Component** | `raqim-core` (single-node execution-integrity daemon & egress gateway) |
+| **Code Version** | `0.2.0` |
+| **Methodology** | STRIDE per trust boundary, verified against code and automated integration tests |
 
 > [!IMPORTANT]
-> This document describes **what the code does today**, not what the roadmap says it will do. Each control has a status marker:
+> This document describes **what the `v0.2.0` code actually enforces today**, backed by 6 automated Rust integration test suites (`cargo test -p raqim-core`) and the live 6-Act verification harness (`./run_demo.sh`).
 >
 > | Marker | Meaning |
 > | :---: | :--- |
-> | ✅ | Implemented. No automated test exists yet (`raqim-core` has **0** tests). |
-> | ⚠️ | Implemented with a known defect or gap. See [§7 Open Findings](#7-open-findings). |
-> | ❌ | Not implemented. Design intent only. |
->
-> If you're quoting Raqim publicly, only quote ✅ rows.
+> | ✅ | Implemented and verified by automated tests in `raqim-core/tests/`. |
+> | ⚠️ | Implemented with a documented residual boundary or operational prerequisite. |
+> | ❌ | Open finding or out of scope for `v0.2.0`. |
 
 ---
 
 ## 1. System Scope
 
-Raqim is a single-node **execution-integrity daemon** for AI-agent workloads. It does three things:
+Raqim (`raqim-core`) is a single-node **Zero-Secret Egress Gateway, Pre-Execution Policy Gate, and Cryptographic Flight Recorder** for autonomous AI agent workloads:
 
-1. **Policy gate.** It authenticates an agent and evaluates namespace ACLs and rate limits before a record is accepted.
-2. **Flight recorder.** It appends accepted records to a CRC-framed write-ahead log (`production.wal`).
-3. **Tamper evidence.** It hashes records into per-namespace BLAKE3 Merkle batches of 1,024 leaves and serves inclusion proofs for them.
-
-**Out of scope for this revision:** the Phase 1 egress gateway (`/v1/openai/*`, `/egress/*`), upstream secret injection, and JSON payload predicates. None of these exist in the code yet. Where this document mentions them, it says so.
+1. **Zero-Secret Egress Gateway (`/v1/egress/{connector}/{*subpath}`):** Authenticates agents via `rqm_v1` Ed25519 workload tokens, evaluates declarative route allowlists, strict duplicate-key JSON anti-smuggling, RFC 6901 JSON-Pointer value predicates, and rolling 1-hour velocity budgets before injecting upstream secrets held exclusively in daemon memory.
+2. **Synchronous Write-Ahead Flight Recorder (`wal.rs` & `cold_store.rs`):** Commits `ExecutionRecord` state transitions (`Intent`, `Outcome`, `Denied`, `System`) to an IEEE CRC-32 framed Write-Ahead Log using synchronous group commit (`oneshot` ACK released strictly after `fdatasync` / `sync_data()`), backed by an $O(1)$ offset-indexed binary `SegmentColdStore`.
+3. **Tamper-Evident Merkle Attestation & Privacy-Preserving Erasure (`merkle.rs` & `witness.rs`):** Seals full 9-field action envelopes into domain-separated BLAKE3 Merkle trees (`raqim.merkle.v1.leaf`, `raqim.merkle.v1.node`, `raqim.merkle.v1.node_odd`) using 128-bit CSPRNG-salted payload commitments (`raqim.payload.v1`), allowing NDPA/GDPR in-place PII erasure without invalidating historical inclusion proofs.
 
 ---
 
-## 2. Assets
+## 2. Protected Assets
 
-| ID | Asset | Location | Why it matters |
+| ID | Asset | Location | Security Impact |
 | :--- | :--- | :--- | :--- |
-| A1 | Swarm master signing key (Ed25519) | `./ca-keys/swarm_master.key` (0600) | Mints every agent capability certificate. Compromising it compromises every identity. |
-| A2 | Admin bearer secret | `./ca-keys/admin.secret` (0600) or `RAQIM_ADMIN_SECRET` | Authenticates admin-plane requests. |
-| A3 | Execution records (may contain PII) | `production.wal`, `vault/cold_segments/*`, `vault/state_checkpoint.bin`, `vault/control_journal.bin`, `vault/witnesses/*` | The audit trail. Also holds customer data (confidentiality and NDPA obligations). |
-| A4 | Quarantine blocklist | RAM + control journal + checkpoint | The kill switch. If it's lost, a revoked agent comes back. |
-| A5 | Merkle batch roots | RAM + checkpoint (+ witness files when anchoring is wired) | The tamper-evidence anchor. |
-| A6 | Policy file | `./policy.toml` (hot-reloaded) | Defines what every group may do. |
+| A1 | Swarm Master Signing Key (Ed25519) | `./ca-keys/swarm_master.key` (`0600`) | Offline Root CA key used by `raqim-cli keys forge` to sign agent certificates and `rqm_v1` tokens; also signs WORM witness roots. |
+| A2 | Operator Admin Bearer Secret | `RAQIM_ADMIN_SECRET` or `./ca-keys/admin.secret` (`0600`) | Authenticates operator requests over `./vault/admin.sock`. |
+| A3 | Upstream API Secrets (`PAYSTACK_SECRET_KEY`, `OPENAI_API_KEY`, etc.) | Daemon process RAM only (via `secret_env`) | Never exposed to agent containers, never written to WAL/ColdStore/checkpoints. |
+| A4 | Execution Records & Redacted Payloads | `production.wal`, `vault/cold_segments/*`, `vault/state_checkpoint.bin`, `vault/control_journal.bin` | Cryptographic audit trail and `$0.00` replay cache. |
+| A5 | Quarantine Blocklist & Rolling Budgets | RAM (`DashMap`) + rotated `control_journal.bin` + `state_checkpoint.bin` | Persistent kill switch and velocity-drain protection. |
+| A6 | Policy & Connector Manifests | `./policy.toml` (hot-reloaded), `./raqim.toml` | Governs all allowed routes, JSON predicates, redaction pointers, and rate limits. |
 
 ---
 
@@ -49,130 +44,28 @@ Raqim is a single-node **execution-integrity daemon** for AI-agent workloads. It
 
 ```mermaid
 flowchart TB
-    subgraph A["Boundary A: Untrusted Agent Zone"]
-        AG["Agent process<br/>holds: agent Ed25519 key + capability cert"]
+    subgraph A["Boundary A: Untrusted Agent Zone (Docker internal: true)"]
+        AG["Agent Container<br/>holds ONLY: rqm_v1 token or Ed25519 key+cert<br/>ZERO upstream API keys · ZERO direct internet"]
     end
-    subgraph B["Boundary B: raqim-core daemon (TCB)"]
-        TCP["Binary TCP ingress :8080"]
-        HTTP["HTTP data plane :8081"]
-        PE["PolicyEngine"]
-        WAL["WAL + Merkle + EffectStore"]
+    subgraph B["Boundary B: raqim-core Daemon (TCB)"]
+        TCP["Binary TCP Ingress :8080<br/>(Signed rkyv ExecutionRecord)"]
+        HTTP["HTTP Data & Egress Plane :8081<br/>(ZERO /v1/admin/* routes · NO CORS:*)"]
+        PE["PolicyEngine (4 Concentric Locks)"]
+        WAL["Synchronous fdatasync WAL + Merkle + ColdStore"]
     end
-    subgraph C["Boundary C: Operator / Host"]
-        UDS["Admin UDS ./vault/admin.sock (0600)"]
-        FS["Host filesystem: keys, WAL, vault"]
+    subgraph C["Boundary C: Operator Admin Plane"]
+        UDS["Admin UDS ./vault/admin.sock (mode 0600)<br/>+ Mandatory Bearer admin.secret"]
+        CLI["raqim-cli (Offline Key/Token Forge)"]
     end
-    subgraph D["Boundary D: External"]
-        WORM["External WORM / TSA (not wired)"]
-        UP["Upstream APIs (Phase 1, not built)"]
+    subgraph D["Boundary D: External Upstreams & WORM Vault"]
+        UP["Upstream APIs (Paystack, Stripe, OpenAI)<br/>(Secrets injected by Raqim over TLS)"]
+        WORM["External Object-Locked WORM (Optional worm_remote_url)"]
     end
-i    AG -->|"plaintext TCP, loopback by default"| TCP
-    AG -->|"plaintext HTTP, CORS *"| HTTP
+    AG -->|"Internal TCP/HTTP"| TCP
+    AG -->|"Internal HTTP + rqm_v1"| HTTP
     TCP --> PE --> WAL
-    HTTP --> PE
+    HTTP --> PE --> WAL
+    WAL -->|"Injected Secret + Idempotency-Key"| UP
     UDS --> B
-    B --> FS
-    B -.->|"planned"| WORM
-    B -.->|"planned"| UP
-```
-
-| Boundary crossing | Transport | Authentication today | Status |
-| :--- | :--- | :--- | :---: |
-| A → B (TCP :8080) | Plaintext TCP, binds `127.0.0.1` by default | Ed25519 cert lineage + per-packet signature over `record_bytes` | ⚠️ F-03, F-04, F-05 |
-| A → B (HTTP :8081) | Plaintext HTTP, `CORS: *` | Per-route; several routes have **none** | ⚠️ F-01, F-06 |
-| C → B (admin UDS) | Unix socket, mode 0600 | Filesystem permissions. Bearer token is optional when `RAQIM_ENV≠production` | ✅ |
-| B → D (witness) | — | — | ❌ F-08 |
-
----
-
-## 4. Security Invariants
-
-| # | Invariant | Status | Reality in code |
-| :--- | :--- | :---: | :--- |
-| I-1 | **Identity-bound execution.** Every accepted record is tied to an agent key that was certified by the master key. | ⚠️ | Lineage and signature checks exist. However, certificates can be minted by unauthenticated callers in the default (non-production) mode (F-01). |
-| I-2 | **Pre-execution interdiction.** Denied intents never reach the WAL. | ⚠️ | Policy runs before the WAL append. But it evaluates the unsigned `intent_path`, while the WAL stores the record's `namespace`, and the two are never compared (F-03). |
-| I-3 | **Durable acknowledgement.** An ACK means the record survives a crash. | ❌ | The ACK is sent once the record is queued to an in-memory channel, before `fsync` (F-02). |
-| I-4 | **Tamper evidence.** Changing any field of a recorded action is detectable. | ⚠️ | The leaf commits only to `payload_hash ‖ agent_id`. `stage`, `namespace`, `timestamp`, `step_ordinal`, `call_signature_hash` and `tx_id` can all be edited without detection (F-07). The Rust verifier rejects every multi-leaf proof (F-09). |
-| I-5 | **External non-repudiation.** Roots are signed and anchored outside the host. | ❌ | `WormWitnessEngine::anchor_batch` is never called, and the remote URL is hard-coded to `None` (F-08). |
-| I-6 | **Privacy-preserving erasure.** PII can be erased without breaking proofs. | ❌ | The leaf binds to `payload_hash`, which is the right primitive. But no redaction path exists. Raw payloads are copied into the WAL, cold segments, checkpoint, control journal, RAM indexes and witness bundles. An unsalted hash of low-entropy PII can be brute-forced (F-12). |
-| I-7 | **Durable revocation.** A quarantine survives restarts. | ⚠️ | It's journaled. However, journal write errors are ignored, and compaction can delete mutations that arrive between checkpoint export and journal truncation (F-11). |
-
----
-
-## 5. Attacker Models & STRIDE Analysis
-
-### T1: Network peer without credentials (same host, or LAN if `host=0.0.0.0`)
-
-| STRIDE | Attack | Mitigation | Status |
-| :---: | :--- | :--- | :---: |
-| E | Mint an `admin_group` certificate via `POST :8081/v1/admin/ca/mint` | Route is only removed when `RAQIM_ENV=production`. Default is non-production. **Verified live on 2026-10-23: HTTP 200 with a cross-origin `Origin` header.** | ❌ F-01 |
-| E | Drive-by from a malicious web page calling `localhost:8081` | `CorsLayer::allow_origin(Any)` actively permits it | ❌ F-01 |
-| I | Read any agent's recorded outputs via `POST /v1/effect/get` | No authentication on the route | ❌ F-06 |
-| I | Dump recent records via `GET /v1/admin/records/recent` on :8081 | Non-production `ValidatedIdentity` treats a missing header as admin | ❌ F-06 |
-| D | Quarantine a victim agent permanently | `verify_session_lineage` quarantines `cert.agent_hex` on a forged master signature **before** any proof that the caller holds the private key. The victim's public key is all that's needed. | ❌ F-04 |
-
-### T2: Compromised or prompt-injected agent (holds a valid cert and key)
-
-| STRIDE | Attack | Mitigation | Status |
-| :---: | :--- | :--- | :---: |
-| E | Write records into a forbidden namespace | Policy checks `intent_path`. The WAL stores `record.namespace`. These are not bound (F-03). | ❌ |
-| E | Call a blocked namespace | `blocked_namespaces` takes precedence over `allowed_namespaces`, then default-deny. Prefix match only (`/admin*` also matches `/administrator`). | ⚠️ |
-| D | Exhaust the rate budget | The token bucket is **per group**, not per agent. One agent can drain the bucket and get its innocent siblings quarantined (F-05). | ⚠️ |
-| S/R | Replay a captured signed frame | ±30 s timestamp window only. No nonce or sequence dedup, so a frame can be replayed any number of times inside the window. | ⚠️ |
-| T | Poison the replay cache | `record_effect` overwrites an existing `(agent, step, call_sig)` key without a conflict check. This is limited to the agent's own ID. | ⚠️ |
-| D | Allocation bomb | 1 MiB frame cap on TCP. 512-connection semaphore. | ✅ |
-
-### T3: Post-facto auditor or DBA with file access (no root, no keys)
-
-| STRIDE | Attack | Mitigation | Status |
-| :---: | :--- | :--- | :---: |
-| T | Flip `Denied` → `Outcome`, or edit timestamp, namespace or step | Not covered by the leaf hash (F-07). The CRC is recomputable by anyone. | ❌ |
-| T | Edit the payload bytes | `payload_hash` changes, so the leaf changes and the proof fails. The in-tree verifier is broken (F-09), so external verification currently has to be done with the Python/JS verifier. | ⚠️ |
-| T | Bit-rot or torn write | Per-frame CRC-32 (`crc32fast`, **IEEE polynomial, not Castagnoli**) plus tail truncation on boot. A mid-file CRC failure **truncates every valid frame after it** (F-10). | ⚠️ |
-| R | Delete a whole batch | Undetectable without external anchoring (F-08). | ❌ |
-
-### T4: Host root or privileged infrastructure admin
-
-| Residual risk (accepted) | Required external control | Status |
-| :--- | :--- | :---: |
-| Can read `swarm_master.key`, re-sign roots, rewrite WAL and witness files, and scrape process memory. Local permissions (0600/0400) are no defence against root. | Anchor every batch root outside the host: S3/R2 Object Lock in compliance mode, an RFC 3161 TSA, or a public transparency log. Move the master key to an HSM or KMS. | ❌ |
-
----
-
-## 6. Explicit Non-Goals (this revision)
-
-1. **Cooperative SDK mode is not enforcement.** An agent process that has direct internet egress and holds raw upstream keys can bypass `@client.trace` with a raw socket. Structural enforcement needs an isolated network namespace (`internal: true`) with Raqim as the only egress, and that egress gateway is not built yet.
-2. **No semantic prompt-injection classification.** Raqim enforces deterministic identity, namespace and rate rules. It does not run LLM-judge classifiers.
-3. **Side-channel and physical attacks.** `ptrace` by root, microarchitectural side channels, and disk theft without full-disk encryption (LUKS) are out of scope.
-4. **Transport confidentiality.** Ingress is plaintext. Deployments must keep it on loopback or a private network namespace until TLS or mTLS is added.
-
----
-
-## 7. Open Findings
-
-The full analysis is in the Phase 0 audit report. Severity reflects impact on the invariants above.
-
-| ID | Severity | Finding | Invariant |
-| :--- | :---: | :--- | :---: |
-| F-01 | 🔴 Critical | Unauthenticated, CORS-open certificate minting on the TCP data plane in the default mode | I-1 |
-| F-02 | 🔴 Critical | ACK is sent before `fsync`. WAL write errors are swallowed, and a partial frame poisons every later frame. | I-3 |
-| F-03 | 🔴 Critical | Policy evaluates `intent_path`; the WAL records `namespace`. The two are never bound, and `intent_path` is not signed. | I-2 |
-| F-04 | 🔴 Critical | Unauthenticated callers can trigger durable quarantine of any agent | I-7 |
-| F-05 | 🟠 High | Per-group (not per-agent) rate bucket plus quarantine-on-limit lets one agent trigger sibling quarantine | I-7 |
-| F-06 | 🟠 High | Unauthenticated read of recorded payloads (`/v1/effect/get`, non-prod admin routes) | A3 |
-| F-07 | 🔴 Critical | Leaf hash omits `stage`, `namespace`, `timestamp`, `step_ordinal`, `call_signature_hash`, `tx_id` | I-4 |
-| F-08 | 🟠 High | Batch roots are never signed or anchored (`anchor_batch` has no caller) | I-5 |
-| F-09 | 🔴 Critical | Rust verifier uses domain `raqim.axon.v1.node`; the tree uses `raqim.merkle.v1.node`. Every multi-leaf proof fails (verified). | I-4 |
-| F-10 | 🟠 High | Mid-file CRC failure truncates all later valid frames. A corrupt length can trigger allocations up to 4 GiB. | I-3 |
-| F-11 | 🟠 High | Control-journal truncation race during compaction. Journal write errors are ignored. | I-7 |
-| F-12 | 🟡 Medium | No erasure path. PII is replicated into six stores, including WORM bundles. The hash is unsalted. | I-6 |
-| F-13 | 🟡 Medium | Odd-leaf duplication: `root([a,b,c]) == root([a,b,c,c])` (verified, CVE-2012-2459 class) | I-4 |
-
----
-
-## 8. Minimum Deployment Requirements (until findings are closed)
-
-1. Set `RAQIM_ENV=production`, keep `host=127.0.0.1`, and never expose :8080 or :8081 beyond loopback or a private netns.
-2. Mint certificates only through `./vault/admin.sock`.
-3. Treat every Merkle proof as **advisory** until F-07, F-09 and F-13 are fixed and anchoring (F-08) is wired.
-4. Do not record raw PII in `payload_bytes` until a redaction and keyed-commitment path exists (F-12).
+    WAL -->|"PII-Stripped Signed Batches"| WORM
+Boundary CrossingTransportAuthentication & IsolationStatusA → B (TCP :8080)Plaintext TCP (loopback / private netns)Master-signed CapabilityCertificate + per-packet Ed25519 signature over record_bytes (including namespace)✅A → B (HTTP :8081)Plaintext HTTP (loopback / private netns)rqm_v1 Ed25519 workload token on /v1/egress/*; Ed25519 attestation on /v1/effect/preflight & /record. Zero /v1/admin/* routes mounted.✅ (egress), ⚠️ (F-06)C → B (Admin UDS)Unix Domain Socket (./vault/admin.sock, 0600)OS kernel UID permission + constant-time Authorization: Bearer <admin.secret> (ValidatedIdentity never defaults to admin)✅B → D (Upstreams)Outbound HTTPS (rustls-tls)Upstream secret injected strictly from daemon secret_env; agent tokens stripped; Idempotency-Key bound to Intent UUIDv7✅B → D (WORM Witness)Local 0400 JSON + optional HTTP PUT (worm_remote_url)Ed25519-signed AnchoredRootWitness, verified on boot; raw PII stripped before WORM anchoring✅ (Local), ⚠️ (External URL opt-in)4. Security Invariants Verification Matrix#InvariantStatusEnforcement & Automated VerificationI-1Identity-Bound Execution✅Offline PKI forging via raqim-cli keys forge; /v1/admin/ca/mint removed from daemon. Verified in gateway_security_lock_test.rs & policy_security_test.rs.I-2Pre-Execution Interdiction & Binding✅Unsigned intent_path deleted from IngressEnvelope; PolicyEngine evaluates signed record.namespace. Egress enforces 4 concentric locks (route ACL, StrictJson anti-smuggling, JSON-Pointer predicates, rolling 1h budget) and seals ExecutionStage::Denied. Verified in gateway_security_lock_test.rs.I-3Durable Synchronous Acknowledgement✅WalEngine::append() awaits a oneshot ACK released strictly after sync_data() (fdatasync). Fail-closed engine poisoning on I/O errors. Mid-file CRC mismatches halt with WalError::MidFileCorruption; tail torn writes truncate cleanly. Verified in wal_durability_test.rs.I-4Full-Envelope Tamper Evidence✅Leaf binds all 9 envelope fields (tx_id, agent_id, step_ordinal, timestamp_ms, stage, len(ns), namespace, call_signature_hash, payload_hash). Odd-node domain separation (raqim.merkle.v1.node_odd) defeats CVE-2012-2459. Verified in merkle_proof_test.rs.I-5Signed WORM Witness Anchoring⚠️MerkleBatchCrystallized subscriber + compactor/shutdown flush calls WormWitnessEngine::anchor_batch(). Boot audit verifies Ed25519 signatures on witness headers. External worm_remote_url (e.g., MinIO/R2 Object Lock) must be configured to defeat host root.I-6Privacy-Preserving Erasure (NDPA/GDPR)✅128-bit CSPRNG payload_salt defeats low-entropy PII brute-forcing. POST /v1/admin/redact/{tx_id} scrubs RAM and overwrites cold_history.seg in-place while preserving Merkle proofs; WORM witnesses strip PII before sealing. Verified in compaction_recovery_test.rs. (Note: run raqim compact before raqim redact to also clear uncompacted hot WAL frames.)I-7Durable Revocation & Anti-DoS✅Authenticate-first order ensures spoofed signatures (401) never quarantine honest agents. Per-agent rate buckets return 429 on bursts and quarantine at 50 consecutive strikes. Atomic .compacting journal rotation closes the compaction race window. Verified in policy_security_test.rs & compaction_recovery_test.rs.5. Remediation Status of Prior Audit Findings (v0.1.2 → v0.2.0)IDPrior SeverityFinding Summaryv0.2.0 StatusF-01🔴 CriticalUnauthenticated, CORS-open /v1/admin/ca/mint on TCP :8081✅ CLOSED (Endpoint deleted; CorsLayer removed; UDS-only Admin Plane)F-02🔴 CriticalFire-and-forget WAL ACK before fdatasync; swallowed I/O errors✅ CLOSED (oneshot ACK post-sync_data(), fail-closed poisoning)F-03🔴 CriticalUnsigned intent_path checked while record.namespace persisted✅ CLOSED (intent_path deleted from IngressEnvelope)F-04🔴 CriticalUnauthenticated packets could permanently quarantine honest agents✅ CLOSED (Authenticate-first order; unauthenticated errors return 401)F-05🟠 HighGroup-shared rate bucket & immediate quarantine on rate exhaustion✅ CLOSED (Per-agent DashMap buckets + two-tier 429 → 50-strike quarantine)F-06🟡 MediumUnauthenticated read on POST /v1/effect/get & GET /v1/state/proof/{tx_id}⚠️ OPEN (Accepted for Loopback v0.2.0) — Requires knowing agent_hex, step_ordinal, and 32-byte call_signature_hash; planned to require rqm_v1 token auth in v0.2.1.F-07🔴 CriticalLeaf hash omitted stage, namespace, timestamp, step, call_sig, tx_id✅ CLOSED (Full 9-field raqim.merkle.v1.leaf envelope commitment)F-08🟠 HighBatch roots never signed or anchored (anchor_batch uncalled)✅ CLOSED (Event bus consumer + compactor/shutdown flush + boot sig audit)F-09🔴 CriticalVerifier domain mismatch (axon vs merkle) broke multi-leaf proofs✅ CLOSED (Unified raqim.merkle.v1.* keys verified across Rust & Python)F-10🟠 HighMid-file CRC failure truncated subsequent valid WAL frames; no frame cap✅ CLOSED (MidFileCorruption halt vs tail truncation + 16 MiB cap)F-11🟠 HighControl-journal truncation race during compaction✅ CLOSED (Atomic control_journal.bin.compacting rotation before snapshot)F-12🟡 MediumUnsalted PII hash & missing erasure path✅ CLOSED (128-bit payload_salt, pre-WAL pointer redaction, redact_by_txid, PII-stripped WORM)F-13🟡 MediumOdd-leaf duplication collision root([a,b,c]) == root([a,b,c,c])✅ CLOSED (raqim.merkle.v1.node_odd domain separation, tested)6. Residual Risks & Explicit Non-Goals (v0.2.0)Host root (UID 0) Adversary: Local Unix permissions (0600 on keys/sockets, 0400 on local witness files) cannot defend against a compromised host root user. Organizations defending against malicious host administrators must configure worm_remote_url to replicate witness bundles to an external Compliance-Locked object store (e.g., external MinIO or Cloudflare R2) or RFC 3161 TSA, and keep swarm_master.key offline.Plaintext Loopback / Internal Network Transport: Ports :8080 and :8081 speak plaintext TCP/HTTP and bind to 127.0.0.1 by default. Deployments must restrict agent traffic to loopback or a Docker internal: true / Kubernetes NetworkPolicy private network until native mTLS is added.Replay Window Deduplication (TCP / SDK Path): The signed TCP/SDK path enforces a ±30-second timestamp freshness window without maintaining a per-frame nonce cache within those 30 seconds.No Probabilistic LLM Prompt-Injection Classifiers: Raqim enforces deterministic cryptographic identity, route allowlists, JSON structural parsing, and numerical/velocity bounds. It does not run probabilistic LLM-judge models over natural language prose.

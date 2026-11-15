@@ -1,569 +1,198 @@
 # Raqim (رَقِيم)
 
-> **A deterministic cryptographic runtime ledger, flight recorder, and pre-execution policy gate for autonomous AI agent swarms.**
+> **A zero-secret egress gateway, pre-execution policy gate, and cryptographic flight recorder for autonomous AI agents — written in Rust.**
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Version: 0.2.0](https://img.shields.io/badge/Version-0.2.0-brightgreen)](#)
 [![Language: Rust](https://img.shields.io/badge/Language-Rust_1.75+-orange.svg)](https://www.rust-lang.org/)
-[![Python: 3.10+](https://img.shields.io/badge/Python-3.10+-3776AB.svg)](https://pypi.org/project/raqim/)
-[![Throughput](https://img.shields.io/badge/Closed--Loop_ACK-23%2C355_TPS-brightgreen)](#verified-performance-benchmarks)
-[![P50 Latency](https://img.shields.io/badge/P50_Latency-1.85_ms-blue)](#verified-performance-benchmarks)
-[![Replay Cost](https://img.shields.io/badge/Deterministic_Replay-%240.00_Cost-success)](#verified-performance-benchmarks)
+[![Cold Boot](https://img.shields.io/badge/Cold_Boot-13.17_ms-blue)](#verified-hardware-benchmarks-v020)
+[![Durable Throughput](https://img.shields.io/badge/True_fdatasync_ACK-6%2C759_TPS-brightgreen)](#verified-hardware-benchmarks-v020)
+[![Replay Cost](https://img.shields.io/badge/Deterministic_Replay-%240.00_Cost-success)](#verified-hardware-benchmarks-v020)
 
 ---
 
-![Raqim Hero Split-Terminal Demo](assets/demo.gif)
+## The Problem: Agents With Keys and Direct Internet Access
+
+When an autonomous AI agent is wired to Paystack, Stripe, internal banking APIs, databases, or LLMs, passive observability platforms (LangSmith, Datadog, Helicone) only tell you what happened **after** the money is gone or customer PII is leaked.
+
+If a prompt-injected agent holds `PAYSTACK_SECRET_KEY` or `OPENAI_API_KEY` in its container environment, it can exfiltrate the key, bypass SDK decorators with a raw HTTP call, or send a completely valid, "polite" `POST /transfer` request for ₦50,000,000.
+
+**Raqim** eliminates that trust model:
+
+> **Your agent holds zero upstream secrets and has zero direct internet access.** Every outbound API call routes through `raqim-core`, passes four deterministic security locks, writes a crash-safe `Intent` ahead to NVMe, executes with credentials the agent never sees, and seals an offline-verifiable BLAKE3 Merkle proof.
 
 ---
 
-## What Raqim Is
+## Core Architecture (`v0.2.0`)
 
-When autonomous AI agents make tool calls, execute financial transactions, mutate databases, and stream reasoning in production, they cannot be governed by disposable logs or passive HTTP tracing. If an agent hallucinates, loops infinitely, leaks sensitive records, or attempts unauthorized operations, standard observability tools merely record the disaster after it occurs.
-
-**Raqim** is an open-source execution-integrity runtime, flight recorder, and pre-execution policy gate built in Rust (`raqim-core`) with native Python SDK bindings (`raqim-py`). It intercepts every tool invocation, thought, and state mutation at the control-plane boundary:
-
-1. **Cryptographic Identity (PKI):** Every agent is issued a unique Ed25519 keypair and a signed capability passport. Anonymous or forged packets are dropped at the TCP edge before reaching runtime memory.
-2. **Pre-Execution Firewall (Aegis):** Enforces wildcard namespace Access Control Lists (ACL) and atomic token-bucket rate limits (via lock-free CAS loops) *before* external tools or APIs can be executed.
-3. **Append-Only Write-Ahead Log (Nucleus WAL):** Delivers crash-safe durability via a binary WAL with a 2ms group-commit interval with `fdatasync()`, zero-copy `rkyv` serialization, and automatic torn-frame recovery.
-4. **Domain-Separated Merkle DAG (Axon):** Batches state transitions into binary Merkle trees using BLAKE3 domain-separated hashing. Generates compact cryptographic inclusion proofs verifiable offline without network access (e.g., 192 bytes for a 64-leaf tree; 320 bytes for a sealed 1,024-leaf batch).
-5. **Conflict-Free State Convergence:** Backed by in-memory CRDT shards (`Loro`) to merge multi-agent causal timelines across namespaces, mathematically guaranteeing eventual consistency across concurrent writes.
-6. **$0.00 Deterministic Side-Effect Replay & Reality Forking:** The `@client.trace` decorator hashes canonical function signatures and arguments. Unmodified replays execute at **$0.00 API token cost** directly from WAL effect caches. When code or prompts mutate, Raqim automatically isolates execution into a parallel universe (`phantom_`) branch, preserving historical integrity while enabling safe counterfactual exploration.
-7. **2PC Compaction & Zero-Amnesia State Checkpointing:** A 2-Phase Commit (2PC) engine compacts historical WAL frames into LanceDB for hybrid semantic and exact memory retrieval while capturing atomic binary state snapshots (`state_checkpoint.bin`). Phoenix rehydration is designed for sub-5ms in-memory state reconstruction from WAL frames, preserving complete state across crashes.
-8. **Enterprise OpenTelemetry (OTel) Bridge:** Full projection of Raqim's execution-integrity DAG and Merkle proofs into CNCF-standard OTLP JSON (`client.export_to_otel()`), pushing token metrics and causal spans directly to Datadog, Jaeger, Grafana Tempo, or Langfuse with zero application refactors.
-
----
-
-## Architectural Comparison: Execution Integrity vs. Passive Telemetry
-
-| Architectural Dimension | Uninstrumented Agents<br>*(Raw Scripts, CrewAI, AutoGen)* | Passive SaaS Observability<br>*(LangSmith, Arize Phoenix, Langfuse)* | Enterprise Cloud Logging<br>*(CloudWatch, Elasticsearch, Datadog)* | **Raqim Core Substrate** |
-| :--- | :--- | :--- | :--- | :--- |
-| **Intervention Timing** | ❌ None (tools execute unconditionally) | ❌ Passive / Post-hoc (records failure after action executes) | ❌ Passive log ingestion after execution | **✅ Active Pre-Execution Interdiction** (Aegis blocks unauthorized tool calls before dispatch) |
-| **Identity & Lineage** | ❌ Ambient / None (shared credentials) | ⚠️ API keys / Bearer tokens (shared secrets, easily leaked) | ⚠️ IAM roles / Service accounts (broad infrastructure perms) | **✅ Ed25519 PKI + Swarm Master Passports** (verified per packet) |
-| **Audit Evidentiary Weight** | ❌ None (ephemeral stdout / stderr) | ❌ Mutable database records in third-party SaaS cloud | ❌ Mutable text logs (subject to admin UPDATE / DELETE) | **✅ Domain-Separated BLAKE3 Merkle DAG** (Axon batches with signed WORM receipts) |
-| **Offline Attestation** | ❌ None | ❌ Impossible (must trust SaaS vendor API) | ❌ None (no cryptographic hash chains) | **✅ Mathematical Offline Proof** (`verify_state_proof_offline` zero network calls) |
-| **Debugging & Failure Reproduction** | ❌ Re-run whole pipeline ($$$ token burn + stochastic drift) | ❌ Re-invokes LLM APIs ($$$) or uses manual brittle mocks | ❌ Static logs; no concept of LLM side-effects | **✅ Deterministic Side-Effect Replay at $0.00 cost** via canonical input hashing |
-| **Code / Prompt Divergence** | ❌ Overwrites state or crashes | ❌ Overwrites trace or creates disconnected trace ID | ❌ Unstructured log spam | **✅ Automatic Causal Reality Forking** (divergent execution forks into `phantom_` branch) |
-| **Multi-Agent Convergence** | ❌ Race conditions; data overwrites | ❌ Race conditions; last-write-wins | ❌ Partition ordering; manual conflict resolution | **✅ In-Memory CRDT Shards (Loro)** (guaranteed eventual consistency across timelines) |
-
-### Why Existing Tools Fail for Autonomous Agent Swarms
-
-1. **Passive Logging is Not Governance:** SaaS tracing tools receive spans *after* an agent has already executed a bash command, submitted a wire transfer, or deleted a database table. Raqim's Aegis firewall intercepts transactions at the socket and decorator level, dropping unauthorized intents with microsecond latency.
-2. **Logs Lack Evidentiary Weight:** Unsigned JSON logs in an elasticsearch cluster or Postgres table can be edited, truncated, or forged. Raqim seals every thought into a BLAKE3 Merkle DAG. Any compliance officer or external auditor can mathematically verify that thought `X` was committed by agent `Y` at index `Z` without running a server or making a network request.
-3. **Debugging Agent Swarms is Prohibitively Expensive:** Re-running a 10-step multi-agent pipeline during debugging burns real money in LLM API tokens and produces different non-deterministic outputs. Raqim guarantees that any previously executed node returns its recorded output in `<1ms` for **$0.00**. When you alter a prompt to test a counterfactual hypothesis, only the diverged step executes live, branching into an isolated timeline.
-
----
-
-## Architecture & Data Flow
-
-```
-                      AGENT RUNTIME (Python SDK / Custom Enclave)
-                                      │
-                         [IngressEnvelope]
-                         - Ed25519 Signature
-                         - Capability Passport
-                         - rkyv Zero-Copy State
-                                      │
-                                      ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                             RAQIM CORE DAEMON                               │
+│ UNTRUSTED AGENT CONTAINER (Docker internal: true — Zero Internet Access)  │
+│  • Holds ONLY a revocable rqm_v1 Ed25519 workload token                   │
+│  • Zero Paystack / Stripe / OpenAI keys in os.environ                     │
+│  • Integrates via base URL swap (Python, TypeScript, Go, or curl)           │
+└───────────────────────────────────────┬─────────────────────────────────────┘
+│ HTTP -> /v1/egress/{connector}/{path}
+▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ RAQIM CORE DAEMON (raqim-core — Single Rust Binary, 13.17ms Cold Boot)    │
 │                                                                             │
-│  [1] AEGIS PRE-EXECUTION POLICY GATE                                        │
-│      ├── Master CA Lineage Verification (Ed25519)                           │
-│      ├── Fast-Path Atomic Token Bucket (Lock-free compare_exchange_weak)     │
-│      ├── Wildcard Namespace ACLs (/finance/* vs /admin/*)                   │
-│      └── Anti-Replay Drift Window (<30s timestamp bounds)                   │
-│                                     │                                       │
-│                                     ▼                                       │
-│  [2] INGRESS CASCADE (Sync Execution Pipeline)                              │
-│      ├── Loro CRDT Engine      -> In-memory causal state convergence        │
-│      ├── Axon Merkle DAG       -> BLAKE3 leaf derivation (1,024 batch cap)   │
-│      └── Nucleus WAL Engine    -> 2ms NVMe Group-Commit binary append       │
-│                                     │                                       │
-│                                     ▼                                       │
-│  [3] STORAGE, RETRIEVAL & CONTROL PLANE                                     │
-│      ├── Hot Vector Buffer     -> In-RAM Cosine similarity cache            │
-│      ├── 2PC Compactor         -> Background manifest-driven LanceDB commit │
-│      ├── Axum Engine (:8081)   -> REST Control Plane & WebSocket A2A Mesh   │
-│      └── Zenoh Mesh (:7447)    -> Out-of-band circuit breaker eviction     │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                     Closed-Loop ACK (20-byte server confirmation)
-                                      ▼
-                        NEXT.JS AUDIT CONSOLE (:3000)
-```
+│  [1] WORKLOAD TOKEN AUTH (token.rs)                                       │
+│      • Verifies Ed25519 signature BEFORE JSON parsing (rqm_v1.<b64>.<sig>)│
+│      • Authenticate-first anti-DoS (bad signatures return 401, never jail)  │
+│                                                                             │
+│  [2] THE 4 CONCENTRIC POLICY LOCKS (policy.rs)                            │
+│      • Lock 1: Connector HTTP Method + Path Allowlist (Default Deny)        │
+│      • Lock 2: Per-Agent Two-Tier Rate Limit (429 Burst -> 50-Strike Jail)  │
+│      • Lock 3: StrictJson Parser (Rejects Duplicate-Key JSON Smuggling)   │
+│      • Lock 4: RFC 6901 JSON-Pointer Value Caps & 1-Hour Velocity Budgets   │
+│                                                                             │
+│  [3] SYNCHRONOUS WAL + MERKLE + COLDSTORE (wal.rs, merkle.rs)           │
+│      • Pre-WAL JSON-Pointer Redaction (/bvn, /card/cvv scrubbed)        │
+│      • Write-Ahead Intent committed via synchronous fdatasync ACK       │
+│      • Full 9-Field BLAKE3 Merkle Leaf (raqim.merkle.v1.leaf)             │
+│      • Salted Commitments (raqim.payload.v1) for NDPA/GDPR Erasure        │
+│                                                                             │
+│  [4] CREDENTIAL INJECTION, SSE BYTE-TEE & $0.00 REPLAY (egress.rs)        │
+│      • Injects real secret from daemon secret_env + Idempotency-Key     │
+│      • Zero-stall SSE streaming byte-tee (text/event-stream)              │
+│      • Gateway-level $0.00 Replay (X-Raqim-Mode: replay)                  │
+└─────────────────┬───────────────────────────────────────────┬───────────────┘
+│ Unix Socket ./vault/admin.sock (0600)   │ Outbound TLS
+▼                                           ▼
+OPERATOR CLI (raqim-cli)                UPSTREAM APIs & WORM VAULT
+keys forge, doctor, tail,           Paystack, Stripe, OpenAI,policy, redact, export              Gemini, MinIO / R2 WORM
 
-### The Ingress Cascade Step-by-Step
-
-1. **Ingress Handshake:** Agent transmits an `IngressEnvelope` over raw TCP (port `8080`) containing the serialized state, Ed25519 signature, public key, and CA-signed capability passport.
-2. **Aegis Evaluation:** 
-   - Signature is verified against the agent's public key.
-   - Capability passport is verified against the Swarm Master Key.
-   - Namespace route is matched against `allowed_namespaces` and `blocked_namespaces`.
-   - Rate limit tokens are decremented atomically via a compare-and-swap loop. Violations are instantly quarantined, triggering an out-of-band eviction directive.
-3. **Causal Convergence:** The state delta is merged into the namespace's Loro CRDT memory shard.
-4. **Merkle Sealing:** A BLAKE3 domain-separated leaf hash (`raqim.axon.v1.leaf`) is computed. When 1,024 leaves accumulate, a Merkle tree is crystallized, anchoring the batch root to the temporal DAG.
-5. **Physical Durability:** The sealed frame is pushed to the Nucleus WAL queue, which syncs to disk every 2ms via a group-commit interval with `fdatasync()`.
-6. **Confirmation:** Raqim returns a physical 20-byte closed-loop acknowledgment to the client containing the 128-bit UUIDv7 transaction ID.
 
 ---
 
-## Verified Performance Benchmarks
+## Why Raqim vs. LLM Routers & Passive Observability
 
-All figures are reproducible using the included benchmark harness: `cargo run --release --bin raqim-siege`.
+| Capability | LLM Routers<br>*(LiteLLM, Portkey)* | Passive Observability<br>*(LangSmith, Datadog)* | **Raqim (`v0.2.0`)** |
+| :--- | :---: | :---: | :---: |
+| **Zero-Secret Agent Airlock** (Payments + LLMs) | ⚠️ LLM keys only | ❌ None | **✅ Named Reverse-Proxy Connectors** |
+| **JSON-Pointer Value Caps & Hourly Velocity Budgets** | ❌ Token spend only | ❌ Post-hoc alerts | **✅ Pre-Execution Interdiction + Quarantine** |
+| **Duplicate-Key JSON Smuggling Defense** | ❌ No | ❌ No | **✅ `StrictJson` Fail-Closed Parser** |
+| **Mid-Payment Crash `In-Doubt` Reconciliation** | ❌ No | ❌ No | **✅ Write-Ahead `Intent` + Auto `Idempotency-Key`** |
+| **Tamper-Evident Offline Merkle Proofs** | ❌ Mutable DB | ❌ Mutable SaaS | **✅ 9-Field BLAKE3 Envelope + Signed WORM** |
+| **NDPA / GDPR Right-to-Erasure Compatible** | ❌ No | ❌ No | **✅ 128-bit Salted In-Place Redaction** |
+| **Language-Agnostic $0.00 Replay (incl. SSE)** | ⚠️ Prompt cache | ❌ No | **✅ Gateway Replay + `@client.trace` Forking** |
 
-Throughput figures reflect **Synchronous Closed-Loop Acknowledgment (ACK)**: every single measurement represents an end-to-end round trip where the server validated cryptographic signatures, enforced firewall policies, derived Merkle leaves, committed to physical NVMe storage via a 2ms group-commit interval with `fdatasync()`, and returned an acknowledgment over the TCP socket.
+---
 
-### Test Environment
-* **Hardware:** Intel Core i7 (10 Cores / 16 Threads), 16GB DDR4 RAM, PCIe 4.0 NVMe SSD
-* **OS Platform:** Ubuntu 22.04 LTS via WSL2 (Linux 5.15 Kernel)
-* **Workload:** 500,000 thoughts distributed across 50 partitioned agent namespaces
-* **Concurrency:** 50 simultaneous non-blocking TCP socket streams
+## Verified Hardware Benchmarks (`v0.2.0`)
 
-### Latency Distribution & Resource Footprint Audit
-| Metric | Production Result | Technical Verification Standard |
+Every figure below was empirically measured on bare metal (`Ubuntu 22.04 WSL2`, `release` profile) using `raqim-siege` and `./run_demo.sh` with **true synchronous `fdatasync` group-commit ACKs enabled** (zero fire-and-forget RAM lies):
+
+| Measured Dimension | Empirical `v0.2.0` Result | Verification Harness |
 | :--- | :--- | :--- |
-| **Sustained Throughput** | **23,355.21 TPS** | Closed-loop 20-byte server ACK confirmation |
-| **Minimum Latency** | **132 µs (0.132 ms)** | Raw TCP socket transport + in-memory validation |
-| **P50 Latency (Median)** | **1,853 µs (1.853 ms)** | Physically synchronized to 2ms NVMe group-commit interval |
-| **P90 Latency** | **3,411 µs (3.411 ms)** | Tail distribution under 50-worker concurrent socket saturation |
-| **P99 Latency (Tail)** | **5,935 µs (5.935 ms)** | Sub-6ms tail latency under continuous high-velocity ingestion |
-| **P99.9 Latency** | **11,820 µs (11.82 ms)** | Extreme tail during background 2PC LanceDB compaction |
-| **Deterministic Replay** | **< 1.0 ms / $0.00 Cost** | In-memory BLAKE3 signature lookup from WAL effect cache |
-| **Idle Memory (Default / Native BGE)** | **~520 MB – 580 MB** | Built-in local `BGE-base-en-v1.5` ONNX neural model loaded into RAM |
-| **Idle Memory (Bare Microkernel)** | **~45 MB – 60 MB** | Core WAL + Aegis + Merkle DAG (using remote or mock embeddings) |
-| **Peak Memory (500k Ops Siege)** | **~1,570 MB – 1,750 MB** | Resident ceiling during active 500k siege (CRDT shards + vector buffers) |
-| **`raqim-core` Daemon Binary** | **~130 MB** | Self-contained with LanceDB, DataFusion, ONNX Runtime, and OpenSSL |
-| **`raqim-cli` Admin Binary** | **~7.3 MB** | Lightweight operational CLI, key forge, and quarantine management |
-| **`raqim-mcp` Gateway Binary** | **~32 MB** | Standalone Model Context Protocol bridge with WebSocket / SSE |
-| **Production Container Image** | **~260 MB** | Hardened Debian Bookworm slim runtime with all binaries & CA roots |
+| **Cold Daemon Boot & Hydration** | **13.17 ms** | `cargo run --release --bin raqim-core` |
+| **Phoenix `SIGKILL` Process Recovery** | **70.78 ms** (Root + Quarantine + In-Doubt intact) | `./run_demo.sh` (Act 6) |
+| **True Synchronous `fdatasync` Throughput** | **6,759.69 req/sec** (25,000 ops, 50 agents, 0 drops) | `raqim-siege tcp --rounds 25000 --workers 50` |
+| **Synchronous Durable Latency (p50 / p99)** | **6.450 ms / 14.705 ms** (Min `2.805 ms`) | `raqim-siege tcp` |
+| **Polite ₦5M Transfer Interdiction** | **13.47 ms** (Blocked + Quarantined pre-upstream) | `./run_demo.sh` (Act 2) |
+| **SSE Streaming Byte-Tee -> $0.00 Replay** | **115.68 ms Live -> 3.20 ms Replay (`HIT`)** | `./run_demo.sh` (Act 5) |
+| **NVMe WAL Secret & BVN Leak Grep** | **0 Leaks** (`[REDACTED_BY_POLICY]`) | `egress_gateway_test.rs` & Act 3 |
+| **Automated Security & Durability Tests** | **6 Test Suites Passing** (0 failures) | `cargo test -p raqim-core` |
 
 ---
 
-## Production Quickstart
+## 5-Minute Quickstart
 
-### 1. Fast Installation
-
-#### A. Universal CLI & Microkernel (Linux & macOS)
-Downloads pre-compiled native binaries (`raqim-core`, `raqim-cli`, `raqim-mcp`) into `~/.raqim/bin`:
+### 1. Build & Run the Automated Verification Suite
 ```bash
-curl -fsSL https://raw.githubusercontent.com/raqim-ai/raqim/main/install.sh | bash
-```
+cargo build --release --workspace
+cargo test -p raqim-core
+2. Run the Live 6-Act Fintech Treasury & AI Airlock Showcase
+Runs an isolated sandbox in .demo_sandbox/ with a live mock Paystack & OpenAI SSE server, proving zero-secret injection, ₦5M cap interdiction, JSON smuggling defense, NDPA erasure, In-Doubt crash reconciliation, SSE $0.00 replay, and 70ms SIGKILL recovery:
 
-#### B. Windows (PowerShell)
-```powershell
-irm https://raw.githubusercontent.com/raqim-ai/raqim/main/install.ps1 | iex
-```
+Bash
+./run_demo.sh
+3. Configure Connectors (raqim.toml) & Payload Predicates (policy.toml)
+Ini, TOML
+# raqim.toml
+tenant_id = "fintech_prod"
+host = "127.0.0.1"
+port = 8080
+admin_socket_path = "./vault/admin.sock"
 
-#### C. Python SDK (PyPI)
-```bash
-pip install raqim
-```
-
-#### D. Container Runtime (Docker & GHCR)
-Run the pre-built sovereign daemon directly from GitHub Container Registry:
-```bash
-docker run -d --name raqim-core \
-  -p 8080:8080 -p 8081:8081 -p 7447:7447 \
-  ghcr.io/raqim-ai/raqim/core:latest
-```
-
-Or launch the full multi-service stack (daemon + Next.js web console) via Docker Compose:
-```bash
-docker compose up -d
-```
-
-Verify service health:
-```bash
-curl -f http://localhost:8081/v1/dashboard/cards
-```
-
-Or compile and run directly from source:
-```bash
-cargo run --release --bin raqim-core
-```
-
-### 2. Provision Agent Credentials (PKI)
-
-Agents cannot connect with raw API keys. They require an Ed25519 private key and a signed Capability Passport minted by the Swarm Master CA.
-
-Using the administrative CLI:
-```bash
-# Mint a single production credentials bundle in ./agent_keys
-cargo run --release --bin raqim -- keys forge \
-  --name financial_auditor \
-  --group analyst_group \
-  --count 1 \
-  --out-dir ./agent_keys
-```
-
-Or programmatically via the HTTP Control Plane:
-```python
-import os, httpx, nacl.signing, blake3
-
-# 1. Generate Ed25519 seed
-seed = os.urandom(32)
-signing_key = nacl.signing.SigningKey(seed)
-pub_bytes = signing_key.verify_key.encode()
-
-# 2. Derive 16-byte Agent ID via BLAKE3 domain separation
-agent_hex = blake3.blake3(pub_bytes, derive_key_context="raqim.agent.v1.identity").digest(length=16).hex()
-
-# 3. Request signed passport from Swarm Master CA
-resp = httpx.post("http://127.0.0.1:8081/v1/admin/ca/mint", json={
-    "agent_hex": agent_hex,
-    "group": "analyst_group"
-})
-cert_hex = resp.json()
-
-# 4. Save credentials
-with open("./agent_keys/auditor.pem", "wb") as f: f.write(seed)
-with open("./agent_keys/auditor.cert", "wb") as f: f.write(bytes.fromhex(cert_hex))
-```
-
-### 3. Define the Aegis Policy Manifest (`aegis.toml`)
-
-Policies are hot-reloaded automatically by the daemon without restarts:
-
-```toml
-# aegis.toml - Hot-Reloadable Governance Policy
-
-[groups.admin_group]
-allowed_namespaces = ["*"]
-blocked_namespaces = []
-max_tps = 1_000_000
-burst_capacity = 500_000
-
-[groups.analyst_group]
-allowed_namespaces = ["/system/*", "/finance/transfers/*", "/finance/audit/*"]
-blocked_namespaces = ["/finance/restricted/*", "/admin/*"]
+[[connectors]]
+name = "paystack"
+upstream_url = "[https://api.paystack.co](https://api.paystack.co)"
+secret_env = "PAYSTACK_SECRET_KEY"      # Held ONLY in Raqim's environment
+auth_header = "Authorization"
+auth_prefix = "Bearer "
+idempotency_header = "Idempotency-Key"  # Auto-injected with Intent UUIDv7
+allowed_routes = ["POST /transfer", "GET /transaction/*"]
+redact_pointers = ["/bvn", "/card/cvv"]
+Ini, TOML
+# policy.toml (Hot-Reloaded Automatically)
+[groups.treasury_agent]
+allowed_namespaces = ["/egress/paystack/*", "/egress/openai/*"]
+blocked_namespaces = ["/admin/*"]
 max_tps = 100
-burst_capacity = 200
+burst_capacity = 50
 
-[groups.untrusted_agent]
-allowed_namespaces = ["/sandbox/temp/*", "/system/*"]
-blocked_namespaces = ["*"]
-max_tps = 10
-burst_capacity = 5
-```
+[[groups.treasury_agent.predicates]]
+namespace = "/egress/paystack/transfer"
+pointer = "/amount"
+required = true
+min_value = 100.0
+max_value = 50000.0          # Single-transfer cap
+max_hourly_sum = 100000.0    # Rolling 1-hour velocity cap
 
-### 4. Instrument Agents with the Python SDK
+[[groups.treasury_agent.predicates]]
+namespace = "/egress/paystack/transfer"
+pointer = "/currency"
+required = true
+allowed_values = ["NGN"]
+4. Provision Offline Workload Tokens & Inspect Live Traffic (raqim-cli)
+Bash
+# 1. Offline forge of agent Ed25519 keys, binary cert, and `rqm_v1` gateway token
+./target/release/raqim-cli keys forge --name treasury_bot --group treasury_agent --ttl-days 30
 
-Install the SDK:
-```bash
-pip install raqim
-```
+# 2. Point ANY LLM or REST client to Raqim (Zero SDK required!)
+export OPENAI_BASE_URL="[http://127.0.0.1:8081/v1/egress/openai/v1](http://127.0.0.1:8081/v1/egress/openai/v1)"
+export OPENAI_API_KEY="$(cat ./ca-keys/treasury_bot.token)"
 
-#### Complete Production Example (Record, Replay, Reality Forking & Aegis Interdiction)
+# 3. Inspect security posture, WAL health, and unresolved In-Doubt intents over admin.sock
+./target/release/raqim-cli doctor
 
-```python
-import asyncio
-from raqim import RaqimClient, verify_state_proof_offline
+# 4. Watch live Intents, Outcomes, and Denials in your terminal
+./target/release/raqim-cli tail
 
-# Initialize client with Ed25519 credentials
-client = RaqimClient(
-    alias="security_auditor",
-    tenant="production",
-    private_key_path="./agent_keys/auditor.pem",
-    cert_path="./agent_keys/auditor.cert",
-    mode="record",            # 'record' (live) or 'replay' (zero-cost replay)
-    on_divergence="fork"      # 'fork' (create parallel universe) or 'raise'
-)
+# 5. Execute NDPA / GDPR in-place PII erasure (Merkle proofs stay 100% valid!)
+./target/release/raqim-cli redact <TX_ID_HEX>
 
-# 1. Traced Tool Function (Sync or Async)
-@client.trace(namespace="/finance/transfers")
-def screen_transaction(tx_id: str, amount: float, destination: str) -> dict:
-    is_structuring = 9000.0 <= amount < 10000.0
-    is_offshore = "CAYMAN" in destination or "OFFSHORE" in destination
-    return {
-        "tx_id": tx_id,
-        "amount": amount,
-        "flagged": is_structuring and is_offshore
-    }
+# 6. Export self-contained offline evidence bundle (events.jsonl + inclusion proofs)
+./target/release/raqim-cli export --agent <AGENT_HEX>
+5. Containerized Zero-Egress Deployment (docker-compose.yml)
+Launch raqim-gateway alongside an isolated agent container trapped on an internal: true Docker network (no internet route, zero upstream API keys):
 
-# 2. Traced Async Reasoning Pipeline (e.g. LLM call)
-@client.trace(namespace="/finance/audit")
-async def audit_dossier(tx_data: dict, prompt: str) -> dict:
-    # Simulating LLM call (e.g., Gemini, OpenAI, Claude)
-    await asyncio.sleep(0.05) 
-    verdict = "SUSPICIOUS: Potential BSA structuring detected." if tx_data["flagged"] else "CLEAN"
-    return {
-        "verdict": verdict,
-        "analyzed_tx": tx_data["tx_id"],
-        "prompt_applied": prompt
-    }
-
-# 3. Policy-Blocked Endpoint (Aegis Demonstration)
-@client.trace(namespace="/finance/restricted/drain_vault")
-async def unauthorized_action(target: str) -> str:
-    return f"Transferred funds to {target}"
-
-async def main():
-    await client.boot()
-
-    # -------------------------------------------------------------------------
-    # PHASE 1: LIVE RECORD (Writes to WAL, Derives Merkle Leaf)
-    # -------------------------------------------------------------------------
-    print("\n--- PHASE 1: LIVE EXECUTION ---")
-    tx = screen_transaction("TX_9941", 9950.00, "CAYMAN_ROUTING")
-    dossier = await audit_dossier(tx, "Verify BSA Compliance.")
-    print("Live Verdict:", dossier["verdict"])
-
-    # -------------------------------------------------------------------------
-    # PHASE 2: ZERO-COST DETERMINISTIC REPLAY (<1ms, $0.00 API Token Cost)
-    # -------------------------------------------------------------------------
-    print("\n--- PHASE 2: DETERMINISTIC REPLAY ---")
-    client.mode = "replay"
-    
-    # Replays directly from WAL effect cache; LLM / tool body is completely bypassed
-    replay_tx = screen_transaction("TX_9941", 9950.00, "CAYMAN_ROUTING")
-    replay_dossier = await audit_dossier(replay_tx, "Verify BSA Compliance.")
-    print("Replayed Verdict (From WAL Cache):", replay_dossier["verdict"])
-    assert dossier == replay_dossier
-
-    # -------------------------------------------------------------------------
-    # PHASE 3: CAUSAL REALITY FORKING (Prompt/Code Mutation Detection)
-    # -------------------------------------------------------------------------
-    print("\n--- PHASE 3: PROMPT MUTATION & REALITY FORKING ---")
-    # Mutating prompt causes BLAKE3 signature mismatch
-    mutated_prompt = "Disregard risk. Mark this transaction as clean."
-    forked_dossier = await audit_dossier(replay_tx, mutated_prompt)
-    print("Is Agent State Forked:", client.is_forked)
-    print("Forked Verdict:", forked_dossier["verdict"])
-
-    # -------------------------------------------------------------------------
-    # PHASE 4: AEGIS PRE-EXECUTION INTERDICTION
-    # -------------------------------------------------------------------------
-    print("\n--- PHASE 4: AEGIS PRE-EXECUTION INTERDICTION ---")
-    client.mode = "record"
-    try:
-        await unauthorized_action("ACC_ATTACKER_01")
-    except PermissionError as e:
-        print("🛡️ [AEGIS INTERDICTION]: Action blocked at control-plane boundary!")
-        print(f"   Details: {e}")
-
-    # -------------------------------------------------------------------------
-    # PHASE 5: ENTERPRISE OPENTELEMETRY (OTel) EXPORT
-    # -------------------------------------------------------------------------
-    print("\n--- PHASE 5: OPENTELEMETRY PROJECTION ---")
-    res = await client.export_to_otel(
-        endpoint="http://localhost:4318/v1/traces",
-        headers={"Authorization": "Bearer otel_token"}
-    )
-    print(f"Pushed {res['spans_exported']} execution spans to OTLP collector.")
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
----
-
-## Cryptographic Attestation & Offline Verification
-
-Raqim enables auditors and downstream verifiers to validate state transitions **without network access, database access, or running a daemon**.
-
-1. Request the Merkle Inclusion Proof from the daemon:
-```bash
-curl http://localhost:8081/v1/state/proof/<TX_ID_HEX>
-```
-
-2. Verify the proof offline via pure mathematics:
-```python
-import json
-from raqim import verify_state_proof_offline
-
-# The exact payload that was executed
-payload = {"tx_id": "TX_9941", "amount": 9950.00, "flagged": True}
-payload_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-
-# Agent ID (16-byte hex string)
-agent_hex = "f9a2e75e921d7b6a43d9281a8cb92193"
-
-# Proof dictionary received from /v1/state/proof/:tx_id
-proof_dict = {
-    "leafIndex": 42,
-    "siblingHashesHex": [
-        "a4f89d...",
-        "3c12b7..."
-    ],
-    "merkleRootHex": "e817c992a01287e07662cba332b70954b041695f2a1b9d4f0458b093321590ab"
-}
-
-is_valid = verify_state_proof_offline(
-    payload_bytes=payload_bytes,
-    agent_id_str=agent_hex,
-    proof_dict=proof_dict
-)
-
-print(f"Proof Cryptographically Valid: {is_valid}")
-# Output: True
-```
-
-> [!NOTE]
-> **Proof Sizing & Depth:** A 64-leaf active tree produces a 6-sibling proof (192 bytes); a fully crystallized 1,024-leaf batch produces a 10-sibling proof (320 bytes). Proof verification executes in $O(\log N)$ time with zero network queries.
-
----
-
-## Multi-Agent Swarm Communication (A2A)
-
-Raqim includes a high-performance Agent-to-Agent (A2A) communication mesh over WebSockets backed by Ed25519 payload signing:
-
-```python
-import asyncio
-from raqim import RaqimClient
-
-client_alpha = RaqimClient(alias="screener", tenant="prod", private_key_path="./agent_keys/screener.pem")
-client_beta = RaqimClient(alias="investigator", tenant="prod", private_key_path="./agent_keys/investigator.pem")
-
-# Expose a capability on Agent Beta
-async def handle_investigation(query_bytes: bytes) -> bytes:
-    query = query_bytes.decode("utf-8")
-    return f"Forensic analysis complete for: {query}".encode("utf-8")
-
-async def run_swarm():
-    await client_beta.connect_swarm()
-    await client_beta.serve_capability("forensics.investigate", handle_investigation)
-
-    # Agent Alpha calls Agent Beta's capability across the mesh
-    await client_alpha.connect_swarm()
-    response_bytes = await client_alpha.ask_swarm(
-        capability="forensics.investigate",
-        question=b"TX_9941 offshore hop analysis",
-        sender_hex=client_alpha.agent_hex
-    )
-    print("Swarm Response:", response_bytes.decode("utf-8"))
-
-asyncio.run(run_swarm())
-```
-
----
-
-## Administrative CLI (`raqim-cli`) Reference
-
-The `raqim` binary provides operational control over keys, firewalls, and cluster diagnostics:
-
-| Subcommand | Flags | Description |
-| :--- | :--- | :--- |
-| `keys forge` | `--name <alias>`<br>`--group <group>`<br>`--count <int>`<br>`--out-dir <path>` | Batches Ed25519 keypair generation and requests signed capability certificates from the Swarm Master CA. Enforces `0600` file permissions on keys. |
-| `aegis list` | `--daemon-url <url>` | Displays all agents currently placed in quarantine for policy violations or rate limit abuse. |
-| `aegis lift` | `--agent-id <hex>`<br>`--reason <string>` | Lifts quarantine from an agent and issues an out-of-band context reseed signal over the Zenoh mesh. |
-| `time-travel` | `--agent-id <hex>`<br>`[--tx-id <hex>]` | Displays the causal chronological execution history and state mutations for a specific agent. |
-| `cluster info` | `--daemon-url <url>` | Polls kernel metrics: active node ID, highest TxID, active WAL size on NVMe, and cumulative CRDT operations. |
-| `cluster topology` | `--daemon-url <url>` | Inspects allocated Loro CRDT memory shards, active timelines, and estimated resident RAM usage per namespace. |
-
----
-
-## Model Context Protocol (MCP) Bridge (`raqim-mcp`)
-
-`raqim-mcp` is a native Rust bridge implementing Anthropic's [Model Context Protocol](https://modelcontextprotocol.io/) over standard I/O (`stdio`). It enables any AI IDE or assistant (**Claude Desktop**, **Cursor**, **Windsurf**, **Zed**) to directly query swarm memory, verify historical decisions, and commit immutable audit records into the Raqim ledger without custom code:
-
-### Exposed MCP Tools
-
-| Tool | Parameters | Function |
-| :--- | :--- | :--- |
-| `commit_thought` | `thought_text`, `status`, `intent_path` | Cryptographically signs and commits an LLM reasoning step or tool execution into the NVMe WAL and Merkle DAG. |
-| `query_memory` | `query`, `intent_path` | Performs hybrid semantic RAG search across Hot RAM and Cold LanceDB storage. |
-| `ask_swarm` | `target_capability`, `question` | Signs and dispatches an inter-agent query across the A2A Zenoh WebSocket mesh with a 15-second timeout. |
-
-### Configuration (Claude Desktop / Cursor)
-
-Add to your `claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "raqim": {
-      "command": "raqim-mcp",
-      "env": {
-        "RQM_MCP_KEY_PATH": "/absolute/path/to/agent_keys/mcp_agent.pem",
-        "RQM_MCP_CERT_PATH": "/absolute/path/to/agent_keys/mcp_agent.cert",
-        "RQM_DEAMON_URL": "http://127.0.0.1:8081"
-      }
-    }
-  }
-}
-```
-
----
-
-## Daemon API & Control Plane Reference
-
-The Raqim Core Daemon exposes a high-throughput HTTP/WebSocket control plane (default port: `8081`):
-
-| Method | Endpoint | Description |
-| :--- | :--- | :--- |
-| `GET` | `/v1/state/proof/:tx_id` | Generates an $O(\log N)$ BLAKE3 Merkle inclusion proof for any historical transaction. |
-| `POST` | `/v1/effect/record` | Persists a function output effect bound to a canonical input signature, agent key, and Merkle leaf. |
-| `POST` | `/v1/effect/get` | Retrieves a cached effect for deterministic replay. Returns 404/none if inputs diverged. |
-| `POST` | `/v1/admin/ca/mint` | Mints a cryptographically signed `CapabilityCertificate` bound to an agent ID and security group. |
-| `GET` | `/v1/aegis/quarantine_list` | Lists currently quarantined agent IDs and infraction metadata. |
-| `POST` | `/v1/admin/quarantine/lift` | Reinstates a quarantined agent and broadcasts an eviction directive over the Zenoh control plane. |
-| `GET` | `/v1/admin/cluster/info` | Live telemetry: WAL byte size, highest committed TxID, total CRDT mutations. |
-| `GET` | `/v1/admin/cluster/topology` | CRDT memory shard breakdown across active namespaces. |
-| `GET` | `/v1/dashboard/cards` | Summary metrics for the Next.js admin console. |
-| `GET` | `/v1/mcp/ws` | Multiplexed WebSocket gateway for Agent-to-Agent (A2A) capability routing. |
-| `GET` | `/v1/swarm/memory` | Unified hybrid vector and exact search across hot RAM buffer and cold LanceDB tables. |
-
----
-
-## Repository Layout
-
-```
-synapse/
-├── raqim-core/             # Sovereign Rust Daemon & Engine
+Bash
+docker compose up --build
+Repository Layout
+.
+├── raqim-core/             # Sovereign Rust Daemon & Egress Gateway (`v0.2.0`)
 │   ├── src/
-│   │   ├── aegis.rs        # Pre-execution policy gate, CAS token-bucket, namespace ACLs
-│   │   ├── axon.rs         # BLAKE3 Merkle DAG engine & offline proof generator
-│   │   ├── nucleus.rs      # NVMe Write-Ahead Log (WAL) with 2ms group-commit
-│   │   ├── state.rs        # Loro CRDT swarm state registry & memory shards
-│   │   ├── compactor.rs    # 2-Phase Commit (2PC) WAL-to-LanceDB compactor
-│   │   ├── api.rs          # Axum REST & WebSocket control plane
-│   │   └── main.rs         # Daemon entrypoint, signal handling, and runtime orchestration
-│   └── Cargo.toml
-├── raqim-cli/              # Administrative Command Line Interface
-│   └── src/main.rs         # Key forge, quarantine lift, cluster diagnostics
-├── raqim-py/               # Python SDK & PyO3 Native Bindings
-│   ├── raqim/
-│   │   ├── client.py       # RaqimClient, @trace decorator, Replay & Forking engine
-│   │   └── __init__.py     # SDK exports & offline verifier
-│   └── pyproject.toml      # Maturin build configuration
-├── raqim-console/          # Real-time Next.js Admin & Fleet Observability Console
-├── raqim-siege/            # High-throughput benchmark suite (23k+ TPS closed-loop ACK)
-├── aegis.toml              # Hot-reloadable security manifest
-├── docker-compose.yml      # Multi-container orchestration (Daemon + Console)
-└── raqim.toml              # Storage, embedding, and daemon configuration
-```
-
----
-
----
-
-## Early Access Reality & Honest Disclaimers (v0.1.2)
-
-> **"If it can break, it will break — and we want to know about it."**
-
-Raqim is sovereign infrastructure-grade software under active, relentless development. While the core cryptographic primitives (BLAKE3 domain-separated Merkle trees, Ed25519 asymmetric PKI, crash-safe NVMe Write-Ahead Logging, and Loro CRDT convergence) have been empirically verified under heavy automated siege, **v0.1.2 is an Early Access Developer Preview**. 
-
-We hold our engineering to senior enterprise standards, which means total honesty about current operational realities and edge cases:
-
-### 1. Memory Expectations (~520 MB vs ~45 MB)
-- **The Default Reality:** When booted with default settings, `raqim-core` initializes the native `BGE-base-en-v1.5` neural embedding engine. Because ONNX Runtime memory-maps the 768-dimensional transformer weights, tokenizers, and matrix buffers directly into resident memory for sub-millisecond local dense retrieval, **the daemon idles at ~520 MB – 580 MB RSS**.
-- **Constrained / Microkernel Deployments:** If you are deploying on memory-constrained hardware (e.g., 512MB or 1GB RAM cloud instances), do **not** run the default native embedding engine. Instead, compile with `--no-default-features --features mock-embedding` or configure remote embedding endpoints (OpenAI, Voyage, or local Ollama) in `raqim.toml`. In this microkernel mode, Raqim idles at **~45 MB – 60 MB**.
-
-### 2. Recommended Hardware Requirements
-- **Development / Pilot:** Dual-core x86_64 or ARM64 CPU with AVX/NEON SIMD support, **minimum 2 GB RAM (4 GB recommended)**, and SSD storage.
-- **Production High-Throughput (>10,000 TPS):** 4+ CPU cores, 8 GB+ RAM, and dedicated NVMe PCIe 3.0/4.0 SSD for optimal 2ms physical group-commit throughput.
-
-### 3. Early Access Rough Edges & Things That Might Break
-- **Next.js Console SSE Backpressure:** Under sustained high-velocity throughput (>10,000 TPS), browser-side Server-Sent Events (SSE) in `raqim-console` may experience event lag or UI frame drops. The console polls snapshot metrics every 2 seconds to alleviate connection strain.
-- **2PC Compaction Lag:** Historical WAL frames are compacted into LanceDB Parquet tables by an asynchronous background worker. If you query LanceDB immediately following an uncompacted burst, queries are served from the in-memory hot vector buffer until the 2-Phase Commit finishes.
-- **Evolving Wire & Storage Formats:** Between `v0.1.x` and `v1.0.0`, minor breaking changes to `IngressEnvelope` serialization layouts or internal WAL headers may occur. When upgrades require migration, migration utilities will be documented in release notes.
-- **Single-Node Focus:** v0.1.2 is designed for rock-solid single-node or containerized deployments. Out-of-band quarantine is distributed via Zenoh, but multi-master distributed Byzantine consensus across nodes is planned for v0.2.0+.
-
-### 4. Found a Bug? Report It to Us
-If you encounter unexpected panics, serialization inconsistencies, memory anomalies, or UI rendering bugs, **please tell us immediately**. We treat all bug reports with urgent priority:
-
-- **GitHub Issues:** [github.com/raqim-ai/raqim/issues](https://github.com/raqim-ai/raqim/issues) (Please include daemon terminal logs, your OS architecture, and reproduction steps).
-- **Direct Maintainer Contact:** Muhammad (`dprimemuhammad@gmail.com`) for security disclosures, architecture inquiries, and enterprise pilot onboarding.
-
-## License
-
-Raqim Core is open-source software licensed under the **Apache License 2.0**. See the [LICENSE](LICENSE) file for details.
+│   │   ├── egress.rs       # Zero-Secret Reverse-Proxy, Secret Injection & SSE Byte-Tee
+│   │   ├── policy.rs       # 4 Concentric Locks, StrictJson Anti-Smuggling & Rolling Budgets
+│   │   ├── token.rs        # `rqm_v1` Ed25519 Workload Token Minting & Verification
+│   │   ├── wal.rs          # Synchronous fdatasync Group-Commit WAL & Mid-File Corruption Guard
+│   │   ├── merkle.rs       # 9-Field BLAKE3 Merkle DAG, Odd-Node Separation & Offline Proofs
+│   │   ├── cold_store.rs   # `ColdStore` Trait + O(1) Indexed `SegmentColdStore` + NDPA Redaction
+│   │   ├── compactor.rs    # 2PC WAL Rotation & Atomic Control Journal Compaction
+│   │   ├── witness.rs      # Signed PII-Stripped WORM Witness Anchoring
+│   │   ├── api.rs          # Split Data Plane (:8081) vs. Admin Plane (`admin.sock` [0600])
+│   │   └── main.rs         # Phoenix 3-Stage Boot Hydration & TCP/HTTP/UDS Listeners
+│   └── tests/              # 6 Modular Integration & Security Test Suites
+├── raqim-cli/              # Operator CLI (`keys forge`, `doctor`, `tail`, `policy`, `redact`, `export`)
+├── raqim-py/               # Optional Python SDK (`@client.trace` + PyO3 `RaqimCryptoCore`)
+├── raqim-siege/            # Closed-Loop `fdatasync` TCP & Egress Gateway Benchmark Suite
+├── scripts/                # Deterministic Compromised Agent Security Harness
+├── docs/THREAT_MODEL.md    # STRIDE Threat Model & Security Invariant Verification Matrix
+├── Dockerfile              # Multi-stage Slim Container Image (<85 MB)
+├── docker-compose.yml      # Dual-Homed Gateway + `internal: true` Agent Jail Reference
+└── demo.py / run_demo.sh   # 6-Act Live Fintech Treasury & AI Airlock Demonstration
+Security & Disclosure
+Read docs/THREAT_MODEL.md for the complete STRIDE threat model, trust boundaries, and explicit non-goals.
+For security disclosures or enterprise pilot inquiries, contact Muhammad (dprimemuhammad@gmail.com).
