@@ -4,8 +4,8 @@ build-backend = "maturin"
 
 [project]
 name = "raqim"
-version = "0.1.2"
-description = "Sovereign Flight Recorder & Crytographic Governance Mesh for AI Agents"
+version = "0.2.0"
+description = "Zero-Secret AI Egress Gateway, Pre-Execution Policy Gate & Cryptographic Flight Recorder"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

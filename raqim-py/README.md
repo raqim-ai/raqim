@@ -1,6 +1,6 @@
-# Raqim Python SDK (رَقِيم)
+# Raqim Python SDK (رَقِيم) — `v0.2.0`
 
-> **Deterministic flight recorder, cryptographic zero-trust runtime, and zero-cost replay engine for autonomous AI agents.**
+> **Zero-secret egress airlock, pre-execution policy gate, and deterministic flight recorder for autonomous AI agents.**
 
 [![PyPI](https://img.shields.io/pypi/v/raqim.svg)](https://pypi.org/project/raqim/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
@@ -10,13 +10,12 @@
 
 ## Overview
 
-The `raqim` Python package provides high-performance, native bindings (powered by PyO3 and Rust) to interact with the **Raqim Core Daemon**. It intercepts agent thoughts, tool invocations, and state mutations at the process boundary, providing:
+The `raqim` Python package provides native PyO3/Rust bindings and an async client for the **Raqim Core Daemon (`v0.2.0`)**:
 
-1. **Cryptographic Identity (PKI):** Ed25519 asymmetric signatures and Swarm Master CA-signed capability certificates for every agent.
-2. **Pre-Execution Firewall (Aegis):** Atomic token-bucket rate limiting and wildcard namespace Access Control Lists (ACLs) enforced before tools execute.
-3. **Deterministic Replay ($0.00 Token Cost):** Bit-for-bit replay of historical agent runs in `<1ms` without re-querying external LLM APIs.
-4. **Causal Reality Forking:** Automatic branching into isolated parallel timelines (`phantom_`) when prompt or code mutations are detected.
-5. **Offline Mathematical Attestation:** Verify Merkle inclusion proofs offline with zero network calls via `verify_state_proof_offline`.
+1. **Zero-Secret Egress Airlock (`client.egress_request`):** Route outbound payment and LLM calls (`/v1/egress/{connector}/{path}`) using a short-lived `rqm_v1` Ed25519 workload token while the Rust daemon injects upstream API keys (`sk_live_...`, `OPENAI_API_KEY`) and deterministic `Idempotency-Key` headers.
+2. **Pre-Execution Policy Gate:** Enforces route allowlists, strict anti-smuggling JSON parsing, RFC 6901 JSON-Pointer value caps (`/amount <= 50000`), and rolling 1-hour velocity budgets before any side effect leaves the host.
+3. **Deterministic `$0.00` Replay & Causal Forking (`@client.trace`):** Replay recorded tool calls and streamed SSE LLM responses in milliseconds with zero upstream API cost, or automatically branch onto a `phantom_` timeline when inputs diverge.
+4. **Offline 9-Field BLAKE3 Merkle Verification (`verify_state_proof_offline`):** Verify inclusion proofs offline—including records that have undergone in-place **NDPA 2023 / GDPR** PII crypto-shredding (`payload_bytes=None`).
 
 ---
 
@@ -26,118 +25,80 @@ The `raqim` Python package provides high-performance, native bindings (powered b
 pip install raqim
 ```
 
+To build from source inside a virtual environment:
+
+```bash
+cd raqim-py
+maturin develop --release
+```
+
 ---
 
 ## Quickstart
 
-### 1. Initialize Client with Cryptographic Credentials
+### 1. Zero-Secret Payment & LLM Egress Proxy
 
 ```python
 import asyncio
 from raqim import RaqimClient
 
-client = RaqimClient(
-    alias="financial_analyst",
-    tenant="production",
-    private_key_path="./agent_keys/analyst.pem",
-    cert_path="./agent_keys/analyst.cert",
-    mode="record",            # 'record' (live) or 'replay' (zero-cost replay)
-    on_divergence="fork"      # 'fork' (create parallel branch) or 'raise'
-)
-```
-
-### 2. Trace Tools & LLM Pipelines
-
-Decorate any synchronous or asynchronous tool function with `@client.trace`:
-
-```python
-@client.trace(namespace="/finance/transfers")
-def screen_transaction(tx_id: str, amount: float, destination: str) -> dict:
-    is_flagged = amount >= 10000.0 or "OFFSHORE" in destination
-    return {
-        "tx_id": tx_id,
-        "amount": amount,
-        "flagged": is_flagged
-    }
-
-@client.trace(namespace="/finance/audit")
-async def audit_dossier(tx_data: dict, prompt: str) -> dict:
-    # Simulates an LLM call (e.g. Gemini, OpenAI, Claude)
-    await asyncio.sleep(0.05)
-    verdict = "FLAGGED" if tx_data["flagged"] else "CLEAN"
-    return {
-        "verdict": verdict,
-        "tx_id": tx_data["tx_id"]
-    }
-```
-
-### 3. Execution, Replay & Reality Forking
-
-```python
 async def main():
+    client = RaqimClient(
+        alias="treasury_primary",
+        tenant="fintech_prod",
+        private_key_path="./ca-keys/treasury_primary.pem",
+        cert_path="./ca-keys/treasury_primary.cert",
+        workload_token="rqm_v1.<claims_b64>.<ed25519_sig_b64>",
+        daemon_host="127.0.0.1",
+        tcp_port=8080,
+        http_port=8081,
+    )
     await client.boot()
 
-    # PHASE 1: Live Record (commits to WAL and derives BLAKE3 Merkle leaf)
-    tx = screen_transaction("TX_1001", 12500.0, "OFFSHORE_ROUTING")
-    res = await audit_dossier(tx, "Check AML compliance.")
-    print("Live Result:", res)
+    # Agent holds ZERO Paystack keys; Raqim checks policy, scrubs `/bvn` pre-WAL,
+    # binds an Intent UUIDv7 as `Idempotency-Key`, and injects `Bearer sk_live_...`
+    resp = await client.egress_request(
+        "POST",
+        "paystack",
+        "/transfer",
+        json_body={
+            "amount": 25000,
+            "currency": "NGN",
+            "recipient": "RCP_VENDOR_LAGOS_01",
+            "bvn": "22345678901",
+        },
+        step_ordinal=1,
+    )
+    print("Status:", resp.status_code, "Sealed TxID:", resp.headers.get("x-raqim-tx-id"))
 
-    # PHASE 2: Zero-Cost Deterministic Replay (<1ms, $0 API cost)
-    client.mode = "replay"
-    replayed = await audit_dossier(tx, "Check AML compliance.")
-    print("Replayed Result (from WAL cache):", replayed)
-    assert res == replayed
-
-    # PHASE 3: Causal Reality Forking (Prompt Divergence)
-    mutated = await audit_dossier(tx, "Ignore risk guidelines.")
-    print("Is Agent Forked:", client.is_forked)
-    print("Forked Result:", mutated)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+asyncio.run(main())
 ```
 
----
-
-## Offline Mathematical Proof Verification
-
-Auditors can mathematically verify state transitions offline without network access or running a server:
+### 2. Offline Merkle Proof Verification (Pre- & Post-NDPA Redaction)
 
 ```python
-import json
 from raqim import verify_state_proof_offline
 
-payload = {"tx_id": "TX_1001", "amount": 12500.0, "flagged": True}
-payload_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-
-# Proof received from GET /v1/state/proof/:tx_id
-proof_dict = {
-    "leafIndex": 42,
-    "siblingHashesHex": ["a4f89d...", "3c12b7..."],
-    "merkleRootHex": "e817c992a01287e07662cba332b70954b041695f2a1b9d4f0458b093321590ab"
-}
-
-is_valid = verify_state_proof_offline(
-    payload_bytes=payload_bytes,
-    agent_id_str="f9a2e75e921d7b6a43d9281a8cb92193",
-    proof_dict=proof_dict
+# 1. Verify full payload + 9-field execution envelope against signed Merkle root
+assert verify_state_proof_offline(
+    payload_bytes=raw_response_bytes,
+    agent_id_str=client.agent_hex,
+    proof_dict=proof,
 )
 
-print(f"Proof Cryptographically Valid: {is_valid}")
-# Output: True
+# 2. After NDPA/GDPR in-place erasure (`raqim-cli redact <tx_id>`),
+# pass `payload_bytes=None` to verify envelope inclusion without raw PII:
+assert verify_state_proof_offline(
+    payload_bytes=None,
+    agent_id_str=client.agent_hex,
+    proof_dict=redacted_proof,
+)
 ```
 
 ---
 
-## Documentation & Repository
+## Repository & Documentation
 
-For complete architecture documentation, benchmark harnesses, and daemon source code, visit:
 - **GitHub Repository:** [github.com/raqim-ai/raqim](https://github.com/raqim-ai/raqim)
-- **Issue Tracker:** [github.com/raqim-ai/raqim/issues](https://github.com/raqim-ai/raqim/issues)
-
----
-
-## License
-
-Licensed under the **Apache License, Version 2.0**. See the LICENSE file for details.
-
+- **Threat Model:** [docs/THREAT_MODEL.md](https://github.com/raqim-ai/raqim/blob/main/docs/THREAT_MODEL.md)
+- **License:** Apache-2.0

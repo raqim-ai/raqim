@@ -5452,7 +5452,7 @@ dependencies = [
 
 [[package]]
 name = "raqim-core"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -5490,7 +5490,7 @@ dependencies = [
 
 [[package]]
 name = "raqim-py"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "base64 0.23.1",
  "blake3",

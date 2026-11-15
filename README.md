@@ -9,6 +9,10 @@
 [![Durable Throughput](https://img.shields.io/badge/True_fdatasync_ACK-7%2C175_TPS-brightgreen)](#verified-hardware-benchmarks-v020)
 [![Replay Cost](https://img.shields.io/badge/Deterministic_Replay-%240.00_Cost-success)](#verified-hardware-benchmarks-v020)
 
+<p align="center">
+  <img src="assets/raqim-thumbnail.svg" width="100%" alt="Exposed Agent Keys vs Raqim v0.2.0 Airlock" />
+</p>
+
 ---
 
 ## The Problem: Agents With Keys and Direct Internet Access
@@ -113,8 +117,13 @@ cargo test -p raqim-core
 Runs an isolated sandbox in `.demo_sandbox/` with a live mock Paystack & OpenAI SSE server, proving zero-secret injection, ₦5M cap interdiction, JSON smuggling defense, NDPA erasure, `In-Doubt` crash reconciliation, SSE `$0.00` replay, and `SIGKILL` Phoenix recovery:
 
 ```bash
-./run_demo.sh
+./run_demo.sh      # Automated 6-Act verification run
+./run_show.sh      # Self-paced interactive walkthrough (press Enter per Act)
 ```
+
+<p align="center">
+  <img src="assets/demo.gif" width="100%" alt="Raqim v0.2.0 Live Terminal Showcase" />
+</p>
 
 ### 3. Configure Connectors (`raqim.toml`) & Payload Predicates (`policy.toml`)
 
