@@ -113,8 +113,26 @@ enum PolicyAction {
     Metrics,
 }
 
-/// Sends an uthenticated HTTP/1.1 request over the local Unix Domain Socket
-#[cfg(unix)]
+#[allow(dead_code)]
+async fn connect_admin_tcp(socket_path: &str) -> Result<tokio::net::TcpStream, anyhow::Error> {
+    let addr = if socket_path.contains(':')
+        && !socket_path.contains('/')
+        && !socket_path.contains('\\')
+    {
+        socket_path
+    } else {
+        "127.0.0.1:8082"
+    };
+    tokio::net::TcpStream::connect(addr).await.map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to connect to Windows Admin Loopback '{}' ({}). Is raqim-core running?",
+            addr,
+            e
+        )
+    })
+}
+
+/// Sends an authenticated HTTP/1.1 request over the Admin Plane (Unix Socket on Unix; 127.0.0.1:8082 loopback TCP on Windows)
 async fn send_admin_uds_request(
     socket_path: &str,
     admin_secret: &str,
@@ -122,6 +140,7 @@ async fn send_admin_uds_request(
     path: &str,
     json_body: Option<&Value>,
 ) -> Result<(u16, String), anyhow::Error> {
+    #[cfg(unix)]
     let mut stream = UnixStream::connect(socket_path).await.map_err(|e| {
         anyhow::anyhow!(
             "Failed to connect to Admin Unix Socket '{}' ({}). Is raqim-core running?",
@@ -129,6 +148,9 @@ async fn send_admin_uds_request(
             e
         )
     })?;
+
+    #[cfg(not(unix))]
+    let mut stream = connect_admin_tcp(socket_path).await?;
 
     let body_bytes = match json_body {
         Some(val) => serde_json::to_vec(val)?,

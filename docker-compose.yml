@@ -62,3 +62,5 @@ networks:
     internal: true
   egress_wan_net:
     driver: bridge
+
+    driver: bridge

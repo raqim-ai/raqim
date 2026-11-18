@@ -18,7 +18,7 @@ use raqim_core::{execute_raqim_cascade, ExecutionRecord, IngressEnvelope, System
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+
 use std::{eprintln, fs, println};
 
 #[cfg(unix)]
@@ -494,6 +494,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sock_display
             );
             axum::serve(uds_listener, admin_app).await.unwrap();
+        });
+    }
+
+    #[cfg(not(unix))]
+    {
+        let admin_port = config.port + 2;
+        let admin_app = build_admin_router(api_state.clone());
+        tokio::spawn(async move {
+            let addr: std::net::SocketAddr = format!("127.0.0.1:{}", admin_port).parse().unwrap();
+            let listener = tokio::net::TcpListener::bind(addr)
+                .await
+                .expect("Failed to bind Windows Loopback Admin Listener");
+            println!(
+                "[SECURITY] Operator Admin Loopback locked to {} (Bearer Auth)",
+                addr
+            );
+            axum::serve(listener, admin_app).await.unwrap();
         });
     }
 

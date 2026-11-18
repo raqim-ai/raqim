@@ -45,6 +45,6 @@ tower-http = { version = "0.5", features = ["catch-panic"] }
 [dev-dependencies]
 tower = {version = "0.5", features = ["util"]}
 
-[build-dependencies]
+[target.'cfg(target_os = "linux")'.build-dependencies]
 cc = "1.0"
 

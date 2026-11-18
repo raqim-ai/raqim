@@ -56,3 +56,6 @@ USER raqim:raqim
 ENV RAQIM_ENV=production
 ENTRYPOINT ["/usr/local/bin/raqim-core"]
 CMD ["--host", "0.0.0.0"]
+
+CMD ["--host", "0.0.0.0"]
+ENTRYPOINT ["/usr/local/bin/raqim-core"]
