@@ -1,0 +1,21 @@
+[groups.admin_group]
+allowed_namespaces = ["*"]
+blocked_namespaces = []
+max_tps = 1000
+burst_capacity = 500
+
+[groups.openai_agent]
+allowed_namespaces = ["/egress/openai/*"]
+blocked_namespaces = ["/admin/*"]
+max_tps = 10
+burst_capacity = 10
+
+# Enforces per-request and 1-hour rolling `max_tokens` limits on outbound JSON bodies.
+# `required = true` closes the bypass where an agent omits `max_tokens` altogether.
+[[groups.openai_agent.predicates]]
+namespace = "/egress/openai/v1/chat/completions"
+pointer = "/max_tokens"
+required = true
+min_value = 1.0
+max_value = 1000.0
+max_hourly_sum = 10000.0

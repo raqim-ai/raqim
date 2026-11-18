@@ -30,7 +30,7 @@ If a prompt-injected agent holds `PAYSTACK_SECRET_KEY` or `OPENAI_API_KEY` in it
 
 **Raqim** eliminates that trust model:
 
-> **Your agent holds zero upstream secrets and has zero direct internet access.** Every outbound API call routes through `raqim-core`, passes four deterministic security locks, writes a crash-safe `Intent` ahead to NVMe, executes with credentials the agent never sees, and seals an offline-verifiable BLAKE3 Merkle proof.
+> **Your agent holds zero upstream secrets and has zero direct internet access.** Every outbound API call routes through `raqim-core`, passes four deterministic security locks, writes a crash-safe `Intent` ahead to disk, executes with credentials the agent never sees, and seals an offline-verifiable BLAKE3 Merkle proof.
 
 ---
 
@@ -105,12 +105,23 @@ Every figure below was empirically measured on bare metal (`12th Gen Intel Core 
 | **Authorized Disbursement w/ Key Injection** | **76.03 ms** *(`HTTP 200` + auto-bound `Idempotency-Key`)* | `./run_demo.sh` *(Act 2)* |
 | **Polite ₦5M Transfer Interdiction** | **13.71 ms** *(Blocked + Quarantined pre-upstream)* | `./run_demo.sh` *(Act 2)* |
 | **SSE Streaming Byte-Tee → `$0.00` Replay** | **110.09 ms Live → 3.46 ms Replay (`HIT`)** | `./run_demo.sh` *(Act 5)* |
-| **NVMe WAL Secret & BVN Leak Grep** | **0 Leaks** *(`[REDACTED_BY_POLICY]`)* | [`egress_gateway_test.rs`](raqim-core/tests/egress_gateway_test.rs) & Act 3 |
+| **On-Disk WAL Secret & BVN Leak Grep** | **0 Leaks** *(`[REDACTED_BY_POLICY]`)* | [`egress_gateway_test.rs`](raqim-core/tests/egress_gateway_test.rs) & Act 3 |
 | **Automated Security & Durability Tests** | **6 Integration Test Suites / 10 Tests Passing (`0` failures)** | `cargo test -p raqim-core` |
 
 ---
 
 ## 5-Minute Quickstart
+
+### 0. OpenAI Base-URL Swap (`examples/openai-quickstart`)
+
+Try Raqim in 2 minutes with **zero Raqim SDK in your agent** (includes `--self-test` with no real OpenAI key required, plus live `OPENAI_BASE_URL` instructions):
+
+```bash
+cargo build --release --bin raqim-core --bin raqim-cli
+python3 examples/openai-quickstart/quickstart.py --self-test
+```
+
+See [`examples/openai-quickstart/README.md`](examples/openai-quickstart/README.md) for pointing stock OpenAI / LangChain / `curl` apps directly at `/v1/egress/openai/v1`.
 
 ### 1. Build & Run the Automated Verification Suite
 
@@ -205,12 +216,20 @@ export OPENAI_API_KEY="$(cat ./ca-keys/treasury_bot.token)"
 ./target/release/raqim-cli export --agent <AGENT_HEX>
 ```
 
-### 5. Containerized Zero-Egress Deployment (`docker-compose.yml`)
+### 5. Containerized Deployment (`docker-compose.yml`)
 
-Launch `raqim-gateway` alongside an isolated agent container trapped on an `internal: true` Docker network (no internet route, zero upstream API keys):
+Start the gateway alone on `127.0.0.1:8081` (then forge tokens and inspect health with `raqim-cli` inside the container):
 
 ```bash
-docker compose up --build
+OPENAI_API_KEY="sk-..." docker compose up -d raqim-gateway
+docker exec -it raqim-gateway raqim-cli keys forge --name dev_bot --group openai_agent
+docker exec -it raqim-gateway raqim-cli doctor
+```
+
+Or run the dual-network compromised-agent isolation test (`agent_jail_net` `internal: true`):
+
+```bash
+RAQIM_TOKEN_1="..." RAQIM_TOKEN_2="..." docker compose --profile attack-sim up --build
 ```
 
 ---
@@ -236,6 +255,7 @@ docker compose up --build
 ├── raqim-py/               # Python SDK (`@client.trace` + PyO3 `RaqimCryptoCore`)
 ├── raqim-siege/            # Closed-Loop `fdatasync` TCP & Egress Gateway Benchmark Suite
 ├── scripts/                # Deterministic Compromised Agent Security Harness
+├── examples/openai-quickstart/ # Drop-in `OPENAI_BASE_URL` Quickstart + Self-Test
 ├── docs/THREAT_MODEL.md    # STRIDE Threat Model & Security Invariant Verification Matrix
 ├── Dockerfile              # Multi-stage Slim Debian Runtime Image (`raqim-core` + `raqim-cli`)
 ├── docker-compose.yml      # Dual-Homed Gateway + `internal: true` Agent Jail Reference

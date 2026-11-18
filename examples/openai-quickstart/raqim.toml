@@ -1,0 +1,23 @@
+# Minimal Raqim configuration for protecting OpenAI-compatible API calls.
+# Run `raqim-core` inside this directory with OPENAI_API_KEY set in the daemon env ONLY.
+
+tenant_id = "openai_quickstart"
+host = "127.0.0.1"
+port = 8080
+wal_path = "./production.wal"
+manifest_path = "./compaction.manifest.json"
+witness_path = "./vault/witnesses"
+policy_path = "./policy.toml"
+checkpoint_path = "./vault/state_checkpoint.bin"
+control_journal_path = "./vault/control_journal.bin"
+cold_store_path = "./vault/cold_segments"
+admin_socket_path = "./vault/admin.sock"
+
+[[connectors]]
+name = "openai"
+upstream_url = "https://api.openai.com"
+secret_env = "OPENAI_API_KEY"
+auth_header = "Authorization"
+auth_prefix = "Bearer "
+allowed_routes = ["POST /v1/chat/completions", "POST /v1/responses"]
+redact_pointers = ["/user"]
