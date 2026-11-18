@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Release tag (e.g. v0.1.0)'
+        description: 'Release tag (e.g. v0.2.0)'
         required: false
-        default: 'v0.1.0'
+        default: 'v0.2.0'
 
 permissions:
   contents: write
@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   # =========================================================================
-  # JOB 1: Cross-Platform Native Binaries (raqim-core, raqim-cli, raqim-mcp)
+  # JOB 1: Cross-Platform Native Binaries (raqim-core, raqim-cli)
   # =========================================================================
   build-binaries:
     name: Build Native Binaries (${{ matrix.target }})
@@ -42,114 +42,58 @@ jobs:
             artifact_name: raqim-windows-x86_64
 
     steps:
-
       - name: Free Disk Space (Ubuntu)
-        if: contains(matrix.os, 'ubuntu')
+        if: runner.os == 'Linux'
         run: |
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/share/boost
-
-      - name: Configure 10GB Swap Space (Ubuntu)
-        if: contains(matrix.os, 'ubuntu')
-        run: |
-          sudo swapoff -a || true
-          sudo rm -f /swapfile /mnt/swapfile
-          sudo fallocate -l 10G /mnt/swapfile || sudo dd if=/dev/zero of=/mnt/swapfile bs=1M count=10240
-          sudo chmod 600 /mnt/swapfile
-          sudo mkswap /mnt/swapfile
-          sudo swapon /mnt/swapfile
-          free -h
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost
 
       - name: Checkout Source Code
         uses: actions/checkout@v4
-
-      - name: Configure Strawberry Perl (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: bash
-        run: |
-          if [ -d "/c/Strawberry/perl/bin" ]; then
-            echo "/c/Strawberry/perl/bin" >> $GITHUB_PATH
-          elif [ -d "C:/Strawberry/perl/bin" ]; then
-            echo "C:/Strawberry/perl/bin" >> $GITHUB_PATH
-          fi
 
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install Protobuf Compiler (Cross-Platform)
-        uses: arduino/setup-protoc@v3 
-        with: 
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Install Linux Build Dependencies
-        if: matrix.os == 'ubuntu-latest'
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev protobuf-compiler build-essential
-
-      - name: Fetch Dependencies and Patch Recursion Limits
-        shell: bash
-        run: |
-          cargo fetch --target ${{ matrix.target }}
-          python3 -c "
-          import glob, os
-          pattern = os.path.expanduser('~/.cargo/registry/src/**/lance-*/src/lib.rs')
-          for path in glob.glob(pattern, recursive=True):
-              with open(path, 'r', encoding='utf-8') as f:
-                  code = f.read()
-              if 'recursion_limit' not in code:
-                  with open(path, 'w', encoding='utf-8') as f:
-                      f.write('#![recursion_limit = \"512\"]\n' + code)
-                  print(f'Patched recursion limit in {path}')
-          " 2>/dev/null || python -c "
-          import glob, os
-          pattern = os.path.expanduser('~/.cargo/registry/src/**/lance-*/src/lib.rs')
-          for path in glob.glob(pattern, recursive=True):
-              with open(path, 'r', encoding='utf-8') as f:
-                  code = f.read()
-              if 'recursion_limit' not in code:
-                  with open(path, 'w', encoding='utf-8') as f:
-                      f.write('#![recursion_limit = \"512\"]\n' + code)
-                  print(f'Patched recursion limit in {path}')
-          " 2>/dev/null || true
+          sudo apt-get install -y pkg-config build-essential
 
       - name: Compile Release Binaries
         shell: bash
-        env:
-          CARGO_BUILD_JOBS: 1
         run: |
           cargo build --release --target ${{ matrix.target }} --bin raqim-core
           cargo build --release --target ${{ matrix.target }} --bin raqim-cli
-          cargo build --release --target ${{ matrix.target }} --bin raqim-mcp
 
       - name: Package Binaries (Unix)
-        if: matrix.os != 'windows-latest'
+        if: runner.os != 'Windows'
+        shell: bash
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/raqim-core dist/
           cp target/${{ matrix.target }}/release/raqim-cli dist/
-          cp target/${{ matrix.target }}/release/raqim-mcp dist/
-          cd dist && tar -czvf ../${{ matrix.artifact_name }}.tar.gz *
+          strip dist/raqim-core dist/raqim-cli || true
+          tar -C dist -czvf ${{ matrix.artifact_name }}.tar.gz raqim-core raqim-cli
+          ls -lh ${{ matrix.artifact_name }}.tar.gz
 
       - name: Package Binaries (Windows)
-        if: matrix.os == 'windows-latest'
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist
-          $targetPath = if (Test-Path "target/${{ matrix.target }}/release/raqim-core.exe") { "target/${{ matrix.target }}/release" } else { "target/release" }
-          Copy-Item "$targetPath/raqim-core.exe" dist/
-          Copy-Item "$targetPath/raqim-cli.exe" dist/
-          Copy-Item "$targetPath/raqim-mcp.exe" dist/
+          Copy-Item "target/${{ matrix.target }}/release/raqim-core.exe" dist/
+          Copy-Item "target/${{ matrix.target }}/release/raqim-cli.exe" dist/
           Compress-Archive -Path dist/* -DestinationPath ${{ matrix.artifact_name }}.zip -Force
+          Get-Item ${{ matrix.artifact_name }}.zip
 
       - name: Upload Release Artifacts
         if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.tag_name != '')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag_name || github.ref_name }}
+          generate_release_notes: true
           files: ${{ matrix.artifact_name }}.*
           fail_on_unmatched_files: false
         env:
@@ -164,20 +108,7 @@ jobs:
     steps:
       - name: Free Disk Space (Ubuntu)
         run: |
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/share/boost
-
-      - name: Configure 10GB Swap Space (Ubuntu)
-        run: |
-          sudo swapoff -a || true
-          sudo rm -f /swapfile /mnt/swapfile
-          sudo fallocate -l 10G /mnt/swapfile || sudo dd if=/dev/zero of=/mnt/swapfile bs=1M count=10240
-          sudo chmod 600 /mnt/swapfile
-          sudo mkswap /mnt/swapfile
-          sudo swapon /mnt/swapfile
-          free -h
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost
 
       - name: Checkout Source Code
         uses: actions/checkout@v4
@@ -213,10 +144,10 @@ jobs:
           cache-to: type=gha,mode=max
 
   # =========================================================================
-  # JOB 3: Compile PyO3 C-Extensions & Publish Python Wheel to PyPI
+  # JOB 3: Compile abi3 PyO3 Wheels & Publish to PyPI
   # =========================================================================
   publish-pypi:
-    name: Build & Publish raqim-py (${{ matrix.os }})
+    name: Build raqim-py Wheels (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -224,23 +155,9 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - name: Free Disk Space (Ubuntu)
-        if: matrix.os == 'ubuntu-latest'
+        if: runner.os == 'Linux'
         run: |
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/share/boost
-
-      - name: Configure 10GB Swap Space (Ubuntu)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo swapoff -a || true
-          sudo rm -f /swapfile /mnt/swapfile
-          sudo fallocate -l 10G /mnt/swapfile || sudo dd if=/dev/zero of=/mnt/swapfile bs=1M count=10240
-          sudo chmod 600 /mnt/swapfile
-          sudo mkswap /mnt/swapfile
-          sudo swapon /mnt/swapfile
-          free -h
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost
 
       - name: Checkout Source Code
         uses: actions/checkout@v4
@@ -248,73 +165,34 @@ jobs:
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Protobuf Compiler (Cross-Platform)
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install Linux Build Dependencies
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev protobuf-compiler build-essential
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Fetch Dependencies and Patch Recursion Limits
-        shell: bash
-        run: |
-          cargo fetch --manifest-path raqim-py/Cargo.toml
-          python3 -c "
-          import glob, os
-          pattern = os.path.expanduser('~/.cargo/registry/src/**/lance-*/src/lib.rs')
-          for path in glob.glob(pattern, recursive=True):
-              with open(path, 'r', encoding='utf-8') as f:
-                  code = f.read()
-              if 'recursion_limit' not in code:
-                  with open(path, 'w', encoding='utf-8') as f:
-                      f.write('#![recursion_limit = \"512\"]\n' + code)
-                  print(f'Patched recursion limit in {path}')
-          " 2>/dev/null || python -c "
-          import glob, os
-          pattern = os.path.expanduser('~/.cargo/registry/src/**/lance-*/src/lib.rs')
-          for path in glob.glob(pattern, recursive=True):
-              with open(path, 'r', encoding='utf-8') as f:
-                  code = f.read()
-              if 'recursion_limit' not in code:
-                  with open(path, 'w', encoding='utf-8') as f:
-                      f.write('#![recursion_limit = \"512\"]\n' + code)
-                  print(f'Patched recursion limit in {path}')
-          " 2>/dev/null || true
-
-      - name: Build Wheels with Maturin
+      - name: Build Linux manylinux abi3 Wheel & sdist
+        if: runner.os == 'Linux'
         uses: PyO3/maturin-action@v1
-        env:
-          CARGO_BUILD_JOBS: 1
         with:
-          args: --release --out dist --manifest-path raqim-py/Cargo.toml
-          sccache: 'true'
-          manylinux: off
+          command: build
+          args: --release --out dist --manifest-path raqim-py/Cargo.toml --sdist
+          manylinux: '2014'
 
-      - name: Repair Linux Wheel with Auditwheel
-        if: matrix.os == 'ubuntu-latest'
-        shell: bash
-        run: |
-          pip install auditwheel
-          auditwheel repair dist/*linux_x86_64.whl -w dist/
-          rm -f dist/*linux_x86_64.whl
+      - name: Build macOS / Windows abi3 Wheel
+        if: runner.os != 'Linux'
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist --manifest-path raqim-py/Cargo.toml
 
       - name: Upload Wheels to Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.os }}
-          path: dist/*.whl
+          path: dist/*
 
   release-pypi:
-    name: Publish Wheels to PyPI
+    name: Publish Package to PyPI
     needs: [publish-pypi]
     runs-on: ubuntu-latest
     steps:

@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY Cargo.toml Cargo.lock ./
 COPY raqim-core ./raqim-core
 COPY raqim-cli ./raqim-cli
+COPY raqim-py ./raqim-py
 COPY raqim-siege ./raqim-siege
 
 ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
@@ -23,7 +24,7 @@ RUN cargo build --release --bin raqim-core && \
     strip /usr/src/raqim/target/release/raqim-cli
 
 # ==============================================================================
-# STAGE 2: Hardened Production Runtime (<85 MB Total Image)
+# STAGE 2: Hardened Production Runtime (debian:bookworm-slim + stripped binaries)
 # ==============================================================================
 FROM debian:bookworm-slim AS runtime
 
@@ -47,7 +48,11 @@ VOLUME ["/var/lib/raqim/ca-keys", "/var/lib/raqim/vault"]
 # Expose Binary TCP Ingress (8080) and Agent HTTP Data & Egress Plane (8081)
 EXPOSE 8080 8081
 
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:8081/health || exit 1
+
 USER raqim:raqim
 
 ENV RAQIM_ENV=production
 ENTRYPOINT ["/usr/local/bin/raqim-core"]
+CMD ["--host", "0.0.0.0"]

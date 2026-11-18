@@ -1,34 +1,55 @@
+# Raqim v0.2.0 Docker Compose Stack
+#
+# Quickstart (standalone gateway exposed only on host 127.0.0.1:8081):
+#   OPENAI_API_KEY=sk-... docker compose up -d raqim-gateway
+#   docker exec -it raqim-gateway raqim-cli keys forge --name my_agent --group openai_agent
+#   docker exec -it raqim-gateway raqim-cli doctor
+#
+# Attack Isolation Demo (gateway + network-jailed Python container):
+#   RAQIM_TOKEN_1=... RAQIM_TOKEN_2=... docker compose --profile attack-sim up
+
 services:
   raqim-gateway:
+    image: ghcr.io/raqim-ai/raqim/core:latest
     build:
       context: .
       dockerfile: Dockerfile
     container_name: raqim-gateway
     environment:
       - RAQIM_ENV=production
-      - PAYSTACK_SECRET_KEY=${PAYSTACK_SECRET_KEY:-sk_live_SOVEREIGN_VAULT_SECRET_KEY}
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-sk_proj_SOVEREIGN_OPENAI_SECRET_KEY}
+      - PAYSTACK_SECRET_KEY=${PAYSTACK_SECRET_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
     volumes:
-      - ./ca-keys:/app/ca-keys:ro
-      - ./vault:/app/vault
-      - ./raqim.toml:/app/raqim.toml:ro
-      - ./policy.toml:/app/policy.toml:ro
+      - ./ca-keys:/var/lib/raqim/ca-keys
+      - ./vault:/var/lib/raqim/vault
+      - ./raqim.toml:/var/lib/raqim/raqim.toml:ro
+      - ./policy.toml:/var/lib/raqim/policy.toml:ro
     networks:
       - agent_jail_net
       - egress_wan_net
     ports:
+      - "127.0.0.1:8080:8080"
       - "127.0.0.1:8081:8081"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8081/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   compromised-agent:
+    profiles: ["attack-sim"]
     image: python:3.12-slim
     container_name: compromised-agent
     depends_on:
-      - raqim-gateway
+      raqim-gateway:
+        condition: service_healthy
     environment:
-      # Notice: ZERO real Paystack or OpenAI keys exist in this container!
+      # ZERO real Paystack or OpenAI keys exist inside this jailed container!
+      - RAQIM_GATEWAY_URL=http://raqim-gateway:8081
       - OPENAI_BASE_URL=http://raqim-gateway:8081/v1/egress/openai/v1
       - PAYSTACK_BASE_URL=http://raqim-gateway:8081/v1/egress/paystack
-      - RAQIM_WORKLOAD_TOKEN=${RAQIM_WORKLOAD_TOKEN}
+      - RAQIM_TOKEN_1=${RAQIM_TOKEN_1:-}
+      - RAQIM_TOKEN_2=${RAqim_TOKEN_2:-}
     volumes:
       - ./scripts:/app/scripts:ro
     networks:

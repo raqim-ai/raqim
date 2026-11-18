@@ -11,6 +11,15 @@ cold_store_path = "./vault/cold_segments"
 admin_socket_path = "./vault/admin.sock"
 
 [[connectors]]
+name = "openai"
+upstream_url = "https://api.openai.com"
+secret_env = "OPENAI_API_KEY"
+auth_header = "Authorization"
+auth_prefix = "Bearer "
+allowed_routes = ["POST /v1/chat/completions", "POST /v1/responses"]
+redact_pointers = ["/user"]
+
+[[connectors]]
 name = "paystack"
 upstream_url = "https://api.paystack.co"
 secret_env = "PAYSTACK_SECRET_KEY"
@@ -18,4 +27,4 @@ auth_header = "Authorization"
 auth_prefix = "Bearer "
 idempotency_header = "Idempotency-Key"
 allowed_routes = ["POST /transfer", "GET /transaction/*"]
-redact_pointers = ["/card/cvv", "/bvn"]
+redact_pointers = ["/bvn", "/card/cvv"]

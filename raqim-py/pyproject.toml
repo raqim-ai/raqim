@@ -7,13 +7,17 @@ name = "raqim"
 version = "0.2.0"
 description = "Zero-Secret AI Egress Gateway, Pre-Execution Policy Gate & Cryptographic Flight Recorder"
 readme = "README.md"
+license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
 dependencies = [
     "httpx>=0.27.0",
-    "pydantic>=2.0.0",
-    "python-dotenv>=1.0.0",
-    "langchain-core>=0.2.0"
+    "blake3>=0.4.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/raqim-ai/raqim"
+Repository = "https://github.com/raqim-ai/raqim"
+Issues = "https://github.com/raqim-ai/raqim/issues"
 
 [tool.maturin]
 module-name = "raqim.raqim_core"

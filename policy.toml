@@ -1,4 +1,4 @@
-# Raqim Aegis Cryptographic Firewall & Governance Policy Manifest
+# Raqim Pre-Execution Policy Manifest
 
 [groups.admin_group]
 allowed_namespaces = ["*"]
@@ -6,17 +6,51 @@ blocked_namespaces = []
 max_tps = 1_000_000
 burst_capacity = 500_000
 
+[groups.openai_agent]
+allowed_namespaces = ["/egress/openai/*"]
+blocked_namespaces = ["/admin/*"]
+max_tps = 20
+burst_capacity = 20
+
+[[groups.openai_agent.predicates]]
+namespace = "/egress/openai/v1/chat/completions"
+pointer = "/max_tokens"
+required = true
+min_value = 1.0
+max_value = 1000.0
+max_hourly_sum = 10000.0
+
+[groups.treasury_agent]
+allowed_namespaces = ["/egress/paystack/*", "/egress/openai/*"]
+blocked_namespaces = ["/admin/*"]
+max_tps = 20
+burst_capacity = 20
+
+[[groups.treasury_agent.predicates]]
+namespace = "/egress/paystack/transfer"
+pointer = "/amount"
+required = true
+min_value = 100.0
+max_value = 50000.0
+max_hourly_sum = 100000.0
+
+[[groups.treasury_agent.predicates]]
+namespace = "/egress/paystack/transfer"
+pointer = "/currency"
+required = true
+allowed_values = ["NGN"]
+
 [groups.finance_worker]
-allowed_namespaces = ["/system/*", "/rqm_finance/*", "/finance/*",  "/audit/*"]
+allowed_namespaces = ["/system/*", "/rqm_finance/*", "/finance/*", "/audit/*"]
 blocked_namespaces = ["/finance/restricted/*", "/admin/*"]
-max_tps = 50_000 
-burst_capacity = 100_000 
+max_tps = 50_000
+burst_capacity = 100_000
 
 [groups.analyst_group]
-allowed_namespaces = ["/system/*", "/rqm_finance/*", "/finance/*",  "/audit/*"]
+allowed_namespaces = ["/system/*", "/rqm_finance/*", "/finance/*", "/audit/*"]
 blocked_namespaces = ["/finance/restricted/*", "/admin/*"]
-max_tps = 50_000 
-burst_capacity = 100_000 
+max_tps = 50_000
+burst_capacity = 100_000
 
 [groups.untrusted_agent]
 allowed_namespaces = ["/sandbox/temp/*", "/system/*"]
